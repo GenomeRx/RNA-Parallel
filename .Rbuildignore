@@ -1,0 +1,13 @@
+^.*\.Rproj$
+^\.Rproj\.user$
+^\.git$
+^\.github$
+^\.claude$
+^docs$
+^inst/examples/.*\.html$
+^inst/examples/.*_files$
+^inst/examples/.*_cache$
+^inst/examples/.*\.log$
+^Rplots\.pdf$
+^\..*$
+^tools$

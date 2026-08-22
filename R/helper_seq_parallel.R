@@ -1,0 +1,1187 @@
+## helper_seq_parallel.R
+##
+## Mirrors upstream helper_seq.R. Everything ComBat_seq_parallel needs that is not
+## the entry point itself. Sourcing this file plus ComBat_seq_parallel.R is enough
+## to use the function without installing anything, exactly like upstream.
+##
+## Nothing here reimplements ComBat-seq. Three hot paths are split by row, the common
+## dispersion is dispatched across batches, and each
+## slice is handed to the original ComBat-seq function.
+
+
+# ---- backend resolution ------------------------------------------------------
+
+#' Heads of calls whose head is a bare symbol
+#'
+#' `all.names()` flattens `edgeR::glmFit` into parts that read as reachable, which is exactly
+#' the degradation the rebind gates exist to catch, so only bare heads count. `e[[i]]` is
+#' indexed inline: binding it first makes R treat an empty symbol as a missing argument.
+#' @noRd
+rp_bare_call_heads <- function(e) {
+  if (!is.call(e)) return(character())
+  h <- e[[1L]]
+  out <- if (is.name(h)) as.character(h) else character()
+  for (i in seq_along(e)) {
+    if (is.call(e[[i]])) out <- c(out, rp_bare_call_heads(e[[i]]))
+  }
+  unique(out)
+}
+
+#' Resolve a ComBat-seq backend and its helper
+#'
+#' Finds the ComBat-seq function to run and the `match_quantiles` helper it
+#' needs, taking both from the same environment so the pair can never be drawn
+#' from two different copies of ComBat-seq.
+#'
+#' Two layouts work with no configuration. Bioconductor `sva` keeps `ComBat_seq`
+#' and `match_quantiles` in its namespace. The upstream repository defines both at
+#' top level once `ComBat_seq.R` and `helper_seq.R` are sourced. In both cases
+#' `environment(fn)` already reaches the helpers, so resolving through it avoids
+#' naming a namespace and avoids `:::` altogether.
+#'
+#' @param fn A ComBat-seq function. Defaults to `sva::ComBat_seq` when `sva` is
+#'   installed, otherwise a top-level `ComBat_seq` if one is visible.
+#' @return A list with `fn`, `env` and `match_quantiles`.
+#' @noRd
+combat_backend <- function(fn = NULL) {
+  if (is.null(fn)) {
+    if (requireNamespace("sva", quietly = TRUE)) {
+      fn <- sva::ComBat_seq
+    } else if (exists("ComBat_seq", mode = "function")) {
+      fn <- get("ComBat_seq", mode = "function")
+    } else {
+      stop("no ComBat-seq backend found. Install sva (BiocManager::install(\"sva\")) ",
+           "or source ComBat_seq.R and helper_seq.R from ",
+           "https://github.com/zhangyuqing/ComBat-seq", call. = FALSE)
+    }
+  }
+  if (!is.function(fn)) stop("`fn` must be a function", call. = FALSE)
+
+  env <- environment(fn)
+  if (is.null(env)) {
+    stop("the ComBat-seq backend has no environment, so its helpers cannot be ",
+         "resolved. A primitive or a function stripped by compilation cannot be ",
+         "wrapped this way.", call. = FALSE)
+  }
+
+  # gate: the backend must take the arguments we forward, and match_quantiles must
+  # take the five we split by row. A silent upstream rename or signature change
+  # would otherwise surface as wrong numbers rather than an error.
+  need <- c("counts", "batch", "group", "covar_mod", "full_mod",
+            "shrink", "shrink.disp", "gene.subset.n")
+  missing_args <- setdiff(need, names(formals(fn)))
+  if (length(missing_args)) {
+    stop("this ComBat-seq backend is missing argument(s): ",
+         paste(missing_args, collapse = ", "),
+         ". rnaparallel was written against the 8-argument signature shared ",
+         "by sva 3.54.0 and upstream master.", call. = FALSE)
+  }
+
+  if (!exists("match_quantiles", envir = env, inherits = TRUE)) {
+    stop("could not find `match_quantiles` alongside the ComBat-seq backend. ",
+         "With sva, that means the internal helper was renamed upstream; with a ",
+         "sourced copy, that helper_seq.R was not sourced.", call. = FALSE)
+  }
+  mq <- get("match_quantiles", envir = env, inherits = TRUE)
+  mq_need <- c("counts_sub", "old_mu", "old_phi", "new_mu", "new_phi")
+  if (!identical(names(formals(mq)), mq_need)) {
+    stop("`match_quantiles` has signature (", paste(names(formals(mq)), collapse = ", "),
+         ") but rnaparallel splits it by row on (", paste(mq_need, collapse = ", "),
+         "). Refusing to run rather than pass arguments positionally into a changed ",
+         "function.", call. = FALSE)
+  }
+
+  # A rebind only works while the backend calls these as bare symbols. If upstream ever
+  # namespace-qualifies one, or swaps sapply for vapply, the rebind becomes unreachable and
+  # this package quietly degrades to a pass-through: output stays identical(), every
+  # equivalence test still passes, and nothing is parallelised. Fail loudly instead.
+  reachable <- rp_bare_call_heads(body(fn))
+  rebound <- c("glmFit", "glmFit.default", "match_quantiles",
+               "estimateGLMTagwiseDisp", "sapply", "lapply")
+  unreachable <- setdiff(rebound, reachable)
+  if (length(unreachable)) {
+    stop("this ComBat-seq backend no longer calls ", paste(unreachable, collapse = ", "),
+         " as a bare symbol, so rebinding cannot reach it. The package would run serially ",
+         "while still returning identical() output, which no equivalence test can detect. ",
+         "Refusing to run.", call. = FALSE)
+  }
+
+  list(fn = fn, env = env, match_quantiles = mq)
+}
+
+
+# ---- row chunking ------------------------------------------------------------
+
+#' Split row indices into interleaved chunks
+#'
+#' Chunks are INTERLEAVED, not contiguous blocks, because gene order is not random.
+#' A count matrix that has been filtered or sorted puts the cheap genes together and
+#' the expensive ones together, and `qnbinom` cost rises with count size. Measured on a
+#' matrix sorted by expression, contiguous blocks carried 0.36, 2, 17 and 112 million
+#' counts: a 313x imbalance, so three workers idled while the fourth did the work, and
+#' the speedup fell from 1.66x to 1.47x. Round-robin makes the same split 1.01x even
+#' and is immune to whatever order the caller's genes arrive in.
+#'
+#' The cost is that rows come back permuted, so every caller must restore the original
+#' order after binding. `order(unlist(idx))` does that, and is a no-op for a contiguous
+#' split, which is why the callers apply it unconditionally.
+#'
+#' @param ntag Number of rows (genes).
+#' @param workers Worker count, used when `chunks` is NULL.
+#' @param chunks Chunk count. Clamped to `[1, ntag]`, so it cannot exceed one chunk per gene.
+#'   Concurrency is bounded separately by `workers`, so more chunks than workers means more
+#'   forks at the same concurrency, not more parallelism.
+#' @param interleave Round-robin the rows across chunks. `FALSE` gives the old
+#'   contiguous blocks, which is only useful for reproducing the imbalance.
+#' @param min_rows Smallest number of rows any chunk may hold. The chunk count is
+#'   clamped to `ntag %/% min_rows` so no chunk falls below it. Callers whose vendor
+#'   function branches on block shape pass 2; the default 1 reproduces the old clamp.
+#' @return A list of integer vectors covering `seq_len(ntag)` exactly once.
+#' @noRd
+combat_row_chunks <- function(ntag, workers = 4L, chunks = NULL, interleave = TRUE,
+                              min_rows = 1L) {
+  ntag <- as.integer(ntag)
+  if (ntag < 1L) stop("no rows to split", call. = FALSE)
+  # An unusable `chunks` clamps to one chunk rather than erroring: results stay correct and
+  # only parallelism is lost. Asserted for 0, -5 and NA in test-parallel.R.
+  nch <- suppressWarnings(as.integer(if (is.null(chunks)) workers else chunks))
+  if (is.na(nch)) nch <- 1L
+  min_rows <- max(1L, suppressWarnings(as.integer(min_rows)))
+  if (is.na(min_rows)) min_rows <- 1L
+  # min_rows is an exactness constraint, not a tuning knob. limma's lm.series reaches
+  # stats::lm.fit, whose `if (is.matrix(y) && ny == 1L) y <- drop(y)` demotes a one-gene
+  # block to a vector, flipping sigma from colMeans to mean and dropping the gene name.
+  # Measured: 4080 of 16000 one-gene blocks not identical() to serial. At min_rows = 1
+  # this reduces to the old clamp exactly, so ComBat-seq callers are unaffected.
+  nch <- max(1L, min(nch, ntag %/% min_rows))
+  if (nch == 1L) return(list(seq_len(ntag)))
+  if (interleave) return(unname(split(seq_len(ntag), rep_len(seq_len(nch), ntag))))
+  unname(split(seq_len(ntag), cut(seq_len(ntag), nch, labels = FALSE)))
+}
+
+#' Restore original row order after chunked results are bound together
+#'
+#' A no-op when the split was contiguous, since `unlist(idx)` is then already sorted.
+#' @param idx The chunk list the work was dispatched on.
+#' @return Integer permutation to apply to the bound rows.
+#' @noRd
+combat_row_order <- function(idx) order(unlist(idx, use.names = FALSE))
+
+
+# ---- entry-point prologue -----------------------------------------------------
+
+#' Validate the four shared controls once, identically, for every entry point
+#'
+#' The copies this replaces had already drifted into two textually different variants.
+#' Returns the validated worker count; resolves the backend name in the caller's frame.
+#' @noRd
+rp_prologue <- function(workers) {
+  if (length(workers) != 1L) stop("`workers` must be a single integer", call. = FALSE)
+  if (is.numeric(workers) && is.finite(workers) && workers != trunc(workers)) {
+    stop("`workers` must be a whole number, not ", workers, call. = FALSE)
+  }
+  w <- suppressWarnings(as.integer(workers))
+  if (is.na(w) || w < 1L) stop("`workers` must be a positive integer", call. = FALSE)
+  # a garbage combat.min.* value should refuse at the door, not one dispatch later
+  for (op in c("combat.min.cells", "combat.min.disp.cells", "combat.min.ls.cells",
+               "combat.min.norm.cells", "combat.min.order.cells", "combat.min.glm.cells",
+               "combat.min.dupcor.cells")) {
+    v <- getOption(op)
+    if (!is.null(v)) {
+      vv <- suppressWarnings(as.numeric(v))
+      if (length(vv) != 1L || is.na(vv) || vv < 0) {
+        stop("`", op, "` must be a single non-negative number; got ", deparse(v),
+             call. = FALSE)
+      }
+    }
+  }
+  w
+}
+
+
+# ---- worker cleanup -----------------------------------------------------------
+
+#' Reap the fork children an entry point created, killing any that are stuck
+#'
+#' `mclapply` kills its own children when a call ends cleanly, but a child wedged in a
+#' signal-unsafe state survives that, and survivors accumulate across the many dispatches
+#' one analysis makes. A session that ended holding dozens of them has crashed this
+#' machine. Every entry point snapshots the session's children on entry and reaps only
+#' what appeared since, so a user's own concurrent workers (a `future` plan, their own
+#' `mclapply`) are never touched. `getFromNamespace` rather than `:::`, since `children`
+#' is the one handle base R gives to a fork child that no longer responds.
+#' @noRd
+combat_children <- function() {
+  if (.Platform$OS.type == "windows") return(integer())
+  ch <- tryCatch(utils::getFromNamespace("children", "parallel")(), error = function(e) NULL)
+  vapply(ch, function(p) as.integer(p$pid), integer(1))
+}
+
+#' @noRd
+combat_reap <- function(spare = integer()) {
+  if (.Platform$OS.type == "windows") return(invisible(0L))
+  ch <- tryCatch(utils::getFromNamespace("children", "parallel")(), error = function(e) NULL)
+  ch <- Filter(function(p) !(as.integer(p$pid) %in% spare), ch)
+  n <- length(ch)
+  if (n) {
+    try(suppressWarnings(parallel::mccollect(ch, wait = FALSE)), silent = TRUE)
+    for (p in ch) try(tools::pskill(p$pid, tools::SIGKILL), silent = TRUE)
+    try(suppressWarnings(parallel::mccollect(ch, wait = FALSE)), silent = TRUE)
+  }
+  invisible(n)
+}
+
+
+# ---- cluster reuse ------------------------------------------------------------
+
+# Clusters are cached per (type, size) and reused. Building one is expensive and one
+# ComBat-seq run dispatches twice for the GLM fits, once per batch for the quantile match,
+# once more per batch for tagwise dispersion where that batch has the residual degrees of
+# freedom for it, and once across batches for the common dispersion. So 3 + n_batch +
+# eligible, up to 2 * n_batch + 3: nine on a 3-batch design and 203 on a 100-batch one. Constructing per dispatch paid the cost every one of
+# those times: measured 153 ms for a 4-worker PSOCK cluster, which made socket backends
+# look 25x slower than serial when the frameworks themselves were fine.
+.combat_clusters <- new.env(parent = emptyenv())
+
+#' Get a cached parallel cluster, creating it on first use
+#'
+#' @param ncore Worker count.
+#' @param type Cluster type, `"FORK"` or `"PSOCK"`.
+#' @return A cluster object owned by this package. Do not stop it directly; use
+#'   [combat_cluster_stop()].
+#' @noRd
+combat_cluster <- function(ncore, type = if (.Platform$OS.type == "windows") "PSOCK" else "FORK",
+                           packages = "edgeR") {
+  # One pool per TYPE, not per (type, size). Keying on size too meant trying 2, 4, 6 and 8
+  # workers left four pools and 20 worker processes alive until an explicit stop, on a
+  # machine whose documented worker ceiling exists because forking too wide panics it.
+  key <- type
+  entry <- .combat_clusters[[key]]
+
+  # A pool inherited by a forked child is not ours to use or to stop: the child would race
+  # the parent on the same sockets, and stopping it would kill the parent's workers. Forget
+  # the handle without touching the processes behind it.
+  if (!is.null(entry) && !identical(entry$pid, Sys.getpid())) {
+    rm(list = key, envir = .combat_clusters)
+    entry <- NULL
+  }
+  cl <- entry$cl
+  if (!is.null(cl) && length(cl) != ncore) {
+    try(parallel::stopCluster(cl), silent = TRUE)
+    rm(list = key, envir = .combat_clusters)
+    cl <- NULL
+  }
+  # A cached cluster can be dead if the session forked, or the user stopped it by hand,
+  # or DESYNCHRONIZED if an interrupt left an unread result sitting in a worker socket.
+  # The desynchronized case is the dangerous one: the probe would consume the stale
+  # message, conclude the cluster was healthy, and every later dispatch would return the
+  # PREVIOUS dispatch's chunk with no error. So check what came back, not just that
+  # something did.
+  alive <- !is.null(cl) && tryCatch({
+    res <- parallel::clusterCall(cl, function() TRUE)
+    length(res) == length(cl) && all(vapply(res, isTRUE, logical(1)))
+  }, error = function(e) FALSE)
+  if (!alive) {
+    if (!is.null(cl)) try(parallel::stopCluster(cl), silent = TRUE)
+    # Forked siblings inherit the same precomputed port and collide; retry on a socket
+    # error with a pid-jittered port rather than dying in one sibling.
+    cl <- tryCatch(parallel::makeCluster(ncore, type = type), error = function(e) e)
+    tries <- 0L
+    while (inherits(cl, "error") && grepl("cannot be opened", conditionMessage(cl)) &&
+           tries < 3L) {
+      tries <- tries + 1L
+      port <- 11000L + (Sys.getpid() * 7L + tries * 131L) %% 20000L
+      cl <- tryCatch(parallel::makeCluster(ncore, type = type, port = port),
+                     error = function(e) e)
+    }
+    if (inherits(cl, "error")) stop(cl)
+    assign(key, list(cl = cl, pid = Sys.getpid()), envir = .combat_clusters)
+  }
+  # PSOCK workers start empty, so the packages the closures call must be loaded there.
+  # FORK workers inherit them. Done on every call rather than only at creation: one pool is
+  # cached per TYPE and shared by callers needing different packages, so a cluster built for
+  # an edgeR dispatch would otherwise reach a limma closure with limma absent.
+  if (type == "PSOCK" && length(packages)) {
+    for (pkg in packages) {
+      invisible(parallel::clusterCall(
+        cl, function(p) suppressMessages(requireNamespace(p, quietly = TRUE)), pkg))
+    }
+  }
+  cl
+}
+
+#' Stop and forget every cluster this package cached
+#'
+#' The `foreach` backend reuses a cached cluster rather than building one per dispatch.
+#' Call this when done with a long parallel session, or if a cluster is
+#' misbehaving; the next call rebuilds it. Clusters are also stopped when the
+#' package namespace unloads.
+#'
+#' @details
+#' Building a cluster is expensive and one ComBat-seq run dispatches 3 + n_batch +
+#' eligible tagwise batches, up to 2 * n_batch + 3, so nine on a 3-batch design.
+#' Measured on a 4-worker PSOCK cluster: 153 ms to build, and five dispatches
+#' went from 631 ms to 5 ms once the cluster was reused.
+#'
+#' @return Number of clusters stopped, invisibly.
+#' @export
+combat_cluster_stop <- function() {
+  # the cache holds plain flags beside the cluster handles; sweeping them would delete
+  # registered_by_us before the foreach reset below reads it, and re-arm the one-time messages
+  keys <- setdiff(ls(.combat_clusters),
+                  c("warned_windows", "warned_ecores", "registered_by_us", "perf",
+                    "allcores", "bpparam"))
+  stopped <- 0L
+  for (k in keys) {
+    entry <- .combat_clusters[[k]]
+    # the cache also holds plain flags, and `TRUE$pid` is an error rather than NULL, so a
+    # non-list entry is dropped before anything reads a field off it
+    if (!is.list(entry)) { rm(list = k, envir = .combat_clusters); next }
+    # only stop pools this process created; a handle inherited through a fork belongs to
+    # the parent and stopping it would kill workers the parent is still using
+    if (!identical(entry$pid, Sys.getpid())) { rm(list = k, envir = .combat_clusters); next }
+    ok <- tryCatch({ parallel::stopCluster(entry$cl); TRUE }, error = function(e) FALSE)
+    # forgetting a handle whose stop failed orphans the workers with nothing left that can
+    # kill them, so keep it and let the next call try again
+    if (ok) { rm(list = k, envir = .combat_clusters); stopped <- stopped + 1L }
+  }
+  # Only reset foreach if WE registered it. Doing it unconditionally replaced the backend
+  # of a caller who had registered their own and never used the foreach path here at all.
+  if (isTRUE(.combat_clusters$registered_by_us) &&
+      requireNamespace("foreach", quietly = TRUE)) {
+    try(foreach::registerDoSEQ(), silent = TRUE)
+    .combat_clusters$registered_by_us <- NULL
+  }
+  invisible(stopped)
+}
+
+.onUnload <- function(libpath) combat_cluster_stop()
+
+
+# ---- the one dispatch point --------------------------------------------------
+
+#' Backends this package can dispatch to
+#'
+#' All parallelism in this package funnels through one internal dispatch point, so
+#' supporting another framework is a branch there and nothing else.
+#'
+#' @details
+#' Every backend returns bit-identical results, because each row chunk is a pure
+#' function of its own genes and every backend listed preserves chunk order.
+#'
+#' \describe{
+#'   \item{`mclapply`}{Default. Forks via `parallel::mclapply`. Unix only; falls
+#'     back to serial on Windows.}
+#'   \item{`future`}{`future.apply::future_lapply`. The caller owns the plan, this
+#'     package will not set one. Warns if the plan resolves in one process.}
+#'   \item{`BiocParallel`}{`BiocParallel::bplapply` with `MulticoreParam`. No new
+#'     dependency in practice, since \pkg{sva} depends on it.}
+#'   \item{`foreach`}{`foreach::%dopar%` over a cached cluster from `doParallel`,
+#'     FORK on Unix and PSOCK on Windows. Slower than the vendor on the limma and
+#'     edgeR paths, measured 0.24x to 0.41x against `limma::lmFit` at four workers,
+#'     because `doParallel` serialises each task's closure and the closure captures
+#'     the matrix. Correct, and worth choosing only where a fork is unavailable.}
+#'   \item{`serial`}{Plain `lapply`. Same output, no workers.}
+#' }
+#'
+#' @return Character vector of accepted `parallel_backend` values.
+#' @examples
+#' combat_backends()
+#' @export
+combat_backends <- function() {
+  c("mclapply", "future", "BiocParallel", "foreach", "serial")
+}
+
+#' Apply a function over row chunks, on a chosen backend
+#'
+#' Every backend must satisfy three properties or the identical() promise breaks:
+#' results come back in the order the chunks went in, each chunk is evaluated
+#' exactly once, and no backend rewrites the returned values. Order is the one
+#' most easily lost, which is why nothing here uses an unordered map.
+#'
+#' The chunk bodies contain no RNG, so the choice of backend cannot shift results
+#' through the random stream. ComBat-seq's own `sample()` call lives in
+#' `monte_carlo_int_NB`, on the serial side of the companion.
+#'
+#' @param idx List of index vectors from [combat_row_chunks()].
+#' @param f Function applied to one index vector.
+#' @param workers Maximum concurrent workers.
+#' @param parallel_backend One of [combat_backends()], or a function
+#'   `function(idx, f, workers)` returning a list in the order of `idx`. The
+#'   function form is the extension point: any framework can be plugged in without
+#'   this package growing a branch for it. `options(combat.fork = FALSE)` still
+#'   forces serial, so a custom executor cannot defeat the escape hatch.
+#' @param cells Size of the work being dispatched, in matrix cells. Below
+#'   `getOption("combat.min.cells", 20000)` the dispatch runs serially, because
+#'   the fork costs more than the work it saves. `Inf`, the default, means a
+#'   caller that has not measured its own work size always dispatches.
+#' @return A list, one element per chunk, in order.
+#' @noRd
+combat_parallel_lapply <- function(idx, f, workers,
+                                   parallel_backend = getOption("combat.backend", "mclapply"),
+                                   cells = Inf,
+                                   min_cells = getOption("combat.min.cells", 2e4),
+                                   preschedule = FALSE) {
+  workers <- as.integer(workers)
+  if (is.na(workers)) stop("`workers` must be a positive integer", call. = FALSE)
+
+  # Validate BEFORE the size gate, or validation becomes size-dependent: a misspelled
+  # backend name would be refused on a big matrix and silently accepted on a small one.
+  custom <- is.function(parallel_backend)
+  if (!custom) parallel_backend <- match.arg(parallel_backend, combat_backends())
+
+  # Same reasoning for the packages a named backend needs. Checked below the gate, an
+  # uninstalled framework succeeded quietly on a small dispatch and errored on an
+  # otherwise identical large one, which is the worst possible time to find out.
+  if (!custom) {
+    needs <- switch(parallel_backend, future = "future.apply", BiocParallel = "BiocParallel",
+                    foreach = c("foreach", "doParallel"), character(0))
+    absent <- needs[!vapply(needs, requireNamespace, logical(1), quietly = TRUE)]
+    if (length(absent)) {
+      stop("parallel_backend = \"", parallel_backend, "\" needs ",
+           paste(absent, collapse = " and "), call. = FALSE)
+    }
+  }
+
+  # ComBat-seq calls the hot paths once per BATCH, so a 100-batch run dispatches
+  # thin slices rather than one fat one, and each fork has to earn its cost against
+  # a fraction of a percent of the matrix. Measured on 10-column slices: 0.50x at
+  # 5,000 cells, 0.92x at 10,000, 1.39x at 20,000. Below the threshold this was not
+  # merely slower than it could be, it was slower than not forking at all:
+  # 500 genes x 1000 samples x 100 batches ran at 0.80x against plain sva.
+  #
+  # The threshold is per path, not global, because the paths cost different amounts per
+  # cell. `qnbinom` in match_quantiles is dear enough to pay for a fork at 20,000 cells;
+  # dispersion estimation is cheaper per cell and does not break even until about 30,000,
+  # so one shared threshold made the dispersion split a net loss on small matrices with
+  # many batches. See `combat.min.disp.cells`.
+  #
+  # as.numeric because a character option would make this a lexicographic comparison,
+  # which silently switches the gate off for exactly the sizes it exists to catch.
+  # Refuse a bad threshold rather than ignore it. Coercing and then skipping on NA meant a
+  # typo like "2000O" silently switched the safety gate off, which is the opposite of what
+  # someone setting the option wants.
+  fk <- getOption("combat.fork", TRUE)
+  if (!(is.logical(fk) && length(fk) == 1L && !is.na(fk))) {
+    stop("`combat.fork` must be TRUE or FALSE; got ", deparse(fk),
+         ". A garbage value used to force every dispatch serial with no signal.",
+         call. = FALSE)
+  }
+
+  mc <- suppressWarnings(as.numeric(min_cells))
+  if (length(mc) != 1L || is.na(mc) || mc < 0) {
+    stop("`combat.min.cells` and `combat.min.disp.cells` must each be a single ",
+         "non-negative number; got ", deparse(min_cells), call. = FALSE)
+  }
+  if (isTRUE(cells < mc)) return(lapply(idx, f))
+
+  # Every job carries its chunk number, and the number comes back with the result. Checking
+  # only the LENGTH of what a backend returns cannot tell a correct answer from the same
+  # chunks in the wrong order, and binding a reordered list scrambles genes silently rather
+  # than failing. With the tag, a permutation is detected and put back; a duplicate or a
+  # missing chunk is refused.
+  tag <- function(k) structure(idx[[k]], combat_chunk = k)
+  idx_tagged <- lapply(seq_along(idx), tag)
+  f_tagged <- function(ii) {
+    k <- attr(ii, "combat_chunk")
+    attr(ii, "combat_chunk") <- NULL
+    list(combat_chunk = k, value = f(ii))
+  }
+
+  # Put results back in dispatch order and strip the wrapper. Anything that is not a tagged
+  # result (a try-error, a NULL from a killed worker, a condition from foreach) is passed
+  # through untouched at its own position for combat_parallel_check() to report on.
+  untag <- function(out) {
+    ids <- vapply(out, function(o) {
+      if (is.list(o) && !is.null(o$combat_chunk)) as.integer(o$combat_chunk) else NA_integer_
+    }, integer(1))
+    ok <- !is.na(ids)
+    if (any(ok)) {
+      if (anyDuplicated(ids[ok]) || any(ids[ok] < 1L) || any(ids[ok] > length(idx))) {
+        stop("the parallel backend returned duplicated or out-of-range chunks, so the ",
+             "result cannot be reassembled. Genes would be scrambled rather than an error ",
+             "raised, which is why this is checked.", call. = FALSE)
+      }
+    }
+    res <- vector("list", length(idx))
+    filled <- logical(length(idx))
+    # Single-bracket assignment with a list() wrapper, NEVER res[[i]] <- value. A killed
+    # mclapply child returns a plain NULL, and `x[[i]] <- NULL` DELETES the element and
+    # shrinks the list rather than storing it. That silently dropped the dead chunk, shifted
+    # every later chunk up one slot, and scrambled genes: measured 100 genes NA and 200
+    # carrying another gene's dispersion, with combat_parallel_check reporting success.
+    for (j in seq_along(out)) {
+      if (ok[j]) { res[ids[j]] <- list(out[[j]]$value); filled[ids[j]] <- TRUE }
+    }
+    # Untagged elements are only ever error placeholders. A backend that strips the tag
+    # wrapper and returns a real value cannot be placed: with equal-sized chunks it would pass
+    # every later check while genes sat in another chunk's rows.
+    for (j in which(!ok)) {
+      o <- out[[j]]
+      if (!(is.null(o) || inherits(o, "try-error") || inherits(o, "condition"))) {
+        stop("the parallel backend returned a value without the chunk tag this package ",
+             "attached. Its position cannot be recovered, and placing it by order would bind ",
+             "genes into the wrong rows rather than raise anything. Refusing.", call. = FALSE)
+      }
+    }
+    spare <- which(!filled)
+    for (j in which(!ok)) if (length(spare)) { res[spare[1]] <- list(out[[j]]); spare <- spare[-1] }
+    res
+  }
+
+  if (custom) {
+    if (!fk) return(lapply(idx, f))
+    out <- parallel_backend(idx_tagged, f_tagged, workers)
+    if (!is.list(out) || length(out) != length(idx)) {
+      stop("a custom parallel_backend must return a list of length ", length(idx),
+           ", in the order of `idx`; got ", class(out)[1], " of length ", length(out),
+           call. = FALSE)
+    }
+    return(untag(out))
+  }
+
+  # options(combat.fork = FALSE) forces serial regardless of backend: slower,
+  # identical output, no worker processes. The escape hatch when an IDE wedges,
+  # since forking inside RStudio is not officially supported.
+  forced_serial <- !fk
+  degenerate <- workers <= 1L || length(idx) <= 1L
+  if (parallel_backend == "serial" || forced_serial || degenerate) {
+    return(lapply(idx, f))
+  }
+
+  # Clamped to real cores as well as chunks: `workers` is a user number and nothing
+  # else bounded it, so workers = 64 on an 8-core box forked 64 processes at once.
+  #
+  # R CMD check sets _R_CHECK_LIMIT_CORES_ and then errors on more than two, which is
+  # why this cap has to exist rather than trusting detectCores(). It only started
+  # mattering once the test suite began actually forking; before that no test reached
+  # a worker at all, so check passed while proving nothing.
+  chk <- Sys.getenv("_R_CHECK_LIMIT_CORES_", "")
+  # Past the performance-core count each added worker returns less throughput than the one
+  # before it, so more workers can be slower rather than faster. Not a core-type effect: forks
+  # migrate across the performance and efficiency clusters, and eight children given identical
+  # work finish within 1.08x of each other. That is reported once and
+  # left to the caller: `workers` is an explicit request, and cutting it behind the caller's
+  # back makes the argument mean something other than what it says. Capping it silently also
+  # made `workers = 8` run 8 chunks at 4-way concurrency, which reads as a worker-count result
+  # when it is really a chunking result.
+  # Memoised: both branches spawn a process on macOS, about 10 ms each, and one ComBat-seq
+  # run dispatches up to 2 * n_batch + 3 times. The core count does not change mid-session.
+  perf <- .combat_clusters$perf
+  if (is.null(perf)) {
+    perf <- suppressWarnings(as.integer(
+      if (identical(Sys.info()[["sysname"]], "Darwin"))
+        tryCatch(system2("sysctl", c("-n", "hw.perflevel0.physicalcpu"),
+                         stdout = TRUE, stderr = FALSE), error = function(e) NA)
+      else NA))
+    if (length(perf) != 1L || is.na(perf) || perf < 1L) {
+      perf <- suppressWarnings(parallel::detectCores(logical = FALSE))
+    }
+    if (is.na(perf) || perf < 1L) perf <- parallel::detectCores()
+    .combat_clusters$perf <- perf
+  }
+
+  # Memoised for the same reason as perf: detectCores() spawns a process on macOS, measured
+  # 13 ms, and this ran on every forking dispatch on every backend.
+  cores_cap <- if (nzchar(chk) && !identical(tolower(chk), "false")) 2L else {
+    ac <- .combat_clusters$allcores
+    if (is.null(ac)) {
+      ac <- max(1L, suppressWarnings(parallel::detectCores()), na.rm = TRUE)
+      .combat_clusters$allcores <- ac
+    }
+    ac
+  }
+  ncore <- min(workers, length(idx), cores_cap)
+
+  if (ncore > perf && is.null(.combat_clusters$warned_ecores)) {
+    .combat_clusters$warned_ecores <- TRUE
+    message("workers = ", workers, " exceeds the ", perf, " performance core(s) this machine ",
+            "reports. Past that point each added worker returns less throughput than the one ",
+            "before it, so this can be slower than workers = ", perf, ".")
+  }
+
+  switch(parallel_backend,
+    mclapply = {
+      # fork only. Windows has no fork, so fall back rather than error.
+      if (.Platform$OS.type == "windows") {
+    # a silent serial run looks identical to a parallel one until you time it
+    if (is.null(.combat_clusters$warned_windows)) {
+      message("mclapply cannot fork on Windows, so this ran serially. ",
+              "Use parallel_backend = \"foreach\" for parallelism here.")
+      .combat_clusters$warned_windows <- TRUE
+    }
+    return(lapply(idx, f))
+  }
+      # mc.allow.recursive = FALSE, or a caller who wraps this in their own
+      # mclapply/future_lapply over cohorts multiplies the worker count instead of
+      # reusing it: 3 cohorts x 4 workers measured 12 concurrent grandchildren.
+      # R degrades to lapply inside an already-forked child, which is what we want.
+      untag(parallel::mclapply(idx_tagged, f_tagged, mc.cores = ncore,
+                               mc.preschedule = preschedule, mc.allow.recursive = FALSE))
+    },
+
+    future = {
+      # The caller owns the plan. Setting one here would stamp on a plan the user
+      # established for the whole session, which is the usual complaint about
+      # packages that touch future's global state.
+      # Test behaviour, not class. Under RStudio `supportsMulticore()` is FALSE and
+      # `plan(multicore)` falls back per future rather than rewriting the plan object,
+      # so its class never says "sequential" and the old check never fired: measured
+      # every chunk resolving in the parent PID with no warning at all.
+      if (future::nbrOfWorkers() < 2L ||
+          (inherits(future::plan(), "multicore") && !future::supportsMulticore())) {
+        warning("parallel_backend = \"future\" but the active future plan resolves ",
+                "in one process, so this will run serially. Set e.g. ",
+                "future::plan(future::multicore, workers = ", ncore, ").",
+                call. = FALSE)
+      }
+      # `ncore` was computed and then used only in the warning above, so a six-worker plan
+      # ran six workers however small `workers` was. Chunking the jobs caps the number of
+      # futures in flight at `ncore`, which is the only lever this backend gives us without
+      # rewriting the caller's plan.
+      untag(future.apply::future_lapply(
+        idx_tagged, f_tagged, future.seed = NULL,
+        future.chunk.size = ceiling(length(idx) / ncore)))
+    },
+
+    BiocParallel = {
+      # MulticoreParam forks and is unavailable on Windows, where BiocParallel
+      # itself substitutes a serial param, so this stays correct there.
+      bp <- .combat_clusters$bpparam
+      if (is.null(bp) || BiocParallel::bpnworkers(bp) != ncore) {
+        bp <- BiocParallel::MulticoreParam(workers = ncore, stop.on.error = FALSE,
+                                           RNGseed = NULL)
+        .combat_clusters$bpparam <- bp
+      }
+      untag(BiocParallel::bplapply(idx_tagged, f_tagged, BPPARAM = bp))
+    },
+
+    foreach = {
+      # foreach's backend is process-global and there is no exported way to read it back,
+      # so do not overwrite one that already exists. If the caller registered a backend,
+      # theirs is used and nothing global is touched. Only when none is registered do we
+      # register our cached pool, and then we reset afterwards.
+      #
+      # An earlier attempt restored with `if (!prev) registerDoSEQ()`, which is wrong twice:
+      # registerDoSEQ() itself makes getDoParRegistered() TRUE, so the restore worked only
+      # on the first of a run's many dispatches, and a caller who HAD a backend had it
+      # silently replaced by ours and never given back.
+      # Testing getDoParRegistered() alone is not enough: registerDoSEQ() in the restore
+      # below makes it TRUE, so from the second dispatch on, the branch was skipped, nothing
+      # was registered, and %dopar% ran sequentially in the parent while the cached cluster
+      # sat idle. Measured before this fix: 4 worker PIDs on dispatch 1, then 1 (the parent)
+      # on every dispatch after. doSEQ is the sequential backend, so it counts as no backend.
+      prev_backend <- if (foreach::getDoParRegistered()) foreach::getDoParName() else NULL
+      if (is.null(prev_backend) || identical(prev_backend, "doSEQ")) {
+        cl <- combat_cluster(ncore, packages = c("edgeR", "limma"))
+        doParallel::registerDoParallel(cl)
+        .combat_clusters$registered_by_us <- TRUE
+        on.exit({
+          try(foreach::registerDoSEQ(), silent = TRUE)
+          .combat_clusters$registered_by_us <- NULL
+        }, add = TRUE)
+      }
+      # the operator has to be bound locally: foreach is in Suggests, so it is not
+      # imported, and `%dopar%` is not available by qualification alone
+      `%dopar%` <- foreach::`%dopar%`
+      i <- NULL  # keeps R CMD check quiet about the foreach index
+      untag(foreach::foreach(i = idx_tagged, .packages = "edgeR",
+                             .errorhandling = "pass") %dopar% f_tagged(i))
+    },
+
+    stop("unhandled parallel_backend: ", parallel_backend,
+         ". combat_backends() names it but combat_parallel_lapply() has no branch for it.",
+         call. = FALSE)
+  )
+}
+
+
+# ---- worker failure ----------------------------------------------------------
+
+#' Check worker results and fail with the real cause
+#'
+#' Backends report failure in different shapes, and the difference matters.
+#' `mclapply` returns a `try-error` carrying a condition for a thrown error but a
+#' plain `NULL` for a *killed* child, the out-of-memory case. Calling
+#' `conditionMessage()` on that NULL raises its own dispatch error and buries the
+#' actual cause, which is exactly what an earlier version of this code did.
+#' `future` and `BiocParallel` normally throw before reaching here; `foreach` with
+#' `.errorhandling = "pass"` returns the condition object itself.
+#'
+#' @param parts Result list from [combat_parallel_lapply()].
+#' @param idx The chunk list the work was dispatched on. When supplied, each
+#'   returned chunk is checked against the number of rows it was given.
+#' @param what Label used in the error message.
+#' @return `parts` unchanged when every element is usable.
+#' @noRd
+combat_parallel_check <- function(parts, what, idx = NULL) {
+  is_err <- function(p) inherits(p, "try-error") || inherits(p, "condition")
+  errored <- vapply(parts, is_err, logical(1))
+  died <- vapply(parts, is.null, logical(1))
+
+  # A chunk can also come back the wrong SIZE, which neither of the checks above sees. A
+  # custom executor returning the right number of results with one of them short passed
+  # validation and then introduced NA rows during the bind, silently. Rows are checked
+  # where the result is a matrix or a vector; the GLM path returns a list of fit fields
+  # and is skipped rather than guessed at.
+  # Count first. `got != want` RECYCLES when the lengths differ, so three results against
+  # four chunks compared FALSE FALSE FALSE FALSE and passed validation with only a warning.
+  if (!is.null(idx) && length(parts) != length(idx)) {
+    stop(what, ": the backend returned ", length(parts), " result(s) for ", length(idx),
+         " chunk(s). A missing or extra chunk would be bound into the wrong rows.",
+         call. = FALSE)
+  }
+
+  if (!is.null(idx) && !any(errored) && !any(died)) {
+    want <- lengths(idx)
+    got <- vapply(parts, function(p) {
+      if (is.null(p) || (is.list(p) && !is.data.frame(p))) NA_integer_ else as.integer(NROW(p))
+    }, integer(1))
+    wrong <- !is.na(got) & got != want
+    if (any(wrong)) {
+      k <- which(wrong)[1]
+      stop(what, ": chunk ", k, " came back with ", got[k], " row(s) where ", want[k],
+           " were dispatched. A backend that returns a short, padded or reordered chunk ",
+           "would corrupt the result rather than fail, so this is refused.", call. = FALSE)
+    }
+  }
+
+  if (!any(errored) && !any(died)) return(parts)
+
+  msg <- character(0)
+  if (any(died)) {
+    msg <- c(msg, sprintf("%d chunk(s) returned NULL, meaning the worker process died. %s",
+                          sum(died),
+                          "That is almost always the kernel killing it for memory: lower `workers`, raise `chunks`, or set options(combat.fork = FALSE)."))
+  }
+  if (any(errored)) {
+    first <- parts[[which(errored)[1]]]
+    cond <- if (inherits(first, "condition")) first else attr(first, "condition")
+    detail <- if (is.null(cond)) "no condition attached" else conditionMessage(cond)
+    msg <- c(msg, sprintf("%d chunk(s) raised an error, first was: %s",
+                          sum(errored), detail))
+  }
+  stop(what, ": ", paste(msg, collapse = " "), call. = FALSE)
+}
+
+
+# ---- the two parallelised paths ---------------------------------------------
+
+#' Does this design send edgeR down its one-group kernel
+#'
+#' edgeR's glmFit dispatches on the design: a layout whose columns are exactly its factor
+#' levels goes to mglmOneWay -> mglmOneGroup, and anything else to mglmLevenberg. The one-group
+#' kernel is NOT a pure function of the gene it is fitting when that gene's fit does not
+#' converge. Measured on edgeR 4.4.2: with low counts and one library over-sequenced 1000x, the
+#' same gene's coefficient changes with which other rows share the matrix, and a solo fit
+#' returns a subnormal like 2.37e-314. Splitting rows therefore changes the answer.
+#'
+#' There is no cheap per-gene detector. The bad values are finite, ordinary-looking, and carry
+#' no convergence flag, so this is a design-level refusal rather than a result-level filter.
+#' NULL, a vector, and an intercept-only matrix all count as one-group.
+#' @noRd
+combat_design_oneway <- function(design) {
+  if (is.null(design)) return(TRUE)
+  d <- as.matrix(design)
+  if (ncol(d) < 1L) return(TRUE)
+  ok <- tryCatch(nlevels(edgeR::designAsFactor(d)) == ncol(d), error = function(e) TRUE)
+  isTRUE(ok)
+}
+
+
+#' @noRd
+rp_rows <- function(x, ii) if (is.null(x) || is.null(dim(x))) x else x[ii, , drop = FALSE]
+
+#' @noRd
+rp_per_gene <- function(x, ii) {
+  if (is.null(x) || (is.null(dim(x)) && length(x) > 1L)) x[ii] else rp_rows(x, ii)
+}
+
+#' Row-parallel edgeR GLM fit
+#'
+#' Separable because `edgeR:::.compressOffsets` uses the offset it is handed
+#' rather than recomputing `log(colSums(y))`, and `addPriorCount`,
+#' `mglmLevenberg` and `mglmOneWay` are per gene from there on. Offset and
+#' dispersion must therefore always arrive explicitly: a NULL offset inside a
+#' worker would silently rebuild library sizes from that worker's slice of genes,
+#' which changes every fitted value without raising anything.
+#'
+#' @section Return value is not a DGEGLM:
+#' This returns a plain list carrying the fields ComBat-seq reads and
+#' nothing else. It is correct at that one call site and a trap anywhere else:
+#' `glmLRT()` or `glmQLFTest()` on it would fail, or worse half-work. The
+#' function stays internal for that reason.
+#'
+#' @param y Count matrix, genes in rows.
+#' @param design Design matrix.
+#' @param dispersion Scalar, or a per-gene vector or matrix.
+#' @param offset Offset matrix or vector. Never NULL when called from a DGEList.
+#' @param weights Optional observation weights.
+#' @param prior.count Prior count passed through to edgeR.
+#' @param start Optional starting coefficients.
+#' @param workers Maximum concurrent workers.
+#' @param chunks Row chunks. Defaults to `workers`.
+#' @param parallel_backend One of [combat_backends()].
+#' @return A list of fit components.
+#' @noRd
+glmFit_rows_parallel <- function(y, design, dispersion, offset, weights = NULL,
+                                 prior.count = 0.125, start = NULL,
+                                 workers = 4L, chunks = NULL,
+                                 parallel_backend = getOption("combat.backend", "mclapply")) {
+  y <- as.matrix(y)
+  idx <- combat_row_chunks(nrow(y), workers = workers, chunks = chunks)
+
+  # Without an explicit offset each worker rebuilds library sizes from its own genes, which
+  # moved coefficients by 1.8 in testing and raises nothing. Refuse rather than guess.
+  if (is.null(offset) && length(idx) > 1L) {
+    stop("glmFit_rows_parallel needs an explicit offset: a worker would rebuild library ",
+         "sizes from its own slice of genes and every fitted value would change silently.",
+         call. = FALSE)
+  }
+
+  # matrices are row-subset; per-sample vectors and scalars pass through untouched
+  # A per-gene dispersion is a bare vector with no dim, so rows() handed every chunk the
+  # full-length vector and edgeR rejected it: worked at chunks = 1, failed at chunks = 4.
+  # The documented "scalar, or a per-gene vector or matrix" only held for a single chunk.
+  # Serial edgeR refuses a per-gene vector whose length is neither 1 nor nrow(y); the split
+  # path used to slice it anyway and hand each chunk a correctly sized piece of the wrong
+  # thing. Refuse the same inputs the serial call refuses.
+  check_len <- function(x, nm) {
+    if (!is.null(x) && is.null(dim(x)) && length(x) > 1L && length(x) != nrow(y)) {
+      stop(nm, " has wrong length: ", length(x), " for ", nrow(y), " rows", call. = FALSE)
+    }
+    invisible(TRUE)
+  }
+  check_len(dispersion, "dispersion")
+
+
+  # A one-group design reaches a kernel whose output depends on the block it was fitted in, so
+  # this path is not row-splittable at any chunk count. Called whole instead. Measured before
+  # the gate: ComBat_seq_parallel returned 1, 2 and 3 differing cells at chunks 2, 4 and 8 on
+  # a 240x12 matrix with one library over-sequenced 1000x.
+  if (combat_design_oneway(design)) {
+    return(edgeR::glmFit.default(y, design = design, dispersion = dispersion, offset = offset,
+                                 lib.size = NULL, weights = weights,
+                                 prior.count = prior.count, start = start))
+  }
+
+  fit_rows <- function(ii) {
+    f <- edgeR::glmFit.default(
+      y[ii, , drop = FALSE], design = design, dispersion = rp_per_gene(dispersion, ii),
+      offset = rp_rows(offset, ii), lib.size = NULL, weights = rp_rows(weights, ii),
+      prior.count = prior.count, start = rp_rows(start, ii))
+    # only the six fields the parent reads back. edgeR also returns full counts, dispersion
+    # and offset slices that are discarded on arrival, about 540 MB a dispatch on a cohort
+    # this size, serialised through the pipe and held in the parent for nothing.
+    list(coefficients = f$coefficients, fitted.values = f$fitted.values,
+         df.residual = f$df.residual, unshrunk.coefficients = f$unshrunk.coefficients,
+         method = f$method, failed = f$failed)
+  }
+
+  fits <- combat_parallel_check(
+    combat_parallel_lapply(idx, fit_rows, workers, parallel_backend, cells = length(y),
+                           min_cells = getOption("combat.min.glm.cells", 1e5)),
+    "glmFit_rows_parallel", idx)
+
+  # A gene whose fit failed carries state from the block it sat in, so one failure anywhere
+  # invalidates the split. edgeR reports it, so this is checked rather than assumed.
+  if (any(vapply(fits, function(f) any(f$failed != 0), logical(1)))) {
+    return(edgeR::glmFit.default(y, design = design, dispersion = dispersion, offset = offset,
+                                 lib.size = NULL, weights = weights,
+                                 prior.count = prior.count, start = start))
+  }
+
+  # chunks are interleaved, so every gene-indexed result comes back permuted
+  ord <- combat_row_order(idx)
+  bind <- function(nm) {
+    m <- do.call(rbind, lapply(fits, function(f) f[[nm]]))
+    if (nrow(m) != nrow(y)) {
+      stop("glmFit_rows_parallel: field '", nm, "' bound to ", nrow(m), " rows where ",
+           nrow(y), " were dispatched", call. = FALSE)
+    }
+    m[ord, , drop = FALSE]
+  }
+  vec <- function(nm) {
+    v <- unlist(lapply(fits, function(f) f[[nm]]), use.names = FALSE)
+    if (length(v) != nrow(y)) {
+      stop("glmFit_rows_parallel: field '", nm, "' bound to ", length(v), " values where ",
+           nrow(y), " were dispatched", call. = FALSE)
+    }
+    v[ord]
+  }
+  # `deviance` is deliberately absent. It is the ONE field edgeR returns that is not a pure
+  # function of its own gene: in the Levenberg branch `mglmLevenberg` passes its raw slot
+  # through, and for a gene whose fit aborts that slot holds a neighbour's value. Measured on
+  # an 803 x 27 fit, gene 34 came back 109.70 whole, 75.60 at 3 chunks, 14.52 at 5, and
+  # 2.47e-323 fitted alone. Paired with gene 1 it returned gene 1's deviance. Serial and
+  # forked agree, so it is edgeR's own behaviour and not a parallel artefact.
+  #
+  # ComBat-seq reads coefficients and fitted.values only, so nothing is lost by omitting it,
+  # and omitting it keeps the promise this file makes elsewhere: every field returned here is
+  # chunk-count independent. Returning a value that changes with `chunks` would break that
+  # promise quietly. If a future caller needs it, recompute from the bound fitted values with
+  # edgeR::nbinomDeviance() rather than binding the per-chunk slots.
+  out <- list(coefficients = bind("coefficients"),
+              fitted.values = bind("fitted.values"),
+              df.residual = vec("df.residual"),
+              method = fits[[1]]$method,
+              design = design,
+              prior.count = prior.count)
+  if (prior.count > 0) out$unshrunk.coefficients <- bind("unshrunk.coefficients")
+  out
+}
+
+# Derived from sva (Zhang, Parmigiani and Johnson), Artistic-2.0.
+#
+# The sva 3.54.0 `match_quantiles` body, deparsed at width.cutoff = 500. One of the two places
+# this package holds vendor code, the other being R/limma_dupcor_parallel.R, so it is pinned:
+# `match_quantiles_rows` below is a transcription of exactly this text and runs only while the
+# backend still deparses to it.
+.match_quantiles_pinned <- c(
+  "{",
+  "    new_counts_sub <- matrix(NA, nrow = nrow(counts_sub), ncol = ncol(counts_sub))",
+  "    for (a in 1:nrow(counts_sub)) {",
+  "        for (b in 1:ncol(counts_sub)) {",
+  "            if (counts_sub[a, b] <= 1) {",
+  "                new_counts_sub[a, b] <- counts_sub[a, b]",
+  "            }",
+  "            else {",
+  "                tmp_p <- pnbinom(counts_sub[a, b] - 1, mu = old_mu[a, b], size = 1/old_phi[a])",
+  "                if (abs(tmp_p - 1) < 1e-04) {",
+  "                  new_counts_sub[a, b] <- counts_sub[a, b]",
+  "                }",
+  "                else {",
+  "                  new_counts_sub[a, b] <- 1 + qnbinom(tmp_p, mu = new_mu[a, b], size = 1/new_phi[a])",
+  "                }",
+  "            }",
+  "        }",
+  "    }",
+  "    return(new_counts_sub)",
+  "}")
+
+#' Row-vectorised transcription of the pinned `match_quantiles` body
+#'
+#' The same three branches in the same order, one row per iteration instead of one cell.
+#' `pnbinom` and `qnbinom` are vectorised C, so a row call computes every cell from its own
+#' arguments exactly as the cell loop does. The `1 +` on the `qnbinom` branch is part of the
+#' vendor body and is easy to drop when transcribing from a description of it rather than
+#' from the body itself.
+#'
+#' The logical `NA` start matters: the vendor's result type is whatever its assignments
+#' promote that matrix to, integer while every cell keeps its count and double once one cell
+#' takes the `qnbinom` branch. Filling a row at a time promotes it identically.
+#'
+#' Reached only through [combat_mq_dispatch()].
+#' @noRd
+match_quantiles_rows <- function(counts_sub, old_mu, old_phi, new_mu, new_phi) {
+  new_counts_sub <- matrix(NA, nrow = nrow(counts_sub), ncol = ncol(counts_sub))
+  for (a in seq_len(nrow(counts_sub))) {
+    res <- counts_sub[a, ]
+    big <- which(res > 1)
+    if (length(big)) {
+      tmp_p <- stats::pnbinom(res[big] - 1, mu = old_mu[a, big], size = 1/old_phi[a])
+      q <- which(abs(tmp_p - 1) >= 1e-04)
+      if (length(q)) {
+        res[big[q]] <- 1 + stats::qnbinom(tmp_p[q], mu = new_mu[a, big[q]], size = 1/new_phi[a])
+      }
+    }
+    new_counts_sub[a, ] <- res
+  }
+  new_counts_sub
+}
+
+#' Choose the quantile matcher for one call
+#'
+#' Two refusals, both falling back to the backend's own function, which is always correct
+#' because it is the thing being matched.
+#'
+#' The body gate is the price of holding a copy at all. A transcription cannot follow an
+#' upstream edit, so the backend's deparsed body must still equal [.match_quantiles_pinned]
+#' byte for byte; one changed character and the slice goes back to the vendor.
+#'
+#' The NA gate exists because the vendor ERRORS on a missing count: `if (counts_sub[a, b] <=
+#' 1)` is `if (NA)`. `which()` drops NA instead, so the row form would return an NA cell and
+#' no error at all. `old_mu` and `old_phi` reach that same condition through `tmp_p`, so they
+#' are checked too. Falling back preserves the vendor's own error message.
+#' @noRd
+combat_mq_dispatch <- function(mq, counts_sub, old_mu, old_phi) {
+  # NULL means call the vendor WHOLE: these inputs reach the vendor's own `if (NA)` error or
+  # a degenerate shape, and running it unsliced preserves that behaviour byte for byte,
+  # error message included. `old_phi <= 0` is included because `size = 1/old_phi` turns
+  # non-positive dispersions into NaN probabilities the row form would silently keep.
+  # is.finite has no data.frame method, and the vendor accepts data.frame counts, so a
+  # non-matrix goes to the vendor whole before anything here can touch it.
+  if (!is.matrix(counts_sub) || !is.matrix(old_mu) ||
+      nrow(counts_sub) == 0L || ncol(counts_sub) == 0L ||
+      !all(is.finite(counts_sub)) || !all(is.finite(old_mu)) ||
+      !all(is.finite(old_phi)) || any(old_phi <= 0)) {
+    return(NULL)
+  }
+  # deparse honours options(scipen), so an analyst's .Rprofile could silently shut this gate
+  # and hand every slice back to the cell loop with no signal. Pinned to the setting the
+  # text was captured under; the comparison is over the body, not the print options.
+  op <- options(scipen = 0L); on.exit(options(op), add = TRUE)
+  if (!identical(deparse(body(mq), width.cutoff = 500L), .match_quantiles_pinned)) return(mq)
+  match_quantiles_rows
+}
+
+#' Row-parallel quantile matching
+#'
+#' The dominant cost in ComBat-seq. Profiling a 10,000 by 500 run with `group = NULL` puts it
+#' at 66.5% of serial time, against 14.0% for tagwise dispersion and 13.1% for common
+#' dispersion.
+#'
+#' Splitting by row is exact rather than approximate. The original ComBat-seq body is a cell
+#' loop where `new_counts_sub[a, b]` reads only `counts_sub[a, b]`,
+#' `old_mu[a, b]`, `new_mu[a, b]`, `old_phi[a]` and `new_phi[a]`, so every cell
+#' depends on its own gene and nothing else. No cross-row term exists to lose.
+#'
+#' Each slice is matched by [match_quantiles_rows()], a row-vectorised transcription of the
+#' sva 3.54.0 body and the one copy of vendor code this package holds. Drift is gated, not
+#' assumed away: [combat_mq_dispatch()] compares the backend's body against the pinned text
+#' byte for byte and hands the slice back to the backend's own function the moment they
+#' differ, or the moment an input carries an NA.
+#'
+#' @param mq The backend's `match_quantiles`, from [combat_backend()].
+#' @param counts_sub Count matrix for the genes being adjusted.
+#' @param old_mu,new_mu Fitted means, same shape as `counts_sub`.
+#' @param old_phi,new_phi Per-gene dispersions.
+#' @param workers Maximum concurrent workers.
+#' @param chunks Row chunks. Defaults to `workers`.
+#' @param parallel_backend One of [combat_backends()].
+#' @return A matrix the same shape as `counts_sub`.
+#' @noRd
+match_quantiles_parallel <- function(mq, counts_sub, old_mu, old_phi, new_mu, new_phi,
+                                     workers = 4L, chunks = NULL,
+                                     parallel_backend = getOption("combat.backend", "mclapply")) {
+  idx <- combat_row_chunks(nrow(counts_sub), workers = workers, chunks = chunks)
+
+  # gate resolved once, before the fork, so a worker inherits the decision rather than
+  # re-deparsing the backend body once per chunk
+  mq_fun <- combat_mq_dispatch(mq, counts_sub, old_mu, old_phi)
+  if (is.null(mq_fun)) return(mq(counts_sub, old_mu, old_phi, new_mu, new_phi))
+
+  do_rows <- function(ii) mq_fun(counts_sub = counts_sub[ii, , drop = FALSE],
+                                 old_mu = old_mu[ii, , drop = FALSE],
+                                 old_phi = old_phi[ii],
+                                 new_mu = new_mu[ii, , drop = FALSE],
+                                 new_phi = new_phi[ii])
+
+  parts <- combat_parallel_check(
+    combat_parallel_lapply(idx, do_rows, workers, parallel_backend, cells = length(counts_sub)),
+    "match_quantiles_parallel", idx)
+  do.call(rbind, parts)[combat_row_order(idx), , drop = FALSE]
+}
+
+#' Row-parallel tagwise dispersion estimation
+#'
+#' The third hot path, and the one that used to be called unparallelisable. ComBat-seq
+#' estimates dispersion once per batch, which is 14.0% of serial time on the same
+#' 10,000 by 500 profile and grows with
+#' batch count, so on a 100-batch design it is a large serial block sitting in the middle
+#' of an otherwise parallel run.
+#'
+#' @section Why this is exact, and only at `prior.df = 0`:
+#' `dispCoxReidInterpolateTagwise` moderates each gene's adjusted profile likelihood
+#' towards a smoothed curve computed across genes, which is a genuine cross-row term:
+#' `(apl + prior.n * apl.smooth) / (1 + prior.n)`. ComBat-seq calls this with
+#' `prior.df = 0`, and `prior.n` is `prior.df / (nlibs - ncoefs)`, so the moderation
+#' weight is exactly zero and the expression collapses to `apl`, so each gene's dispersion
+#' depends on its own counts alone. That holds only while every gene's `apl` is FINITE:
+#' `0 * NaN` and `0 * -Inf` are both `NaN`, and `apl.smooth` is built across genes, so one
+#' poisoned gene would contaminate a different neighbour set in each arm. Counts at the top
+#' of the double range can do it, which is why the gate below also checks magnitude. Verified rather than assumed: chunked and whole
+#' matrix results were `identical()` on 2,000 and 8,000 genes, with and without dead,
+#' constant and near-empty genes present. Any other `prior.df` is handed straight to
+#' edgeR unsplit.
+#'
+#' `trend` is left alone rather than forced off. It defaults to `TRUE` and does drive a
+#' moving average across genes, but that feeds `apl.smooth`, which the zero weight
+#' discards, so splitting stays exact either way.
+#'
+#' @section What must be passed explicitly:
+#' Three quantities are functions of the whole gene set and would otherwise be rebuilt
+#' from a worker's own slice, silently: `offset`, which defaults to `log(colSums(y))`;
+#' `span`, which defaults to `(10/ntags)^0.23` and therefore changes with chunk size; and
+#' `AveLogCPM`. Computing all three once up front and passing them down is the same
+#' discipline `glmFit_rows_parallel()` applies to offsets. A split that omits them returns
+#' different numbers on every matrix tested.
+#'
+#' @param y Count matrix for one batch, genes in rows.
+#' @param design Design matrix for that batch's samples.
+#' @param dispersion Common dispersion, scalar or per gene.
+#' @param offset Offset vector or matrix. Computed once here when NULL.
+#' @param prior.df Prior degrees of freedom. Anything other than 0 falls back to edgeR.
+#' @param trend Passed through to edgeR unchanged.
+#' @param span Smoothing span. Computed once here when NULL.
+#' @param AveLogCPM Average log CPM per gene. Computed once here when NULL.
+#' @param weights Optional observation weights.
+#' @param workers Maximum concurrent workers.
+#' @param chunks Row chunks. Defaults to `workers`.
+#' @param parallel_backend One of [combat_backends()].
+#' @return Numeric vector of per-gene dispersions, in the input row order.
+#' @noRd
+estimateGLMTagwiseDisp_rows_parallel <- function(y, design = NULL, dispersion = NULL,
+                                                 offset = NULL, prior.df = 10, trend = TRUE,
+                                                 span = NULL, AveLogCPM = NULL, weights = NULL,
+                                                 workers = 4L, chunks = NULL,
+                                                 parallel_backend = getOption("combat.backend", "mclapply")) {
+  y <- as.matrix(y)
+  ntag <- nrow(y)
+  # serial edgeR stops on a dispersion whose length is neither 1 nor nrow(y). Splitting by row
+  # would hand each chunk a valid-looking slice of an invalid vector and return numbers.
+  if (!is.null(dispersion) && is.null(dim(dispersion)) &&
+      length(dispersion) > 1L && length(dispersion) != ntag) {
+    stop("dispersion has wrong length: ", length(dispersion), " for ", ntag, " rows",
+         call. = FALSE)
+  }
+
+  # gate: only the zero-moderation case is provably row-separable, so anything else
+  # goes to edgeR whole rather than being split on an assumption
+  # A one-group design is excluded for the same reason glmFit_rows_parallel excludes it:
+  # adjustedProfileLik fits with glmFit inside every chunk, so the one-group kernel's
+  # block dependence reaches the returned dispersions as finite, plausible, wrong numbers.
+  # The existing non-finite post-check cannot see them.
+  separable <- is.numeric(prior.df) && length(prior.df) == 1L &&
+    !is.na(prior.df) && prior.df == 0 &&
+    all(is.finite(y)) && max(abs(y)) < 1e150 &&
+    !combat_design_oneway(design)
+  if (!separable || ntag < 2L) {
+    return(edgeR::estimateGLMTagwiseDisp(y, design = design, offset = offset,
+                                         dispersion = dispersion, prior.df = prior.df,
+                                         trend = trend, span = span,
+                                         AveLogCPM = AveLogCPM, weights = weights))
+  }
+
+  # the three whole-matrix quantities, computed once, exactly as edgeR would
+  if (is.null(offset)) offset <- log(colSums(y))
+  if (is.null(span)) span <- if (ntag > 10) (10 / ntag)^0.23 else 1
+  if (is.null(AveLogCPM)) AveLogCPM <- edgeR::aveLogCPM(y, offset = offset, weights = weights)
+
+  idx <- combat_row_chunks(ntag, workers = workers, chunks = chunks)
+
+  disp_rows <- function(ii) edgeR::estimateGLMTagwiseDisp(
+    y[ii, , drop = FALSE], design = design, offset = rp_rows(offset, ii),
+    dispersion = rp_per_gene(dispersion, ii), prior.df = 0, trend = trend,
+    span = span, AveLogCPM = AveLogCPM[ii], weights = rp_rows(weights, ii))
+
+  # higher threshold than the other two paths: measured on 10-column slices this path
+  # returns 0.65x at 10,000 cells, 0.79x at 20,000, 1.08x at 30,000 and 1.44x at 50,000
+  parts <- combat_parallel_check(
+    combat_parallel_lapply(idx, disp_rows, workers, parallel_backend, cells = length(y),
+                           min_cells = getOption("combat.min.disp.cells", 3e4)),
+    "estimateGLMTagwiseDisp_rows_parallel", idx)
+  out <- unlist(parts, use.names = FALSE)[combat_row_order(idx)]
+
+  # The separability gate above checks `y`, not the adjusted profile likelihood computed from
+  # it. A degenerate fit could in principle return a non-finite apl for finite counts, and
+  # `0 * NaN` is NaN, whose spread depends on AveLogCPM neighbours and therefore on the chunk
+  # layout. Recompute unsplit rather than return a layout-dependent answer.
+  if (!all(is.finite(out))) {
+    return(edgeR::estimateGLMTagwiseDisp(y, design = design, offset = offset,
+                                         dispersion = dispersion, prior.df = prior.df,
+                                         trend = trend, span = span,
+                                         AveLogCPM = AveLogCPM, weights = weights))
+  }
+  out
+}

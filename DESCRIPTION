@@ -1,0 +1,47 @@
+Package: rnaparallel
+Type: Package
+Title: Parallel Companions for RNA-Seq Tools
+Version: 0.4.4
+Authors@R: c(
+    person("GenomeRx", role = c("aut", "cph"),
+           comment = "author of the parallel companion"),
+    person("Nam", "Nguyen", email = "namnguyenhk@gmail.com", role = c("aut", "cre")),
+    person("Yuqing", "Zhang", role = "ctb",
+           comment = "author of ComBat-seq, accelerated but not modified by this package"),
+    person("Giovanni", "Parmigiani", role = "ctb", comment = "author of ComBat-seq"),
+    person("W. Evan", "Johnson", role = "ctb", comment = "author of ComBat-seq"))
+Description: Parallel companions for RNA-seq tools. A companion never
+    reimplements the method: it calls the original function with its hot paths
+    rebound to row-parallel versions in a child of that function's own
+    environment, so every other symbol still resolves to the original code and
+    the result is identical() to a serial run rather than merely close to it.
+    ComBat-seq is the first. Its per-gene quantile matching, edgeR GLM fits and
+    tagwise dispersion estimation are split by gene row, and the common
+    dispersion is dispatched across batches. Works against Bioconductor sva or a
+    sourced copy of the upstream zhangyuqing/ComBat-seq repository, whichever is
+    loaded, and dispatches its parallelism through mclapply, future,
+    BiocParallel, foreach or serial. Companions for limma lmFit and
+    duplicateCorrelation, and for edgeR calcNormFactors, follow the same
+    construction.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Depends: R (>= 4.1)
+Imports:
+    edgeR,
+    parallel
+Suggests:
+    sva,
+    limma,
+    statmod,
+    future,
+    future.apply,
+    BiocParallel,
+    foreach,
+    doParallel,
+    testthat (>= 3.1.8),
+    withr
+Config/testthat/edition: 3
+URL: https://github.com/GenomeRx/RNA-Parallel
+BugReports: https://github.com/GenomeRx/RNA-Parallel/issues
+Roxygen: list(markdown = TRUE)
+Config/roxygen2/version: 8.0.0
