@@ -1,0 +1,1656 @@
+---
+title: "RNA-Parallel: identical results, measured speedup"
+subtitle: "Parallel companions for ComBat-seq, limma and edgeR"
+author: "Nguyen N (GenomeRx)"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 3
+    number_sections: false
+    code_folding: show
+    code_download: true
+    df_print: kable
+    theme: flatly
+    highlight: tango
+    mathjax: null
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = TRUE,
+                      fig.width = 11, fig.height = 5, dpi = 108)
+
+# The correction and the worker sweep together account for nearly all of the runtime. knitr
+# keys a cache on the chunk's own source, so editing prose or a figure label reuses them while
+# editing the correction itself invalidates them. Delete the _cache directory to force a
+# full recomputation.
+knitr::opts_chunk$set(cache.path = "RNA_Parallel_cache/")
+```
+
+`rnaparallel` runs the original function itself and parallelises its hot paths.
+`ComBat_seq_parallel` corrects the counts; `calcNormFactors_parallel`, `lmFit_parallel`,
+and `duplicateCorrelation_parallel` run the differential expression that
+follows. None of them reimplements a method from its description: the vendor is called unchanged on blocks of genes or
+samples, with at most a symbol rebound in a child of the vendor's own environment.
+
+The question is narrow on purpose: **does each companion return exactly what the original
+returns, and how much time does it save.** Not close, not correlated at 0.999. Identical, or it
+is not usable.
+
+Two datasets do two jobs. Simulated counts, generated with the ComBat-seq paper's parameters,
+establish that the correction behaves correctly against known truth. TCGA supplies the scale at
+which parallelism is worth measuring.
+
+`citation("rnaparallel")` prints the methods to cite alongside this package.
+
+| section | what it shows |
+|---|---|
+| B. The claim in ten lines | one pipeline, run both ways, `identical()` |
+| C. Simulated counts | ComBat-seq then limma and edgeR, each against its original, at 4, 8, 16 and 32 workers |
+| D. TCGA | the cohort, then the same two comparisons at cohort scale |
+| E. Equivalence summary | every quantity, computed both ways and compared |
+| F. Speed summary | every speed measurement in one figure |
+
+# A. Setup
+
+```{r install, eval = FALSE}
+if (!requireNamespace("remotes", quietly = TRUE)) install.packages("remotes")
+remotes::install_github("GenomeRx/RNA-Parallel")
+
+if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+BiocManager::install(c("sva", "edgeR", "limma", "statmod", "SummarizedExperiment", "TCGAbiolinks",
+                       "ComplexHeatmap"))
+
+cran <- c("ggplot2", "ggrepel", "patchwork", "callr", "gtsummary", "broom", "circlize", "RColorBrewer")
+need <- cran[!vapply(cran, requireNamespace, logical(1), quietly = TRUE)]
+if (length(need)) install.packages(need)
+```
+
+```{r libs}
+library(sva)
+library(edgeR)
+library(limma)
+library(rnaparallel)
+library(SummarizedExperiment)
+library(ggplot2)
+
+edgeR_norm <- if (exists("normLibSizes.default", envir = asNamespace("edgeR"), inherits = FALSE)) {
+  edgeR::normLibSizes
+} else {
+  edgeR::calcNormFactors
+}
+
+theme_set(
+  theme_minimal(base_size = 15) +
+    theme(plot.title    = element_text(face = "bold", size = 18, margin = margin(b = 4)),
+          plot.subtitle = element_text(size = 13, colour = "grey30", margin = margin(b = 10)),
+          axis.title    = element_text(size = 14),
+          axis.text     = element_text(size = 12),
+          strip.text    = element_text(face = "bold", size = 14),
+          legend.title  = element_text(size = 13),
+          legend.text   = element_text(size = 12),
+          plot.margin   = margin(12, 16, 10, 12)))
+
+# one colour per companion, shared by every bar figure below. Three figures each carried their
+# own copy and removeBatchEffect was in none of them, so it drew as a grey NA series
+pal_stage <- c("ComBat_seq" = "#8172B3",
+               "calcNormFactors (TMM)" = "#4C72B0",
+               "lmFit" = "#DD8452",
+               "duplicateCorrelation" = "#55A868",
+               "removeBatchEffect" = "#937860")
+
+# workers is run as asked: 32 means 32 forked processes, bounded only by detectCores(). Added
+# workers return less throughput each, so whether 32 beats 16 is what the sweep measures rather
+# than assumes.
+#
+# LINUX SWEEP. The published macOS run used 2, 4, 6, 8 -- the whole of an 8-core Apple M3, whose
+# performance/efficiency split is why its lmFit row peaks at 4 and falls back at 8. This is a
+# different machine: two sockets, 16 physical cores, 32 hardware threads, homogeneous. So the
+# sweep is 4, 8, 16, 32, where 16 is every physical core and 32 is every hyperthread. The
+# 16 -> 32 step adds no arithmetic units, only a second thread per core, and is read that way.
+# TCGA is corrected at every count; the last arm is the one the figures below use.
+tcga_workers <- c(4L, 8L, 16L, 32L)
+n_workers    <- max(tcga_workers)
+
+# Backend: mclapply, the same one the macOS run used. On Linux fork() hands each worker the
+# parent's pages copy-on-write, so a large voom object costs nothing to distribute; the
+# socket backends must re-serialise it per chunk and measured far slower than not
+# parallelising at all. Set as an option so every companion call inherits it.
+options(combat.backend = "mclapply")
+options(future.globals.maxSize = 8 * 1024^3)
+
+# OpenBLAS is multi-threaded by default on this platform, and each forked worker would open
+# its own thread pool on top of the fork. OPENBLAS_NUM_THREADS is read when the library
+# loads, so setting it here would be too late -- render via render_linux.sh, which exports it
+# before R starts. This reports whether that happened.
+blas_pinned <- identical(Sys.getenv("OPENBLAS_NUM_THREADS", ""), "1")
+if (grepl("openblas", sessionInfo()$BLAS, ignore.case = TRUE) && !blas_pinned)
+  warning("OpenBLAS is multi-threaded and OPENBLAS_NUM_THREADS is not 1. The worker sweep ",
+          "will oversubscribe this machine and speedups will be deflated. ",
+          "Render with ./render_linux.sh")
+
+```
+
+# B. The claim in ten lines
+
+Before the two datasets, the smallest possible version of the whole argument. The counts are the
+ones the ComBat-seq README itself uses for its example, so the call below is the upstream call
+with one argument added.
+
+```{r quick-example}
+set.seed(1)
+demo_counts <- matrix(rnbinom(400, size = 10, prob = 0.1), nrow = 50, ncol = 8)
+demo_batch  <- c(rep(1, 4), rep(2, 4))
+demo_group  <- rep(c(0, 1), 4)
+
+demo_ref <- sva::ComBat_seq(demo_counts, batch = demo_batch, group = demo_group)
+demo_par <- ComBat_seq_parallel(demo_counts, batch = demo_batch, group = demo_group,
+                                workers = 2L)
+
+data.frame(genes = nrow(demo_counts), samples = ncol(demo_counts),
+           batches = length(unique(demo_batch)),
+           identical_to_original = identical(demo_ref, demo_par),
+           differing_cells = sum(demo_ref != demo_par))
+```
+
+```{r quick-example-assert}
+stopifnot(identical(demo_ref, demo_par))
+```
+
+Fifty genes by eight samples sits far below `combat.min.cells`, so every row-split dispatch runs
+serially: a fork would cost more than the work. Only the common dispersion is handed out, one
+whole-matrix estimate per batch, which carries no size gate because it is always worth
+dispatching. Either way the output is the same matrix, which is the only thing the gate is
+allowed to leave alone.
+
+# C. Simulated counts
+
+Counts keep the ComBat-seq paper's negative binomial draw and its batch mean and dispersion
+parameters. That pipeline called `polyester::simulate_experiment`, whose count step is
+`rnbinom(mu = reads_per_transcript * fold_change, size = size)` with zero draws replaced by 1.
+The draw is reproduced directly here because `polyester` is no longer on current Bioconductor.
+The mean structure is this notebook's own: the paper's two-batch design cannot show what ten
+batches look like in a projection.
+
+```{r sim, cache = TRUE}
+set.seed(123)
+
+G          <- 10000L    # genes
+n_batch    <- 10L       # sequencing batches
+n_per_cell <- 50L       # per batch-condition cell, so 1,000 patients in total
+bio_fold   <- 1.8       # biological signal
+batch_fold <- 3         # paper: mean of batch 2 is 1.5, 2 or 3 times batch 1
+disp_fold  <- 4         # paper: dispersion of batch 2 is 2, 3 or 4 fold batch 1
+disp_1     <- 0.15      # paper: dispersion in batch 1
+
+batch <- factor(rep(sprintf("B%02d", seq_len(n_batch)), each = 2 * n_per_cell),
+                levels = sprintf("B%02d", seq_len(n_batch)))
+group <- factor(rep(rep(c("control", "treated"), each = n_per_cell), n_batch))
+n     <- length(batch)
+
+base <- pmax(5, round(rlnorm(G, log(120), 0.9)))   # lognormal, the shape a transcriptome has
+
+# Technical batch effects concentrate on a few axes in real data: library depth, degradation,
+# GC bias. Two dominant technical directions, with the ten batches scattered across
+# that plane, give ten separated clouds. An independent shift per gene per batch instead
+# spreads the effect over nine dimensions, where no two-component projection can separate it.
+t_load <- matrix(rnorm(G * 2L, 0, 0.22), G, 2L)
+
+# Batch positions are scattered rather than placed on a ring: evenly spaced angles at one
+# shared radius produce a visibly drawn circle. Candidates are drawn at random and rejected
+# when they land on an existing batch, which keeps them separable without regimenting them.
+b_pos  <- matrix(NA_real_, n_batch, 2L)
+placed <- 0L
+while (placed < n_batch) {
+  cand <- rnorm(2L, 0, 2.3)
+  far  <- placed == 0L ||
+    min(sqrt(rowSums((b_pos[seq_len(placed), , drop = FALSE] -
+                        rep(cand, each = placed))^2))) > 1.9
+  if (far) { placed <- placed + 1L; b_pos[placed, ] <- cand }
+}
+
+# batches also differ in how tightly they cluster, so the clouds are not ten copies of one
+# another
+b_spread <- runif(n_batch, 0.32, 0.62)
+jit <- matrix(rnorm(n * 2L), n, 2L) * b_spread[rep(seq_len(n_batch), each = 2L * n_per_cell)]
+
+# a smaller per-gene per-batch component, so the effect is not exactly rank two
+b_idio <- matrix(rnorm(G * n_batch, 0, 0.20), G, n_batch)
+b_disp <- runif(n_batch, 1, disp_fold)
+
+# Continuous patient heterogeneity, three latent programmes. Without it every sample in a cell
+# shares one mean vector, the only spread left is sampling noise, and that noise averages away
+# across thousands of genes: batches collapse to points and the condition becomes a straight
+# line once batch is removed.
+n_lat     <- 3L
+lat_load  <- matrix(rnorm(G * n_lat, 0, 0.18), G, n_lat)
+lat_score <- matrix(rnorm(n * n_lat), n, n_lat)
+lib       <- rlnorm(n, 0, 0.25)                    # sequencing depth varies per sample
+
+n_de     <- G %/% 20L                              # 5% of genes truly differential
+de_idx   <- sample.int(G, n_de)
+ups      <- de_idx[seq_len(n_de %/% 2)]; downs <- setdiff(de_idx, ups)
+de_shift <- numeric(G); de_shift[ups] <- log(bio_fold); de_shift[downs] <- -log(bio_fold)
+
+# one independent draw per sample, not one per cell
+bi  <- as.integer(batch); gi <- as.integer(group)
+sim <- vapply(seq_len(n), function(j) {
+  lmu <- log(base) + as.vector(t_load %*% (b_pos[bi[j], ] + jit[j, ])) + b_idio[, bi[j]] +
+         as.vector(lat_load %*% lat_score[j, ]) + (gi[j] == 2L) * de_shift + log(lib[j])
+  x <- rnbinom(G, mu = exp(lmu), size = 1 / (disp_1 * b_disp[bi[j]]))
+  x[x == 0] <- 1L                                  # polyester replaces zero draws with 1
+  x
+}, numeric(G))
+storage.mode(sim) <- "integer"
+rownames(sim) <- sprintf("gene%05d", seq_len(G))
+colnames(sim) <- sprintf("s%04d", seq_len(n))
+
+truth <- rep("null", G); truth[ups] <- "up"; truth[downs] <- "down"
+data.frame(genes = G, patients = n, batches = nlevels(batch), truly_DE = n_de,
+           median_count = median(sim), max_count = max(sim),
+           dispersion_ratio_range = sprintf("%.1f-%.1f", min(b_disp), max(b_disp)))
+```
+
+Batch effects act mainly along two technical directions, the way library depth, degradation and
+GC bias do, with the `r nlevels(batch)` batches scattered across that plane and a
+smaller idiosyncratic shift per gene per batch on top. Each batch has its own dispersion.
+Samples also carry continuous patient heterogeneity, without which every sample in a cell would
+share one mean vector and the batches would collapse to points.
+`r format(n_de, big.mark = ",")` of `r format(G, big.mark = ",")` genes are truly differential at
+`r bio_fold`-fold, half up and half down.
+
+```{r sim-de-setup}
+# scoring helpers, defined before the equivalence checks that use them
+pc_sim <- function(mat) {
+  p <- prcomp(t(cpm(mat, log = TRUE, prior.count = 1)), scale. = FALSE)
+  # centre and loadings are kept so another matrix can be projected onto this basis, which is
+  # what makes a component index mean the same thing across two arms
+  list(x = p$x, ve = p$sdev^2 / sum(p$sdev^2), center = p$center, rotation = p$rotation)
+}
+sim_de <- function(mat) {
+  d <- edgeR_norm(DGEList(mat))
+  des <- model.matrix(~ group)
+  topTable(eBayes(lmFit(voom(d, des), des)), coef = 2, number = Inf, sort.by = "none")
+}
+```
+
+## 1. ComBat-seq against the original
+
+One correction, computed twice. Everything in this sub-section reads these two objects.
+
+```{r sim-correct, cache = TRUE, dependson = 'sim', cache.extra = list(n_workers, packageVersion('rnaparallel'))}
+sim_ref <- sva::ComBat_seq(sim, batch = batch, group = group)
+sim_par <- ComBat_seq_parallel(sim, batch = batch, group = group, workers = n_workers)
+identical(sim_ref, sim_par)
+```
+
+```{r sim-assert}
+stopifnot(identical(sim_ref, sim_par))
+```
+
+Every stage below is computed from both corrected matrices and compared, not assumed equal
+because the inputs were.
+
+```{r sim-identical}
+# decomposed here and reused by the metrics table and the figure below, rather than repeated
+q_rf       <- pc_sim(sim_ref); q_pr <- pc_sim(sim_par)
+sim_tt_ref <- sim_de(sim_ref); sim_tt_par <- sim_de(sim_par)
+
+data.frame(
+  stage = c("corrected counts", "storage mode", "PCA scores", "PCA variance explained",
+            "log fold changes", "t statistics", "adjusted p-values", "significant gene set"),
+  identical = c(
+    identical(sim_ref, sim_par),
+    identical(storage.mode(sim_ref), storage.mode(sim_par)),
+    identical(q_rf$x, q_pr$x),
+    identical(q_rf$ve, q_pr$ve),
+    identical(sim_tt_ref$logFC, sim_tt_par$logFC),
+    identical(sim_tt_ref$t, sim_tt_par$t),
+    identical(sim_tt_ref$adj.P.Val, sim_tt_par$adj.P.Val),
+    identical(rownames(sim_tt_ref)[sim_tt_ref$adj.P.Val < 0.05],
+              rownames(sim_tt_par)[sim_tt_par$adj.P.Val < 0.05])))
+```
+
+```{r sim-identical-assert}
+stopifnot(identical(sim_ref, sim_par),
+          identical(q_rf$x, q_pr$x),
+          identical(q_rf$ve, q_pr$ve),
+          identical(sim_tt_ref$logFC, sim_tt_par$logFC),
+          identical(sim_tt_ref$t, sim_tt_par$t),
+          identical(sim_tt_ref$adj.P.Val, sim_tt_par$adj.P.Val))
+```
+
+```{r sim-metrics}
+q_un <- pc_sim(sim)   # the corrected arms were decomposed in the identity check above
+
+# how far apart the batch centroids sit, in units of the spread inside a batch, so the number
+# does not move when the components are rescaled
+batch_sep <- function(q) {
+  ctr <- t(vapply(levels(batch), function(l)
+    colMeans(q$x[batch == l, 1:2, drop = FALSE]), numeric(2)))
+  spread <- mean(vapply(levels(batch), function(l)
+    sqrt(mean(apply(q$x[batch == l, 1:2, drop = FALSE], 2, var))), numeric(1)))
+  mean(dist(ctr)) / spread
+}
+# the condition is not expected on PC1: it is a smaller effect than patient heterogeneity, and
+# reporting only PC1 would score a preserved variable as destroyed
+best_r2 <- function(q, f, k = 10L)
+  max(vapply(seq_len(k), function(i) summary(lm(q$x[, i] ~ f))$r.squared, numeric(1)))
+
+# The null for a maximum over ten components is not the null for one, so it is measured by
+# permuting the labels rather than borrowing the single-component floor.
+set.seed(7)
+null_best <- mean(replicate(200, {
+  g <- sample(group)
+  max(vapply(1:10, function(i) summary(lm(q_un$x[, i] ~ g))$r.squared, numeric(1)))
+}))
+
+data.frame(quantity = c("batch R2 on PC1", "batch separation on PC1-PC2",
+                        "condition R2, best of PC1-PC10"),
+           uncorrected = round(c(summary(lm(q_un$x[, 1] ~ batch))$r.squared,
+                                 batch_sep(q_un), best_r2(q_un, group)), 4),
+           corrected   = round(c(summary(lm(q_rf$x[, 1] ~ batch))$r.squared,
+                                 batch_sep(q_rf), best_r2(q_rf, group)), 4),
+           chance_floor = c(round((nlevels(batch) - 1) / (ncol(sim) - 1), 4), NA,
+                            round(null_best, 4)))
+```
+
+```{r sim-pca, fig.height = 4.6}
+ve_sim <- function(q, lab) sprintf("%s\nPC1 %.1f%%, PC2 %.1f%%", lab, 100 * q$ve[1], 100 * q$ve[2])
+arm_of <- function(q, lab) data.frame(PC1 = q$x[, 1], PC2 = q$x[, 2], batch = batch, arm = lab)
+
+sd_df <- rbind(arm_of(q_un, "Uncorrected"), arm_of(q_rf, "sva::ComBat_seq"),
+               arm_of(q_pr, "ComBat_seq_parallel"))
+sd_df$arm <- factor(sd_df$arm, levels = c("Uncorrected", "sva::ComBat_seq", "ComBat_seq_parallel"))
+sim_lab <- setNames(c(ve_sim(q_un, "Uncorrected"), ve_sim(q_rf, "sva::ComBat_seq"),
+                      ve_sim(q_pr, "ComBat_seq_parallel")), levels(sd_df$arm))
+
+ggplot(sd_df, aes(PC1, PC2, colour = batch)) +
+  geom_point(size = 1.5, alpha = 0.8) +
+  stat_ellipse(aes(group = batch), linewidth = 0.6, type = "norm", level = 0.68) +
+  scale_colour_manual(values = setNames(RColorBrewer::brewer.pal(10, "Paired"), levels(batch)),
+                      name = "batch") +
+  guides(colour = guide_legend(override.aes = list(size = 3, alpha = 1), ncol = 1)) +
+  facet_wrap(~ arm, nrow = 1, scales = "free", labeller = labeller(arm = sim_lab)) +
+  labs(title = "Simulated counts, coloured by batch",
+       subtitle = sprintf("%s genes, %s patients, %d batches. Ten clouds become one.",
+                           format(G, big.mark = ","), format(ncol(sim), big.mark = ","),
+                           nlevels(batch)),
+       x = "PC1", y = "PC2")
+```
+
+Ground truth is known by construction, so the correction can be scored rather than described.
+
+```{r sim-de}
+score <- function(tt, lab) {
+  called <- tt$adj.P.Val < 0.05
+  data.frame(analysis = lab,
+             called = sum(called),
+             true_positives = sum(called & truth != "null"),
+             false_positives = sum(called & truth == "null"),
+             sensitivity = round(sum(called & truth != "null") / sum(truth != "null"), 3),
+             FDR_observed = round(ifelse(sum(called) > 0,
+                                         sum(called & truth == "null") / sum(called), 0), 3))
+}
+# the corrected arms were fitted in the identity check above
+rbind(score(sim_de(sim), "uncorrected"),
+      score(sim_tt_ref, "sva::ComBat_seq"),
+      score(sim_tt_par, "ComBat_seq_parallel"))
+```
+
+```{r sim-de-assert}
+stopifnot(identical(sim_tt_ref$logFC, sim_tt_par$logFC),
+          identical(sim_tt_ref$adj.P.Val, sim_tt_par$adj.P.Val))
+```
+
+### a. Speed
+
+The sweep below runs the same simulated matrix in fresh sessions through `callr::r`, so no arm
+inherits a warm cache, a loaded package set, or a cluster from the one before it. Each arm is
+compared against the reference matrix itself, not against a summary of it.
+
+The baseline arm is `sva::ComBat_seq` itself, not this package held to one worker.
+
+```{r sim-speed, cache = TRUE, dependson = c('sim', 'sim-correct'), cache.extra = list(n_workers, packageVersion('rnaparallel'))}
+sim_file <- file.path(tempdir(), "sim-bench.rds")
+saveRDS(list(counts = sim, batch = batch, group = group, ref = sim_ref), sim_file)
+
+sim_timings <- do.call(rbind, lapply(sort(unique(c(1L, tcga_workers))), function(w) {
+  r <- callr::r(function(f, w) {
+    suppressMessages({library(sva); library(rnaparallel)})
+    d  <- readRDS(f)
+    t0 <- Sys.time()
+    out <- if (w == 1L) sva::ComBat_seq(d$counts, batch = d$batch, group = d$group)
+           else ComBat_seq_parallel(d$counts, batch = d$batch, group = d$group, workers = w)
+    # compared against the reference matrix itself. A checksum over 1e7 cells lands near
+    # 1e16, past 2^53, where one unit in the last place is about 2 and a single-cell corruption
+    # rounds away: the summary that was meant to catch it cannot represent it.
+    list(secs = as.numeric(difftime(Sys.time(), t0, units = "secs")),
+         same = identical(out, d$ref))
+  }, args = list(f = sim_file, w = w))
+  data.frame(workers = w, seconds = r$secs, same = r$same)
+}))
+unlink(sim_file)
+
+sim_timings$implementation <- ifelse(sim_timings$workers == 1L, "sva::ComBat_seq",
+                                     sprintf("ComBat_seq_parallel, %d workers", sim_timings$workers))
+sim_timings$speedup <- sim_timings$seconds[1] / sim_timings$seconds
+# the baseline arm is the reference, so it has nothing to compare against
+sim_timings$identical_to_original <- ifelse(sim_timings$workers == 1L, NA, sim_timings$same)
+sim_timings[, c("implementation", "seconds", "speedup", "identical_to_original")]
+```
+
+```{r sim-speed-plot, fig.height = 4}
+sim_best <- sim_timings[which.min(sim_timings$seconds), ]
+sim_timings$arm <- factor(
+  ifelse(sim_timings$workers == 1L, "sva::ComBat_seq\n(original)",
+         sprintf("parallel\n%d workers", sim_timings$workers)),
+  levels = ifelse(sim_timings$workers == 1L, "sva::ComBat_seq\n(original)",
+                  sprintf("parallel\n%d workers", sim_timings$workers)))
+
+ggplot(sim_timings, aes(arm, speedup)) +
+  geom_col(width = 0.65,
+           fill = ifelse(sim_timings$workers == 1L, "grey55",
+                         ifelse(sim_timings$workers == sim_best$workers, "#b2182b", "#22506e"))) +
+  geom_text(aes(label = sprintf("%.2fx\n%.1f s", speedup, seconds)), vjust = -0.3,
+            size = 4.6, fontface = "bold", lineheight = 0.95) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.22))) +
+  labs(title = "Simulated counts: original against the parallel companion",
+       subtitle = sprintf("%s genes by %s patients, %d batches. Every arm returns a matrix identical to the original.",
+                          format(G, big.mark = ","), format(ncol(sim), big.mark = ","), nlevels(batch)),
+       x = NULL, y = "speedup vs sva::ComBat_seq")
+```
+
+```{r sim-speed-assert}
+par_arms <- sim_timings$identical_to_original[sim_timings$workers != 1L]
+stopifnot(length(par_arms) >= 1L, !anyNA(par_arms), all(par_arms))
+```
+
+### b. Preserving the biological variable
+
+`ComBat_seq` is told which variation to keep. Whether that matters depends on how the batches
+were filled. The same simulation is rerun with the condition partly aligned to batch, which is
+what a real cohort looks like when one arm concentrates in a few cancer types.
+
+```{r sim-preserve}
+unbal <- local({
+  set.seed(123)
+  n1c <- 85L; n1t <- 15L; n2c <- 15L; n2t <- 85L        # batch 1 mostly control, batch 2 mostly treated
+  b <- factor(c(rep("1", n1c + n1t), rep("2", n2c + n2t)))
+  g <- factor(c(rep("control", n1c), rep("treated", n1t),
+                rep("control", n2c), rep("treated", n2t)))
+  lv <- c("1.control", "2.control", "1.treated", "2.treated")
+  cl <- factor(paste(b, g, sep = "."), levels = lv)
+  bs <- round(runif(G, 20, 600))
+  di <- sample.int(G, 100); u <- di[1:50]; d <- di[51:100]
+  bu <- sample.int(G, G / 2)
+  f <- matrix(1, G, 4, dimnames = list(NULL, lv))
+  f[bu, c(2, 4)] <- batch_fold; f[-bu, c(2, 4)] <- 1 / batch_fold
+  f[u, c(3, 4)] <- f[u, c(3, 4)] * bio_fold
+  f[d, c(1, 2)] <- f[d, c(1, 2)] * bio_fold
+  sz <- matrix(1 / disp_1, G, 4); sz[, c(2, 4)] <- 1 / (disp_1 * disp_fold)
+  kk <- as.integer(cl)
+  m <- vapply(seq_along(kk), function(j) {
+    x <- rnbinom(G, mu = bs * f[, kk[j]], size = sz[, kk[j]]); x[x == 0] <- 1L; x
+  }, numeric(G))
+  storage.mode(m) <- "integer"; rownames(m) <- sprintf("gene%04d", seq_len(G))
+  list(counts = m, batch = b, group = g, de = di)
+})
+
+score_un <- function(mat, lab) {
+  des <- model.matrix(~ unbal$group)
+  tt <- topTable(eBayes(lmFit(voom(edgeR_norm(DGEList(mat)), des), des)),
+                  coef = 2, number = Inf, sort.by = "none")
+  sig <- tt$adj.P.Val < 0.05; is_de <- seq_len(G) %in% unbal$de
+  data.frame(correction = lab, called = sum(sig), true_positives = sum(sig & is_de),
+             false_positives = sum(sig & !is_de),
+             sensitivity = round(sum(sig & is_de) / length(unbal$de), 3),
+             FDR_observed = round(ifelse(sum(sig) > 0, sum(sig & !is_de) / sum(sig), 0), 3))
+}
+rbind(score_un(unbal$counts, "none"),
+      score_un(ComBat_seq(unbal$counts, batch = unbal$batch, group = NULL),
+               "corrected, nothing preserved"),
+      score_un(ComBat_seq(unbal$counts, batch = unbal$batch, group = unbal$group),
+               "corrected, condition preserved"))
+```
+
+Without correction the batch effect produces mostly false positives. Correcting without naming
+the biology is worse in the other direction: where the condition partly aligns with batch, its
+signal is absorbed into the batch estimate and removed. Naming it recovers the genes.
+
+Preserving the variable that is later tested makes the reported p-values slightly optimistic, so
+the observed false discovery rate above tends to sit over the nominal 0.05.
+
+## 2. limma and edgeR against the originals
+
+The correction is half a pipeline; the differential expression that follows is the other half.
+`calcNormFactors_parallel`, `lmFit_parallel` and `duplicateCorrelation_parallel` call the
+original edgeR and limma functions unchanged on blocks of genes or samples, and each stage below
+is timed twice on the same input, once through the original and once through the companion.
+
+The contrast is the planted one, treated against control, on the corrected counts from C.1 at
+the same worker counts. Because the truth is known here, a divergence would show up as a
+different recovered gene set, not only as a failed `identical()`.
+
+```{r sim-limma, cache = TRUE, dependson = 'sim-correct', cache.extra = list(n_workers, packageVersion('rnaparallel'))}
+sim_des <- model.matrix(~ group)
+
+sim_nf_v <- edgeR_norm(DGEList(sim_ref))
+sim_nf_p <- calcNormFactors_parallel(DGEList(sim_ref), workers = n_workers)
+
+sim_vv    <- voom(sim_nf_v, sim_des)
+sim_fit_v <- lmFit(sim_vv, sim_des)
+sim_fit_p <- lmFit_parallel(sim_vv, sim_des, workers = n_workers)
+
+sim_tt_v <- topTable(eBayes(sim_fit_v), coef = 2, number = Inf, sort.by = "none")
+sim_tt_p <- topTable(eBayes(sim_fit_p), coef = 2, number = Inf, sort.by = "none")
+
+# batch is the repeated unit here. A subset keeps the serial arm to minutes, and the per-gene
+# work does not change with gene count, so the ratio is the same either way.
+set.seed(20260820)
+sim_dc_genes <- sort(sample.int(nrow(sim_vv), min(3000L, nrow(sim_vv))))
+sim_dc_v <- duplicateCorrelation(sim_vv[sim_dc_genes, ], sim_des, block = batch)
+sim_dc_p <- duplicateCorrelation_parallel(sim_vv[sim_dc_genes, ], sim_des, block = batch,
+                                          workers = n_workers)
+
+sim_rbe_v <- removeBatchEffect(sim_vv$E, batch = batch, design = sim_des)
+sim_rbe_p <- removeBatchEffect_parallel(sim_vv$E, batch = batch, design = sim_des,
+                                        workers = n_workers)
+
+sim_limma_checks <- data.frame(
+  stage = c("calcNormFactors (TMM)", "lmFit", "duplicateCorrelation",
+            "removeBatchEffect", "topTable, final gene list"),
+  identical = c(identical(sim_nf_v, sim_nf_p), identical(sim_fit_v, sim_fit_p),
+                identical(sim_dc_v, sim_dc_p), identical(sim_rbe_v, sim_rbe_p),
+                identical(sim_tt_v, sim_tt_p)))
+sim_limma_checks
+```
+
+```{r sim-limma-assert}
+stopifnot(all(sim_limma_checks$identical))
+```
+
+Scored against the planted truth, so the two implementations are compared on what they recover
+rather than only on whether their numbers match.
+
+```{r sim-limma-truth}
+rbind(score(sim_tt_v, "limma"),
+      score(sim_tt_p, "rnaparallel companions"))
+```
+
+```{r sim-limma-speed, cache = TRUE, dependson = 'sim-limma', cache.extra = list(n_workers, packageVersion('rnaparallel'))}
+# Seconds only: holding every fitted object would keep a second copy of the whole pipeline
+# resident. Each original is timed on both sides of the companion arms and averaged, so drift
+# moves both halves of a ratio together instead of inflating whichever arms ran last.
+sim_secs <- function(e) { t0 <- Sys.time(); force(e)
+                          as.numeric(difftime(Sys.time(), t0, units = "secs")) }
+
+sim_best <- function(f, reps = 3L) min(vapply(seq_len(reps), function(i) sim_secs(f()), numeric(1)))
+
+sim_stages <- c("calcNormFactors (TMM)", "lmFit", "duplicateCorrelation", "removeBatchEffect")
+sim_grid   <- sort(unique(tcga_workers))
+sim_pre <- c(sim_best(function() edgeR_norm(DGEList(sim_ref))),
+             sim_best(function() lmFit(sim_vv, sim_des)),
+             sim_secs(duplicateCorrelation(sim_vv[sim_dc_genes, ], sim_des, block = batch)),
+             sim_best(function() removeBatchEffect(sim_vv$E, batch = batch, design = sim_des)))
+
+sim_limma_speed <- do.call(rbind, lapply(sim_grid, function(w) {
+  p <- c(sim_best(function() calcNormFactors_parallel(DGEList(sim_ref), workers = w)),
+         sim_best(function() lmFit_parallel(sim_vv, sim_des, workers = w)),
+         sim_secs(duplicateCorrelation_parallel(sim_vv[sim_dc_genes, ], sim_des,
+                                                block = batch, workers = w)),
+         sim_best(function() removeBatchEffect_parallel(sim_vv$E, batch = batch,
+                                                        design = sim_des, workers = w)))
+  invisible(gc(verbose = FALSE))
+  data.frame(stage = sim_stages, workers = w, companion = p)
+}))
+
+sim_post <- c(sim_best(function() edgeR_norm(DGEList(sim_ref))),
+              sim_best(function() lmFit(sim_vv, sim_des)),
+              sim_secs(duplicateCorrelation(sim_vv[sim_dc_genes, ], sim_des, block = batch)),
+              sim_best(function() removeBatchEffect(sim_vv$E, batch = batch, design = sim_des)))
+
+sim_limma_speed$original <- rep((sim_pre + sim_post) / 2, length(sim_grid))
+sim_limma_speed$speedup  <- sim_limma_speed$original / sim_limma_speed$companion
+sim_drift <- max(abs(sim_post - sim_pre) / sim_pre)
+sim_limma_speed[, c("stage", "workers", "original", "companion", "speedup")]
+```
+
+Every short stage is the best of three runs rather than one, because a stage lasting a second or
+two is defined by whatever else the machine did during it rather than by its own cost. Each
+original is also timed on both sides of the companion arms and the mean is the denominator; those
+two readings differ by at most `r sprintf("%.1f%%", 100 * sim_drift)` here, which is the drift the
+bracketing absorbs.
+
+```{r sim-limma-speed-plot, fig.height = 4.2}
+ggplot(sim_limma_speed, aes(factor(workers), speedup, fill = stage)) +
+  geom_col(position = position_dodge(0.8), width = 0.72) +
+  geom_hline(yintercept = 1, linetype = 2, colour = "grey50") +
+  geom_text(aes(label = sprintf("%.2fx", speedup)),
+            position = position_dodge(0.8), vjust = -0.35, size = 3.1) +
+  scale_fill_manual(values = pal_stage) +
+  labs(x = "workers", y = "speedup against the original", fill = NULL,
+       title = "limma and edgeR companions, simulated counts",
+       subtitle = sprintf("%s genes by %d samples. duplicateCorrelation on a %s gene subset. Identity checked at %d workers.",
+                           format(nrow(sim_ref), big.mark = ","), ncol(sim_ref),
+                           format(length(sim_dc_genes), big.mark = ","), n_workers)) +
+  expand_limits(y = 0)
+```
+
+
+# D. TCGA
+
+## 1. Cohort
+
+TCGA cohorts recording tobacco smoking status. Sequencing plate is the batch variable. Both
+smoking and cancer type are preserved, passed together through `covar_mod`, so the correction
+removes plate variation while holding those two columns. It cannot promise to remove nothing
+else: variation confounded with plate that is not in the model goes with it.
+
+Preserving cancer type requires that plates cross cancer types. Where a cohort shares no plate
+with any other, its cancer-type column is an exact sum of its plate columns. The design loses
+rank and ComBat-seq refuses, rather than return an answer that cannot be attributed to either
+variable.
+
+The first run downloads the cohorts once. Later runs read the cached per-project files.
+
+```{r tcga-locate}
+# The three largest cohorts with smoking status. Runtime is driven by the number of plates,
+# because the GLM design carries one column per plate and its cost grows with the square of the
+# design width, so cohort count is the lever that decides whether this finishes in a usable
+# time. Three keeps the design narrow enough, and ComBat-seq still adjusts every gene that
+# survives filtering rather than skipping any.
+projects <- c("TCGA-HNSC", "TCGA-LUAD", "TCGA-LUSC")
+
+# Two locations only, both chosen by the user: RNAPARALLEL_TCGA_DIR if set, otherwise the
+# standard per-user cache. An earlier version also searched parent directories, which meant
+# anyone able to write to an ancestor path on a shared machine could plant a directory the
+# notebook would silently read from. The pre-rename cache name is still read, so an
+# existing download is not fetched a second time.
+cache_new <- tools::R_user_dir("rnaparallel", "cache")
+cache_old <- tools::R_user_dir("combatseqparallel", "cache")
+cache_dir <- if (!dir.exists(file.path(cache_new, "smoking")) &&
+                 dir.exists(file.path(cache_old, "smoking"))) cache_old else cache_new
+env_dir   <- Sys.getenv("RNAPARALLEL_TCGA_DIR", Sys.getenv("COMBATSEQ_TCGA_DIR", ""))
+root      <- if (nzchar(env_dir)) env_dir else cache_dir
+data_dir  <- normalizePath(file.path(root, "smoking"), mustWork = FALSE)
+```
+
+```{r tcga-download}
+dir.create(data_dir, recursive = TRUE, showWarnings = FALSE)
+absent <- projects[!file.exists(file.path(data_dir, paste0(projects, "-counts.rds")))]
+
+if (length(absent)) {
+  suppressMessages(library(TCGAbiolinks))
+  for (p in absent) {
+    message("downloading ", p)
+    q <- GDCquery(project = p, data.category = "Transcriptome Profiling",
+                  data.type = "Gene Expression Quantification",
+                  workflow.type = "STAR - Counts")
+    GDCdownload(q, method = "api", files.per.chunk = 40,
+                directory = file.path(data_dir, "GDCdata"))
+    se  <- GDCprepare(q, directory = file.path(data_dir, "GDCdata"), summarizedExperiment = TRUE)
+    bc  <- colnames(se)
+    idx <- which(substr(bc, 14, 15) == "01")          # primary tumour
+    idx <- idx[order(bc[idx])]                        # deterministic aliquot choice
+    idx <- idx[!duplicated(substr(bc[idx], 1, 12))]   # one per patient
+    pc  <- rowData(se)$gene_type == "protein_coding"
+    cts <- assay(se, "unstranded")[pc, idx, drop = FALSE]
+    storage.mode(cts) <- "integer"
+    saveRDS(list(counts = cts, barcode = colnames(se)[idx], project = p,
+                 symbol = rowData(se)$gene_name[pc]),
+            file.path(data_dir, paste0(p, "-counts.rds")))
+    rm(se, cts); invisible(gc())
+  }
+}
+parts <- lapply(projects, function(p) readRDS(file.path(data_dir, paste0(p, "-counts.rds"))))
+```
+
+```{r tcga-clinical}
+suppressMessages(library(TCGAbiolinks))
+bad  <- c("not reported", "unknown", "not available", "")
+clin <- do.call(rbind, lapply(projects, function(p) {
+  d <- suppressMessages(GDCquery_clinic(p, type = "clinical"))
+  if (!"tobacco_smoking_status" %in% names(d)) return(NULL)
+  data.frame(patient = d$submitter_id, status = as.character(d$tobacco_smoking_status),
+             stringsAsFactors = FALSE)
+}))
+clin <- clin[!is.na(clin$status) & !(tolower(clin$status) %in% bad), ]
+# The GDC label as recorded, not a collapsed grouping. Lifelong Non-Smoker is the reference,
+# so the differential expression coefficient below is current smokers against never smokers and
+# the three reformed categories keep their own terms rather than being pooled into "ever".
+clin$smoking <- clin$status
+```
+
+```{r tcga-cohort, cache = TRUE, cache.lazy = FALSE, cache.extra = list(vapply(parts, function(x) dim(x$counts), integer(2)), dim(clin), sort(unique(clin$smoking)))}
+genes   <- Reduce(intersect, lapply(parts, function(x) rownames(x$counts)))
+counts  <- do.call(cbind, lapply(parts, function(x) x$counts[genes, , drop = FALSE]))
+cancer  <- factor(unlist(lapply(parts, function(x) rep(sub("TCGA-", "", x$project), ncol(x$counts)))))
+barcode <- unlist(lapply(parts, function(x) x$barcode))
+
+sym <- parts[[1]]$symbol; names(sym) <- rownames(parts[[1]]$counts); sym <- sym[genes]
+rm(parts); invisible(gc())
+
+smoking <- clin$smoking[match(substr(barcode, 1, 12), clin$patient)]
+has <- !is.na(smoking)
+counts <- counts[, has]; cancer <- droplevels(cancer[has])
+barcode <- barcode[has]
+
+# Lifelong Non-Smoker first, so it is the reference level every other category is compared to
+gdc_lv  <- c("Lifelong Non-Smoker",
+             sort(setdiff(unique(smoking[has]), "Lifelong Non-Smoker")))
+smoking <- droplevels(factor(smoking[has], levels = gdc_lv))
+
+# A plate holding one sample carries no within-batch information, so ComBat-seq cannot estimate
+# anything from it. The singletons are pooled into one SMALL level rather than dropped, which
+# keeps their samples in the correction but means that one level is not a real plate: it is a
+# bag of unrelated singletons sharing one estimated effect. It is excluded from the plate
+# rankings below for that reason.
+plate <- substr(barcode, 22, 25)
+tab   <- table(plate)
+plate <- factor(ifelse(plate %in% names(tab)[tab >= 2], plate, "SMALL"))
+
+keep_g <- filterByExpr(counts, group = smoking)
+counts <- counts[keep_g, ]; sym <- sym[keep_g]
+storage.mode(counts) <- "integer"
+
+stopifnot(nlevels(smoking) >= 2L, sum(smoking == "Current Smoker") >= 30L,
+          levels(smoking)[1] == "Lifelong Non-Smoker")   # a GDC label change would
+                                                            # otherwise surface an hour later
+data.frame(genes = nrow(counts), samples = ncol(counts), plates = nlevels(plate),
+           cancer_types = nlevels(cancer),
+           never = sum(smoking == "Lifelong Non-Smoker"),
+           current = sum(smoking == "Current Smoker"),
+           other_categories = nlevels(smoking) - 2L)
+```
+
+### a. Cohort characteristics
+
+```{r table1, message = FALSE}
+library(gtsummary)
+theme_gtsummary_journal(journal = "jama")
+theme_gtsummary_compact()
+
+tbl1_data <- droplevels(data.frame(
+  cancer      = cancer,
+  lib_size    = colSums(counts) / 1e6,
+  genes_det   = colSums(counts > 0),
+  plate_n     = as.integer(table(plate)[as.character(plate)]),
+  smoking     = smoking
+))
+
+tbl1 <- tbl_summary(
+  tbl1_data,
+  by = smoking,
+  missing = "ifany", missing_text = "Unknown",
+  missing_stat = "{N_miss} ({p_miss}%)",
+  label = list(cancer     ~ "Cancer type",
+               lib_size  ~ "Library size, millions of reads",
+               genes_det ~ "Genes detected",
+               plate_n   ~ "Samples sharing the plate"),
+  statistic = list(all_continuous()  ~ "{mean}",
+                   all_categorical() ~ "{n} ({p}%)")) |>
+  add_overall(last = FALSE) |>
+  add_ci(include = c(lib_size, genes_det, plate_n),
+         method = list(all_continuous() ~ "t.test"), pattern = "{stat} ({ci})") |>
+  add_p(test = list(cancer     ~ "chisq.test",
+                    lib_size  ~ "kruskal.test",
+                    genes_det ~ "kruskal.test",
+                    plate_n   ~ "kruskal.test")) |>
+  modify_header(all_stat_cols() ~ "**{level}**  \nN = {n}") |>
+  bold_labels()
+tbl1
+```
+
+Smoking status is the GDC label as recorded, not a collapsed grouping, so each reformed category
+keeps its own term and its own count. Lifelong Non-Smoker is the reference level. The
+differential expression in D.2 contrasts Current Smoker against it, so someone who stopped
+fifteen years ago is neither counted as exposed nor discarded from the correction.
+
+The correction is applied once across the whole table above.
+
+```{r design-summary}
+# built once here; the correction, the design-rank check and the DE model all read this
+covar <- model.matrix(~ smoking + cancer)
+
+data.frame(
+  quantity = c("samples corrected", "genes", "batch variable",
+               "batch levels", "singleton plates pooled",
+               "biology preserved", "covariate columns"),
+  value = c(format(ncol(counts), big.mark = ","),
+            format(nrow(counts), big.mark = ","),
+            "sequencing plate, barcode characters 22-25",
+            nlevels(plate),
+            sum(table(substr(barcode, 22, 25)) < 2),
+            "smoking status and cancer type",
+            ncol(covar) - 1))
+```
+
+```{r tcga-design}
+# both biological variables are preserved, so both go in covar_mod and group stays NULL
+design <- cbind(model.matrix(~ -1 + plate), covar[, -1, drop = FALSE])
+design_rank <- qr(design)$rank
+data.frame(design_columns = ncol(design), rank = design_rank,
+           estimable = design_rank >= ncol(design))
+```
+
+```{r tcga-design-assert}
+stopifnot(design_rank >= ncol(design))
+```
+
+### b. Argument parity
+
+```{r argument-parity}
+a <- formals(sva::ComBat_seq)
+b <- formals(rnaparallel::ComBat_seq_parallel)
+data.frame(argument = names(a),
+           position_matches = match(names(a), names(b)) == seq_along(a),
+           default_matches = vapply(names(a), function(n)
+             identical(deparse(a[[n]]), deparse(b[[n]])), logical(1)),
+           row.names = NULL)
+```
+
+```{r argument-parity-assert}
+stopifnot(identical(names(a), names(b)[seq_along(a)]),
+          all(vapply(names(a), function(n)
+            identical(deparse(a[[n]]), deparse(b[[n]])), logical(1))))
+data.frame(parallel_only_arguments = setdiff(names(b), names(a)))
+```
+
+## 2. ComBat-seq against the original
+
+One correction of the whole cohort per worker count, each compared against `sva::ComBat_seq`
+on the same call. Only the last arm is kept for the figures below.
+
+```{r tcga-correct, cache = TRUE, cache.lazy = FALSE, dependson = 'tcga-cohort', cache.extra = list(tcga_workers, dim(covar), colnames(covar), packageVersion('rnaparallel'))}
+t0  <- Sys.time()
+ref <- sva::ComBat_seq(counts, batch = plate, group = NULL, covar_mod = covar)
+secs_ref <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
+
+# Each worker count corrects the whole matrix again. Only the last arm is kept: a corrected
+# copy of this cohort is about 110 MB, and holding every arm buys nothing once its output has
+# been compared against the reference.
+secs_w <- numeric(length(tcga_workers))
+same_w <- logical(length(tcga_workers))
+for (i in seq_along(tcga_workers)) {
+  t1  <- Sys.time()
+  out <- ComBat_seq_parallel(counts, batch = plate, group = NULL, covar_mod = covar,
+                             workers = tcga_workers[i])
+  secs_w[i] <- as.numeric(difftime(Sys.time(), t1, units = "secs"))
+  same_w[i] <- identical(out, ref)
+  if (i == length(tcga_workers)) par <- out
+  rm(out); invisible(gc(verbose = FALSE))
+}
+```
+
+```{r tcga-identical-assert}
+stopifnot(all(same_w), identical(ref, par))
+```
+
+### a. Principal components
+
+```{r tcga-pca}
+pca_of <- pc_sim                      # same decomposition the simulated section uses
+p_un <- pca_of(counts); p_rf <- pca_of(ref); p_pr <- pca_of(par)
+```
+
+```{r tcga-pca-identical}
+identical(p_rf$x, p_pr$x) && identical(p_rf$ve, p_pr$ve)
+```
+
+```{r tcga-pca-plot, fig.width = 13, fig.height = 5.4}
+pdf_of <- function(p, lab) data.frame(PC1 = p$x[, 1], PC2 = p$x[, 2],
+                                      cancer = cancer, arm = lab)
+pd <- rbind(pdf_of(p_un, "Uncorrected"), pdf_of(p_rf, "sva::ComBat_seq"),
+            pdf_of(p_pr, "ComBat_seq_parallel"))
+pd$arm <- factor(pd$arm, levels = c("Uncorrected", "sva::ComBat_seq", "ComBat_seq_parallel"))
+
+# Each arm is decomposed separately, so its components explain their own share of a different
+# total variance. One shared axis label would report the uncorrected figure under all three.
+ve_strip <- function(p, lab) sprintf("%s\nPC1 %.1f%%, PC2 %.1f%%", lab, 100 * p$ve[1], 100 * p$ve[2])
+arm_lab <- setNames(c(ve_strip(p_un, "Uncorrected"), ve_strip(p_rf, "sva::ComBat_seq"),
+                      ve_strip(p_pr, "ComBat_seq_parallel")), levels(pd$arm))
+
+ggplot(pd, aes(PC1, PC2, colour = cancer)) +
+  geom_point(size = 0.9, alpha = 0.8) +
+  scale_colour_brewer(palette = "Paired", name = "cancer type") +
+  guides(colour = guide_legend(override.aes = list(size = 3.4, alpha = 1), ncol = 1)) +
+  facet_wrap(~ arm, nrow = 1, scales = "free", labeller = labeller(arm = arm_lab)) +
+  labs(title = "Principal components, coloured by cancer type",
+       subtitle = sprintf("%s samples, %d cancer types, %d plates. Right two panels: same numbers, two ways.",
+                           format(ncol(counts), big.mark = ","), nlevels(cancer), nlevels(plate)),
+       x = "PC1", y = "PC2")
+```
+
+```{r pca-plate-pick, include = FALSE}
+pcx <- 1L; pcy <- 2L
+```
+
+```{r pca-plate-rank}
+# Which plate actually deviates most? Rank them by how far the plate centroid sits from the
+# cohort centroid on PC1 and PC2, in units of the within-plate spread, so a large plate with a
+# small offset does not outrank a small plate that is genuinely displaced. The worst plate is
+# selected on the uncorrected arm, so its own shrinkage regresses toward the mean whether or not
+# the correction works; the median across all plates is reported beside it for that reason.
+plate_dev <- function(x, i1 = pcx, i2 = pcy) {
+  vapply(levels(plate), function(l) {
+    i <- plate == l
+    if (sum(i) < 3) return(NA_real_)
+    ctr <- c(mean(x[i, i1]), mean(x[i, i2]))
+    sqrt(sum(ctr^2)) / sqrt(mean(c(var(x[i, i1]), var(x[i, i2]))))
+  }, numeric(1))
+}
+dev_un <- plate_dev(p_un$x); dev_rf <- plate_dev(p_rf$x)
+
+# PC1 and PC2 are mostly cancer type, and covar_mod is told to keep cancer type. Because each
+# cohort has its own plates, a plate centroid on those axes carries the biology the correction
+# must not remove, so plate displacement there is not expected to fall and can rise as the
+# within-plate spread tightens. The components where plate acts on its own are the ones that
+# say whether the correction worked, so both numbers are reported.
+plate_gap <- vapply(1:8, function(k)
+  summary(lm(p_un$x[, k] ~ plate))$r.squared - summary(lm(p_un$x[, k] ~ cancer))$r.squared,
+  numeric(1))
+pdom <- order(plate_gap, decreasing = TRUE)[1:2]
+
+# Component k of one decomposition is not component k of another: separately fitted PCAs can
+# rotate and reorder, so a reduction read off the same index compares two different directions.
+# The corrected arm is projected onto the uncorrected loadings instead, where the index means
+# one thing and the before/after difference is the correction rather than a change of basis.
+onto_un <- function(mat) {
+  lc <- t(cpm(mat, log = TRUE, prior.count = 1))
+  sweep(lc, 2, p_un$center, "-") %*% p_un$rotation
+}
+dev_un_p <- plate_dev(p_un$x, pdom[1], pdom[2])
+dev_rf_p <- plate_dev(onto_un(ref), pdom[1], pdom[2])
+keep_pl  <- setdiff(names(dev_un), "SMALL")
+med_red_p <- median(1 - dev_rf_p[keep_pl] / dev_un_p[keep_pl], na.rm = TRUE)
+worst  <- setdiff(names(sort(dev_un, decreasing = TRUE)), "SMALL")[1:10]
+
+med_red <- median(1 - dev_rf[keep_pl] / dev_un[keep_pl], na.rm = TRUE)
+
+data.frame(plate = c(worst, "median of all plates"),
+           n = c(as.integer(table(plate)[worst]), NA_integer_),
+           deviation_uncorrected = round(c(dev_un[worst], NA), 3),
+           deviation_corrected = round(c(dev_rf[worst], NA), 3),
+           reduction_PC1_PC2 = sprintf("%.0f%%", 100 * c(1 - dev_rf[worst] / dev_un[worst], med_red)),
+           reduction_plate_PCs = sprintf("%.0f%%",
+             100 * c(1 - dev_rf_p[worst] / dev_un_p[worst], med_red_p)),
+           row.names = NULL)
+```
+
+```{r pca-plate-plot, fig.width = 13, fig.height = 5.4}
+# the ten most displaced plates in colour, every other plate grey behind them
+hl <- factor(ifelse(plate %in% worst, as.character(plate), "other plates"),
+             levels = c(worst, "other plates"))
+
+pdp <- rbind(data.frame(X = p_un$x[, pcx], Y = p_un$x[, pcy], arm = "Uncorrected"),
+             data.frame(X = p_rf$x[, pcx], Y = p_rf$x[, pcy], arm = "sva::ComBat_seq"),
+             data.frame(X = p_pr$x[, pcx], Y = p_pr$x[, pcy], arm = "ComBat_seq_parallel"))
+pdp$hl  <- rep(hl, 3)
+pdp$arm <- factor(pdp$arm, levels = c("Uncorrected", "sva::ComBat_seq", "ComBat_seq_parallel"))
+
+pal_plate <- setNames(c(RColorBrewer::brewer.pal(10, "Paired"), "grey86"), levels(hl))
+
+arm_lab_p <- setNames(c(ve_strip(p_un, "Uncorrected"), ve_strip(p_rf, "sva::ComBat_seq"),
+                        ve_strip(p_pr, "ComBat_seq_parallel")), levels(pdp$arm))
+
+ggplot(pdp, aes(X, Y, colour = hl)) +
+  geom_point(data = subset(pdp, hl == "other plates"), size = 0.5, alpha = 0.25) +
+  geom_point(data = subset(pdp, hl != "other plates"), size = 1.3, alpha = 0.9) +
+  stat_ellipse(data = subset(pdp, hl != "other plates"), aes(group = hl),
+               linewidth = 0.9, type = "norm", level = 0.68) +
+  scale_colour_manual(values = pal_plate, name = "plate",
+                      guide = guide_legend(override.aes = list(size = 3.4, alpha = 1))) +
+  facet_wrap(~ arm, nrow = 1, scales = "free", labeller = labeller(arm = arm_lab_p)) +
+  labs(title = sprintf("The %d most displaced plates of %d, and what the correction does to them",
+                       length(worst), nlevels(plate)),
+       subtitle = sprintf("PC1-PC2 carry cancer type, which covar_mod preserves: median plate moves %.0f%%. On PC%d and PC%d, where plate acts alone, it falls %.0f%%.",
+                           100 * med_red, pdom[1], pdom[2], 100 * med_red_p),
+       x = "PC1", y = "PC2")
+```
+
+### b. Differential expression
+
+The contrast is current smokers against lifelong non-smokers. Former smokers stay in the
+cohort and in the correction, but are not part of this comparison. Cancer type sits in the design as an adjustment, not as a
+second contrast, because smoking is heavily imbalanced across cohorts: LUSC has
+`r sum(smoking == "Lifelong Non-Smoker" & cancer == "LUSC")` lifelong non-smokers against
+`r sum(smoking != "Lifelong Non-Smoker" & cancer == "LUSC")` patients with a smoking history, and
+LUAD has `r sum(smoking == "Lifelong Non-Smoker" & cancer == "LUAD")` against
+`r sum(smoking != "Lifelong Non-Smoker" & cancer == "LUAD")`. Both models are reported below, so
+the size of that confounding is visible rather than asserted.
+
+```{r tcga-de}
+de_design <- model.matrix(~ smoking + cancer)          # smoking contrast, adjusted for cancer
+de_design_unadj <- model.matrix(~ smoking)             # smoking alone, for comparison
+
+# the current-vs-never column, matched rather than hardcoded: the GDC labels contain spaces and
+# punctuation, so the coefficient name is not something to type from memory
+de_coef <- grep("Current Smoker$", colnames(de_design), value = TRUE)
+stopifnot(length(de_coef) == 1L)
+
+run_de <- function(mat, des = de_design) {
+  d <- edgeR_norm(DGEList(mat))
+  topTable(eBayes(lmFit(voom(d, des), des)), coef = de_coef,
+           number = Inf, sort.by = "none")
+}
+tt_ref <- run_de(ref); tt_par <- run_de(par)
+tt_unadj <- run_de(ref, de_design_unadj)
+
+data.frame(quantity = c("log fold change", "t statistic", "adjusted p", "significant set"),
+           identical = c(identical(tt_ref$logFC, tt_par$logFC),
+                         identical(tt_ref$t, tt_par$t),
+                         identical(tt_ref$adj.P.Val, tt_par$adj.P.Val),
+                         identical(rownames(tt_ref)[tt_ref$adj.P.Val < 0.05],
+                                   rownames(tt_par)[tt_par$adj.P.Val < 0.05])))
+```
+
+```{r de-adjustment}
+sig_adj <- rownames(tt_ref)[tt_ref$adj.P.Val < 0.05 & abs(tt_ref$logFC) > 1]
+sig_una <- rownames(tt_unadj)[tt_unadj$adj.P.Val < 0.05 & abs(tt_unadj$logFC) > 1]
+
+data.frame(model = c("~ smoking", "~ smoking + cancer"),
+           significant = c(length(sig_una), length(sig_adj)),
+           shared = length(intersect(sig_una, sig_adj)),
+           only_this_model = c(length(setdiff(sig_una, sig_adj)),
+                               length(setdiff(sig_adj, sig_una))))
+```
+
+Genes called by the unadjusted model alone are the cost of ignoring cancer type. Smoking is not
+randomised across these cohorts, so an unadjusted contrast partly measures which cancers the
+smokers have.
+
+```{r tcga-de-assert}
+stopifnot(identical(tt_ref$logFC, tt_par$logFC),
+          identical(tt_ref$t, tt_par$t),
+          identical(tt_ref$adj.P.Val, tt_par$adj.P.Val))
+```
+
+```{r tcga-de-top}
+# label helper: GDC ships versioned Ensembl identifiers, the figures want symbols
+lab_of <- function(ids) ifelse(is.na(sym[ids]) | sym[ids] == "", ids, sym[ids])
+```
+
+```{r volcano, fig.width = 12, fig.height = 5}
+library(ggrepel); library(patchwork)
+
+vd <- rbind(data.frame(gene = rownames(tt_ref), logFC = tt_ref$logFC, p = tt_ref$adj.P.Val,
+                       arm = "sva::ComBat_seq"),
+            data.frame(gene = rownames(tt_par), logFC = tt_par$logFC, p = tt_par$adj.P.Val,
+                       arm = "ComBat_seq_parallel"))
+vd$arm <- factor(vd$arm, levels = c("sva::ComBat_seq", "ComBat_seq_parallel"))
+vd$symbol <- lab_of(vd$gene)
+vd$state <- "not significant"
+vd$state[vd$p < 0.05 & vd$logFC >  1] <- "up in current smokers"
+vd$state[vd$p < 0.05 & vd$logFC < -1] <- "up in never smokers"
+vd$state <- factor(vd$state, levels = c("up in current smokers", "up in never smokers", "not significant"))
+pal_state <- c(`up in current smokers` = "#B2182B", `up in never smokers` = "#2166AC",
+               `not significant` = "grey82")
+
+# counts per arm, split left and right so each sits over the side it describes
+n_lab <- do.call(rbind, lapply(split(vd, vd$arm), function(d) data.frame(
+  arm  = d$arm[1],
+  up   = sum(d$p < 0.05 & d$logFC >  1, na.rm = TRUE),
+  down = sum(d$p < 0.05 & d$logFC < -1, na.rm = TRUE))))
+n_lab$x_up   <- max(vd$logFC, na.rm = TRUE) * 0.78
+n_lab$x_down <- min(vd$logFC, na.rm = TRUE) * 0.78
+# a strip above the tallest point, so labels and counts never share space
+n_lab$y_lab  <- max(-log10(vd$p), na.rm = TRUE) * 1.06
+
+# selected by adjusted p, then ordered by fold change so the side table reads as two blocks,
+# everything raised in current smokers above everything lowered
+top10 <- head(tt_par[order(tt_par$adj.P.Val), ], 10)
+top10 <- top10[order(top10$logFC, decreasing = TRUE), ]
+top10$symbol <- lab_of(rownames(top10))
+lab <- vd[vd$gene %in% rownames(top10), ]
+
+p_vol <- ggplot(vd, aes(logFC, -log10(p), colour = state)) +
+  geom_point(size = 0.7, alpha = 0.6) +
+  geom_point(data = lab, size = 1.7, colour = "black") +
+  geom_text_repel(data = lab, aes(label = symbol), size = 3.5, fontface = "bold",
+                  colour = "black", min.segment.length = 0, max.overlaps = Inf,
+                  box.padding = 0.45, segment.colour = "grey45", seed = 1) +
+  # the counts sit on their own strip above the cloud, so they cannot collide with a
+  # gene label placed near the top of the panel
+  geom_text(data = n_lab, aes(x = x_up, y = y_lab, label = paste0("Up: ", up)),
+            colour = "#B2182B", fontface = "bold", size = 5, hjust = 0.5, vjust = 0,
+            inherit.aes = FALSE) +
+  geom_text(data = n_lab, aes(x = x_down, y = y_lab, label = paste0("Down: ", down)),
+            colour = "#2166AC", fontface = "bold", size = 5, hjust = 0.5, vjust = 0,
+            inherit.aes = FALSE) +
+  scale_y_continuous(expand = expansion(mult = c(0.02, 0.16))) +
+  scale_colour_manual(values = pal_state, name = NULL) +
+  guides(colour = guide_legend(override.aes = list(size = 3.2, alpha = 1))) +
+  facet_wrap(~ arm, nrow = 1) +
+  labs(x = "log2 fold change", y = "-log10 adjusted p") +
+  theme(legend.position = "bottom")
+
+tab10 <- data.frame(y = rev(seq_len(nrow(top10))), symbol = top10$symbol,
+                    fc = sprintf("%+.1f", top10$logFC),
+                    padj = format(top10$adj.P.Val, digits = 2, scientific = TRUE))
+p_tab <- ggplot(tab10, aes(y = y)) +
+  geom_text(aes(x = 0.00, label = symbol), hjust = 0, size = 3.9, fontface = "bold") +
+  geom_text(aes(x = 1.02, label = fc), hjust = 1, size = 3.7,
+            colour = ifelse(top10$logFC > 0, "#B2182B", "#2166AC")) +
+  geom_text(aes(x = 1.92, label = padj), hjust = 1, size = 3.3, colour = "grey35") +
+  annotate("text", x = c(0, 1.02, 1.92), y = nrow(top10) + 1, hjust = c(0, 1, 1),
+           label = c("gene", "logFC", "FDR"), size = 3.5, fontface = "bold", colour = "grey20") +
+  scale_x_continuous(limits = c(-0.04, 1.96)) +
+  scale_y_continuous(limits = c(0.4, nrow(top10) + 1.6)) +
+  labs(title = "Top 10 by adjusted p") +
+  theme_void(base_size = 13) +
+  theme(plot.title = element_text(face = "bold", size = 13, margin = margin(b = 8)),
+        plot.margin = margin(6, 6, 6, 14))
+
+p_vol + p_tab + plot_layout(widths = c(4, 1.5)) +
+  plot_annotation(
+    title = "Differential expression, current versus never smokers",
+    subtitle = sprintf("%s genes at FDR < 0.05 and |logFC| > 1 in both arms. Several top genes are Y-linked: part of this contrast is sex.",
+                        format(sum(tt_par$adj.P.Val < 0.05 & abs(tt_par$logFC) > 1), big.mark = ",")),
+    theme = theme(plot.title = element_text(face = "bold", size = 18, margin = margin(b = 4)),
+                  plot.subtitle = element_text(size = 13, colour = "grey30", margin = margin(b = 10))))
+```
+
+```{r heatmap, fig.width = 13, fig.height = 11}
+library(ComplexHeatmap)
+
+# the heatmap shows the two groups being contrasted; former smokers are corrected and kept in
+# the cohort but are not part of this comparison
+hm_keep  <- smoking %in% c("Lifelong Non-Smoker", "Current Smoker")
+
+# every gene the volcano calls significant, on the same two thresholds, rather than a round
+# number off the top of the table
+hm_sig  <- which(tt_ref$adj.P.Val < 0.05 & abs(tt_ref$logFC) > 1)
+hm_sig  <- hm_sig[order(tt_ref$adj.P.Val[hm_sig])]
+hm_cap  <- 120L                       # a stated ceiling, reported in the title when it bites
+hm_more <- max(0L, length(hm_sig) - hm_cap)
+top_g   <- rownames(tt_ref)[head(hm_sig, hm_cap)]
+top_n   <- length(top_g)
+top_lab <- lab_of(top_g)
+hm_fontsize <- max(4.5, min(9, 633 / top_n))   # 633pt of panel once annotations are drawn
+
+# Scaled before plotting: each gene is centred and divided by its own standard deviation across
+# the displayed samples, so the colour reads as contrast rather than expression level.
+# ComplexHeatmap does no scaling of its own, so this is the only place it happens.
+zmat <- function(mat) {
+  # library sizes must come from the whole matrix; deriving them from the displayed genes shifts
+  # each sample by its own subset total, and that shift does not cancel in a per-gene z-score
+  m <- cpm(mat, log = TRUE, prior.count = 1)[top_g, hm_keep, drop = FALSE]
+  rownames(m) <- top_lab
+  z <- t(scale(t(m)))            # scale() works down columns, so transpose to scale per gene
+  # a gene with no variance across the displayed samples divides by zero and comes back NaN,
+  # which draws as a blank row and reads as missing data rather than as no contrast
+  z[!is.finite(z)] <- 0
+  z
+}
+z_ref <- zmat(ref); z_par <- zmat(par)
+hm_flat <- sum(!is.finite(rowSums(t(scale(t(
+  cpm(ref, log = TRUE, prior.count = 1)[top_g, hm_keep, drop = FALSE]))))))
+
+col_fun <- circlize::colorRamp2(c(-2, 0, 2), c("#2166AC", "grey96", "#B2182B"))
+
+# gene-level annotation: each row carries its own effect size and direction from the DE result,
+# so the heatmap is readable without cross-referencing the volcano
+top_fc  <- tt_ref$logFC[match(top_g, rownames(tt_ref))]
+row_ann <- rowAnnotation(
+  logFC = anno_barplot(top_fc, baseline = 0, bar_width = 0.8,
+                       gp = gpar(fill = ifelse(top_fc > 0, "#B2182B", "#2166AC"), col = NA),
+                       axis_param = list(gp = gpar(fontsize = 9)), width = unit(2.2, "cm")),
+  Direction = ifelse(top_fc > 0, "up in current", "up in never"),
+  col = list(Direction = c(`up in current` = "#B2182B", `up in never` = "#2166AC")),
+  annotation_name_gp = gpar(fontsize = 11, fontface = "bold"),
+  annotation_name_rot = 90,
+  annotation_legend_param = list(Direction = list(title_gp = gpar(fontsize = 12, fontface = "bold"),
+                                                  labels_gp = gpar(fontsize = 11))))
+
+# the annotation name is drawn into the neighbouring heatmap and clipped, so only the
+# right-hand panel carries it
+mk_ann <- function(show_name) HeatmapAnnotation(
+  Smoking = smoking[hm_keep],
+  Cancer  = cancer[hm_keep],
+  col = list(Smoking = setNames(
+               RColorBrewer::brewer.pal(max(3L, nlevels(droplevels(smoking[hm_keep]))), "Set2")[
+                 seq_len(nlevels(droplevels(smoking[hm_keep])))],
+               levels(droplevels(smoking[hm_keep]))),
+             Cancer  = setNames(RColorBrewer::brewer.pal(nlevels(cancer), "Paired"),
+                                levels(cancer))),
+  show_annotation_name = show_name,
+  annotation_name_side = "right",
+  annotation_name_gp = gpar(fontsize = 12, fontface = "bold"),
+  annotation_legend_param = list(
+    Smoking = list(title_gp = gpar(fontsize = 12, fontface = "bold"),
+                   labels_gp = gpar(fontsize = 11)),
+    Cancer  = list(title_gp = gpar(fontsize = 12, fontface = "bold"),
+                   labels_gp = gpar(fontsize = 11), ncol = 2)))
+
+mk_hm <- function(z, title, show_name, nm = "z-score", right = NULL) {
+  Heatmap(z, name = nm, col = col_fun, top_annotation = mk_ann(show_name),
+          right_annotation = right,
+          show_heatmap_legend = identical(nm, "z-score"),
+          column_title = title,
+          column_title_gp = gpar(fontsize = 15, fontface = "bold"),
+          # the panel is a fixed height, so the label size has to follow the row count
+          show_row_names = TRUE, row_names_gp = gpar(fontsize = hm_fontsize),
+          show_column_names = FALSE,
+          # columns are split by the two groups being contrasted, so the panel shows the
+          # contrast rather than testing whether the groups separate on their own. Samples
+          # still cluster inside each group; genes cluster across the whole matrix.
+          column_split = droplevels(smoking[hm_keep]),
+          cluster_column_slices = FALSE,
+          cluster_columns = TRUE, cluster_rows = TRUE,
+          show_column_dend = TRUE, column_dend_height = unit(9, "mm"),
+          heatmap_legend_param = list(title_gp = gpar(fontsize = 12, fontface = "bold"),
+                                      labels_gp = gpar(fontsize = 11)))
+}
+
+draw(mk_hm(z_ref, "sva::ComBat_seq", FALSE) +
+       mk_hm(z_par, "ComBat_seq_parallel", TRUE, "z2", right = row_ann),
+     column_title = if (hm_more > 0L)
+       sprintf("Top %d of %d significant genes, columns split by smoking group",
+               top_n, top_n + hm_more)
+     else
+       sprintf("All %d significant genes, columns split by smoking group", top_n),
+     column_title_gp = gpar(fontsize = 18, fontface = "bold"),
+     merge_legends = TRUE)
+```
+
+```{r heatmap-identical}
+data.frame(z_scores_identical = identical(z_ref, z_par),
+           genes_shown = top_n,
+           genes_with_no_variance = hm_flat,
+           z_range = sprintf("%.2f to %.2f", min(z_ref), max(z_ref)))
+```
+
+```{r heatmap-assert}
+stopifnot(identical(z_ref, z_par),
+          all(is.finite(z_ref)),
+          # a correctly scaled gene has mean 0 and unit variance across the displayed samples
+          all(abs(rowMeans(z_ref)) < 1e-8))
+```
+
+### c. Runtime
+
+Every arm corrects the same matrix: `r format(nrow(counts), big.mark = ",")` genes by
+`r format(ncol(counts), big.mark = ",")` samples across `r nlevels(plate)` plates, the same call
+each time. These arms share one session and run in a fixed order, `sva::ComBat_seq` first, so the
+parallel arms run warm. The C.1 sweep is the isolated fresh-session measurement.
+
+Speed depends on the machine, so the machine is reported rather than left to be inferred.
+
+```{r machine}
+# The published run read this with sysctl on Darwin, which returns nothing here. On Linux the
+# authoritative source is sysfs and /proc. detectCores(logical = FALSE) is NOT used: it reports
+# 32 on this dual-socket box, where thread_siblings_list proves there are 16 physical cores.
+lin_phys_cores <- function() {
+  f <- Sys.glob("/sys/devices/system/cpu/cpu*/topology/thread_siblings_list")
+  if (length(f)) length(unique(vapply(f, function(x) readLines(x, warn = FALSE)[1], character(1))))
+  else parallel::detectCores(logical = FALSE)
+}
+lin_proc <- function(key) {
+  ci <- tryCatch(readLines("/proc/cpuinfo", warn = FALSE), error = function(e) character())
+  m <- grep(paste0("^", key), ci, value = TRUE)
+  if (length(m)) trimws(sub("^[^:]*:\\s*", "", m[1])) else NA_character_
+}
+lin_mem_gb <- function(key) {
+  mi <- tryCatch(readLines("/proc/meminfo", warn = FALSE), error = function(e) character())
+  l <- grep(paste0("^", key, ":"), mi, value = TRUE)
+  if (length(l)) round(as.numeric(sub("\\D*(\\d+).*", "\\1", l[1])) / 1048576, 1) else NA_real_
+}
+n_phys <- lin_phys_cores(); n_log <- parallel::detectCores()
+
+data.frame(
+  quantity = c("CPU", "physical cores", "logical CPUs", "threads per core", "NUMA nodes",
+               "memory", "OS", "BLAS", "OpenBLAS pinned to 1 thread", "backend",
+               "worker counts"),
+  value = as.character(c(
+    lin_proc("model name"),
+    n_phys,
+    n_log,
+    sprintf("%.0f", n_log / n_phys),
+    max(1L, length(Sys.glob("/sys/devices/system/node/node[0-9]*"))),
+    sprintf("%.0f GB", lin_mem_gb("MemTotal")),
+    paste(Sys.info()[["sysname"]], Sys.info()[["release"]]),
+    basename(sessionInfo()$BLAS),
+    blas_pinned,
+    getOption("combat.backend"),
+    paste(tcga_workers, collapse = ", "))))
+```
+
+```{r runtime-table}
+data.frame(implementation = c("sva::ComBat_seq",
+                              sprintf("ComBat_seq_parallel, %d workers", tcga_workers)),
+           seconds = round(c(secs_ref, secs_w), 1),
+           speedup = sprintf("%.2fx", c(1, secs_ref / secs_w)),
+           identical_to_original = c(NA, same_w))
+```
+
+```{r runtime-plot, fig.height = 4}
+rt <- data.frame(
+  arm = c("sva::ComBat_seq\n(original)", sprintf("parallel\n%d workers", tcga_workers)),
+  seconds = c(secs_ref, secs_w),
+  speedup = c(1, secs_ref / secs_w))
+rt$arm <- factor(rt$arm, levels = rt$arm)
+
+ggplot(rt, aes(arm, speedup)) +
+  geom_col(width = 0.55, fill = c("grey55",
+    colorRampPalette(c("#EF8A62", "#b2182b"))(length(tcga_workers)))) +
+  geom_text(aes(label = sprintf("%.2fx\n%.0f s", speedup, seconds)), vjust = -0.3,
+            size = 5, fontface = "bold", lineheight = 0.95) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.24))) +
+  labs(title = "Original ComBat-seq against the parallel companion",
+       subtitle = sprintf("%s genes by %s samples, %d plates, %d cancer types. Output identical to the original.",
+                          format(nrow(counts), big.mark = ","),
+                          format(ncol(counts), big.mark = ","), nlevels(plate), nlevels(cancer)),
+       x = NULL, y = "speedup vs sva::ComBat_seq")
+```
+
+## 3. limma and edgeR against the originals
+
+The same comparison as C.2, at cohort scale, on the corrected matrix from D.2.
+
+Part a runs the exact differential expression the volcano and heatmap were drawn from, a second
+way, and the table asserts that rather than claiming it. Part b adds a blocking factor, which is
+where the expensive per-gene REML fits live. Part c records what was measured and deliberately
+left serial.
+
+### a. The differential expression pipeline, both ways
+
+```{r limma-de, cache = TRUE, cache.lazy = FALSE, dependson = 'tcga-correct', cache.extra = list(n_workers, de_coef, colnames(de_design), packageVersion('rnaparallel'))}
+nf_v <- edgeR_norm(DGEList(ref))
+nf_p <- calcNormFactors_parallel(DGEList(ref), workers = n_workers)
+
+vv <- voom(nf_v, de_design)
+fit_v <- lmFit(vv, de_design)
+fit_p <- lmFit_parallel(vv, de_design, workers = n_workers)
+
+tt_limma_v <- topTable(eBayes(fit_v), coef = de_coef, number = Inf, sort.by = "none")
+tt_limma_p <- topTable(eBayes(fit_p), coef = de_coef, number = Inf, sort.by = "none")
+
+rbe_v <- removeBatchEffect(vv$E, batch = plate, design = de_design)
+rbe_p <- removeBatchEffect_parallel(vv$E, batch = plate, design = de_design,
+                                    workers = n_workers)
+
+limma_checks <- data.frame(
+  stage = c("calcNormFactors (TMM)", "lmFit", "removeBatchEffect",
+            "topTable, final gene list", "matches the gene list D.2 already drew"),
+  identical = c(identical(nf_v, nf_p), identical(fit_v, fit_p),
+                identical(rbe_v, rbe_p),
+                identical(tt_limma_v, tt_limma_p), identical(tt_limma_v, tt_ref)))
+limma_checks
+```
+
+```{r limma-de-assert}
+stopifnot(all(limma_checks$identical))
+```
+
+The last row is the one that matters. A difference of one unit in the last place of `sigma` is
+invisible in the fit and becomes a different gene list once Benjamini-Hochberg has run, so the
+assertion is made on `topTable` rather than on the object it came from.
+
+### b. Blocked designs
+
+`duplicateCorrelation` is the expensive step in a repeated-measures limma analysis: one REML fit
+and one LAPACK SVD per gene. Plate is the repeated unit here.
+
+```{r limma-dupcor, cache = TRUE, cache.lazy = FALSE, dependson = 'limma-de', cache.extra = list(n_workers, de_coef, colnames(de_design), packageVersion('rnaparallel'))}
+# The serial arm has to run in full for there to be anything to compare against, and the
+# per-gene work does not change with gene count, so the ratio is the same on a subset while the
+# baseline costs minutes instead of hours. Fixed random draw, and the identical() claim below is
+# about these genes.
+set.seed(20260820)
+dc_genes <- sort(sample.int(nrow(vv), min(4000L, nrow(vv))))
+v_dc <- vv[dc_genes, ]
+
+dc_v <- duplicateCorrelation(v_dc, de_design, block = plate)
+dc_p <- duplicateCorrelation_parallel(v_dc, de_design, block = plate, workers = n_workers)
+dc_same <- identical(dc_v, dc_p)
+
+data.frame(quantity = c("genes used", "consensus correlation", "identical()"),
+           value = c(format(length(dc_genes), big.mark = ","),
+                     sprintf("%.6f", dc_v$consensus.correlation), dc_same))
+```
+
+Timing for this stage is in D.3.d, where the baseline is bracketed rather than read once.
+
+```{r limma-dupcor-assert}
+stopifnot(dc_same)
+```
+
+### c. What is deliberately not parallelised
+
+Not everything survives the exactness bar, and the list of rejections is as much a part of this
+package as the list of companions. `voom` measured 0.99x, because its `lowess` trend takes its
+span as a fraction of the gene count. `contrasts.fit` returns before a fork could finish
+starting. `eBayes`, `fitFDist` and `topTable` pool across every gene by construction.
+
+Two edgeR companions were built, measured, and then deleted, both for the same reason: an edgeR
+kernel that is not a pure function of the gene it fits. `estimateDisp` diverged once one library
+was heavily over-sequenced. `glmQLFit` measured 1.6x and passed every small fixture, then failed
+on this cohort: `mglmLevenberg` records a deviance and an iteration count whose values depend on
+which genes share the block when a fit does not converge cleanly, 22 of 18,270 genes here, with
+no flag set on any of them. The assert in this report is what caught it, which is the reason
+every stage in this document carries one.
+
+### d. Speed
+
+```{r limma-speed, cache = TRUE, cache.lazy = FALSE, dependson = c('limma-de', 'limma-dupcor'), cache.extra = list(tcga_workers, de_coef, colnames(de_design), packageVersion('rnaparallel'))}
+# Seconds only. Returning the fitted object too held a second copy of four results nothing
+# reads, about 400 MB, resident at the moment the next line forks.
+tick <- function(e) { t0 <- Sys.time(); force(e)
+                      as.numeric(difftime(Sys.time(), t0, units = "secs")) }
+
+# The BEST of three, not one reading and not their mean. A stage that takes a second or two is
+# not robust to whatever else the machine decides to do during it: one render timed lmFit at
+# four workers at 14.19 s against 1.70 s for the identical call minutes earlier, and reported
+# it as 0.39x, slower than serial. The minimum is the reading least contaminated by load,
+# which is the quantity this table is actually claiming. Long stages are left at one reading:
+# duplicateCorrelation runs eleven minutes serial, long enough to absorb a transient spike
+# rather than be defined by one, and three of them would cost an hour to say the same thing.
+best <- function(f, reps = 3L) min(vapply(seq_len(reps), function(i) tick(f()), numeric(1)))
+
+# Each original is timed on both sides of the companion arms and the mean is the denominator,
+# so drift moves both halves of a ratio together instead of inflating whichever arms ran last.
+stages <- c("calcNormFactors (TMM)", "lmFit", "duplicateCorrelation", "removeBatchEffect")
+pre <- c(best(function() edgeR_norm(DGEList(ref))),
+         best(function() lmFit(vv, de_design)),
+         tick(duplicateCorrelation(v_dc, de_design, block = plate)),
+         best(function() removeBatchEffect(vv$E, batch = plate, design = de_design)))
+
+limma_speed <- do.call(rbind, lapply(tcga_workers, function(w) {
+  p <- c(best(function() calcNormFactors_parallel(DGEList(ref), workers = w)),
+         best(function() lmFit_parallel(vv, de_design, workers = w)),
+         tick(duplicateCorrelation_parallel(v_dc, de_design, block = plate, workers = w)),
+         best(function() removeBatchEffect_parallel(vv$E, batch = plate,
+                                                    design = de_design, workers = w)))
+  invisible(gc(verbose = FALSE))
+  data.frame(stage = stages, workers = w, companion = p)
+}))
+
+post <- c(best(function() edgeR_norm(DGEList(ref))),
+          best(function() lmFit(vv, de_design)),
+          tick(duplicateCorrelation(v_dc, de_design, block = plate)),
+          best(function() removeBatchEffect(vv$E, batch = plate, design = de_design)))
+
+limma_speed$original <- rep((pre + post) / 2, length(tcga_workers))
+limma_speed$speedup  <- limma_speed$original / limma_speed$companion
+limma_drift <- max(abs(post - pre) / pre)
+limma_speed[, c("stage", "workers", "original", "companion", "speedup")]
+```
+
+All four worker counts are shown, matching every other sweep in the report. Thirty-two workers
+do not return twice what sixteen return, and on this machine the reason is structural rather
+than mysterious: sixteen is every physical core, so the last doubling buys only a second
+hardware thread on each of them. The published macOS run had a different reason for the same
+shape -- half its cores were efficiency cores -- which is why that argument does not appear
+here and this sweep extends to 32 instead of stopping at 8. Concurrency is what costs, so each
+added worker returns less throughput than the one before it, and the 16 to 32 step is where
+that is most visible.
+
+Method as in C.2: `calcNormFactors` and `lmFit` are the best of three runs, and originals are
+bracketed before and after the companion arms, those two readings differing by at most
+`r sprintf("%.1f%%", 100 * limma_drift)`. `duplicateCorrelation` is a single reading at each
+point, because eleven minutes serial is long enough to absorb a transient spike rather than be
+defined by one.
+
+```{r limma-speed-plot, fig.height = 4.2}
+ggplot(limma_speed, aes(factor(workers), speedup, fill = stage)) +
+  geom_col(position = position_dodge(0.8), width = 0.72) +
+  geom_hline(yintercept = 1, linetype = 2, colour = "grey50") +
+  geom_text(aes(label = sprintf("%.2fx", speedup)),
+            position = position_dodge(0.8), vjust = -0.35, size = 3.1) +
+  scale_fill_manual(values = pal_stage) +
+  labs(x = "workers", y = "speedup against the original", fill = NULL,
+       title = "limma and edgeR companions, TCGA",
+       subtitle = sprintf("%s genes by %s samples. duplicateCorrelation on a %s gene subset. Identity checked at %d workers.",
+                           format(nrow(ref), big.mark = ","), format(ncol(ref), big.mark = ","),
+                           format(length(dc_genes), big.mark = ","), n_workers)) +
+  expand_limits(y = 0)
+```
+
+Not everything in limma is worth forking, and the list of what was left alone is as much a part
+of the result as the list of what was not. `voom` measured 0.99x, because its `lowess` trend takes
+its span as a fraction of the gene count, so a block of half the genes fits a different curve and
+only the arithmetic after the trend splits. `contrasts.fit` is exactly splittable and the vendor
+returns before a fork could finish starting. `eBayes`, `fitFDist` and `topTable` pool across every gene by construction.
+None of them ships as a `workers` argument that does nothing.
+
+# E. Equivalence summary
+
+```{r summary}
+# every pipeline stage below, computed from both implementations and compared. NA marks a
+# stage that half does not have: the heatmap is drawn only for TCGA.
+same <- function(a, b) if (is.null(a) || is.null(b)) NA else identical(a, b)
+
+data.frame(
+  stage = c("corrected counts", "storage mode", "PCA scores", "PCA variance explained",
+            "log fold changes", "t statistics", "adjusted p-values",
+            "significant gene set", "heatmap z-scores"),
+  simulated = c(
+    same(sim_ref, sim_par),
+    same(storage.mode(sim_ref), storage.mode(sim_par)),
+    same(q_rf$x, q_pr$x),
+    same(q_rf$ve, q_pr$ve),
+    same(sim_tt_ref$logFC, sim_tt_par$logFC),
+    same(sim_tt_ref$t, sim_tt_par$t),
+    same(sim_tt_ref$adj.P.Val, sim_tt_par$adj.P.Val),
+    same(rownames(sim_tt_ref)[sim_tt_ref$adj.P.Val < 0.05],
+         rownames(sim_tt_par)[sim_tt_par$adj.P.Val < 0.05]),
+    NA),
+  TCGA = c(
+    same(ref, par),
+    same(storage.mode(ref), storage.mode(par)),
+    same(p_rf$x, p_pr$x),
+    same(p_rf$ve, p_pr$ve),
+    same(tt_ref$logFC, tt_par$logFC),
+    same(tt_ref$t, tt_par$t),
+    same(tt_ref$adj.P.Val, tt_par$adj.P.Val),
+    same(rownames(tt_ref)[tt_ref$adj.P.Val < 0.05],
+         rownames(tt_par)[tt_par$adj.P.Val < 0.05]),
+    same(z_ref, z_par)))
+```
+
+The companions that run after the correction, on the corrected counts from sections C and D:
+
+```{r summary-limma}
+# Both columns are read from the checks already computed, never recomputed: one identity, one
+# place. They are also indexed BY NAME rather than by position, because adding a stage to either
+# table silently shifted the positional indices and bound the wrong TRUE to the wrong row.
+pick <- function(tbl, nm) tbl$identical[match(nm, tbl$stage)]
+sum_stages <- c("calcNormFactors (TMM)", "lmFit", "duplicateCorrelation",
+                "removeBatchEffect", "topTable, final gene list")
+data.frame(
+  stage = sum_stages,
+  simulated = pick(sim_limma_checks, sum_stages),
+  TCGA = c(pick(limma_checks, "calcNormFactors (TMM)"), pick(limma_checks, "lmFit"), dc_same,
+           pick(limma_checks, "removeBatchEffect"),
+           pick(limma_checks, "topTable, final gene list")))
+```
+
+
+```{r end-to-end-assert}
+stopifnot(identical(sim_ref, sim_par),
+          identical(q_rf$x, q_pr$x),
+          identical(sim_tt_ref$adj.P.Val, sim_tt_par$adj.P.Val),
+          identical(ref, par),
+          identical(p_rf$x, p_pr$x), identical(p_rf$ve, p_pr$ve),
+          identical(tt_ref$adj.P.Val, tt_par$adj.P.Val),
+          identical(z_ref, z_par),
+          all(limma_checks$identical), dc_same,
+          all(sim_limma_checks$identical))
+```
+
+# F. Speed summary
+
+Every speed measurement in this report, one figure. Each bar is a companion timed against the
+original it replaces, on the same input. The ComBat-seq arms were compared against the reference
+at every worker count. The limma and edgeR arms are timed only; their identity was checked at
+`r n_workers` workers in C.2 and D.3.
+
+```{r speed-summary, fig.height = 6.5}
+all_speed <- rbind(
+  data.frame(dataset = "simulated", stage = "ComBat_seq",
+             workers = sim_timings$workers[sim_timings$workers > 1L],
+             speedup = sim_timings$seconds[sim_timings$workers == 1L] /
+                       sim_timings$seconds[sim_timings$workers > 1L]),
+  data.frame(dataset = "TCGA", stage = "ComBat_seq",
+             workers = tcga_workers, speedup = secs_ref / secs_w),
+  data.frame(dataset = "simulated", stage = sim_limma_speed$stage,
+             workers = sim_limma_speed$workers, speedup = sim_limma_speed$speedup),
+  data.frame(dataset = "TCGA", stage = limma_speed$stage,
+             workers = limma_speed$workers, speedup = limma_speed$speedup))
+all_speed$stage <- factor(all_speed$stage, levels = names(pal_stage))
+
+ggplot(all_speed, aes(factor(workers), speedup, fill = stage)) +
+  geom_col(position = position_dodge2(0.8, preserve = "single"), width = 0.72) +
+  geom_hline(yintercept = 1, linetype = 2, colour = "grey50") +
+  geom_text(aes(label = sprintf("%.1fx", speedup)),
+            position = position_dodge2(0.8, preserve = "single"), vjust = -0.35, size = 2.9) +
+  facet_wrap(~ dataset, ncol = 1, scales = "free_x") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
+  scale_fill_manual(values = pal_stage) +
+  labs(x = "workers", y = "speedup against the original", fill = NULL,
+       title = "Every companion against its original",
+       subtitle = "Dashed line is the original. Every arm at 4, 8, 16 and 32 workers.") +
+  expand_limits(y = 0) +
+  theme(legend.position = "bottom")
+```
+
+# G. Session
+
+```{r session}
+sessionInfo()
+```
+
+```{r copy-buttons, echo = FALSE, results = "asis"}
+cat('
+<style>
+.copy-btn{position:absolute;top:6px;right:8px;padding:3px 10px;font-size:12px;
+  font-family:inherit;border:1px solid #ccc;border-radius:4px;background:#fff;
+  color:#333;cursor:pointer;opacity:0;transition:opacity .15s;z-index:5}
+pre:hover .copy-btn{opacity:1}
+.copy-btn:hover{background:#f0f0f0}
+.copy-btn.done{background:#2e7d32;color:#fff;border-color:#2e7d32}
+pre{position:relative}
+</style>
+<script>
+document.addEventListener("DOMContentLoaded", function() {
+  document.querySelectorAll("pre").forEach(function(pre) {
+    if (pre.querySelector(".copy-btn")) return;
+    var b = document.createElement("button");
+    b.className = "copy-btn"; b.type = "button"; b.textContent = "Copy";
+    b.addEventListener("click", function() {
+      var code = pre.querySelector("code");
+      var text = code ? code.innerText : pre.innerText;
+      navigator.clipboard.writeText(text).then(function() {
+        b.textContent = "Copied"; b.classList.add("done");
+        setTimeout(function(){ b.textContent = "Copy"; b.classList.remove("done"); }, 1400);
+      });
+    });
+    pre.appendChild(b);
+  });
+});
+</script>')
+```

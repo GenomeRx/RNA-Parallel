@@ -1,0 +1,64 @@
+citHeader(paste(
+  "This package is a set of parallel companions. It reimplements no method it runs and",
+  "modifies none of them, so please cite the ORIGINAL method you used as well as this",
+  "companion. Citing only the companion credits the parallelism and not the statistics.",
+  "ComBat-seq is cited below; for the limma and edgeR companions cite limma",
+  "(Ritchie et al. 2015, NAR 43(7), e47) and edgeR (Robinson, McCarthy and Smyth 2010,",
+  "Bioinformatics 26(1), 139-140)."
+))
+
+bibentry(
+  bibtype  = "Article",
+  key      = "zhang2020combatseq",
+  title    = "ComBat-seq: batch effect adjustment for RNA-seq count data",
+  author   = c(person("Yuqing", "Zhang"),
+               person("Giovanni", "Parmigiani"),
+               person("W. Evan", "Johnson")),
+  journal  = "NAR Genomics and Bioinformatics",
+  year     = "2020",
+  volume   = "2",
+  number   = "3",
+  pages    = "lqaa078",
+  doi      = "10.1093/nargab/lqaa078",
+  textVersion = paste(
+    "Zhang Y, Parmigiani G, Johnson WE (2020).",
+    "ComBat-seq: batch effect adjustment for RNA-seq count data.",
+    "NAR Genomics and Bioinformatics, 2(3), lqaa078. doi:10.1093/nargab/lqaa078"
+  )
+)
+
+bibentry(
+  bibtype  = "Article",
+  key      = "ritchie2015limma",
+  title    = "limma powers differential expression analyses for RNA-sequencing and microarray studies",
+  author   = c(person("Matthew E.", "Ritchie"), person("Belinda", "Phipson"),
+               person("Di", "Wu"), person("Yifang", "Hu"),
+               person("Charity W.", "Law"), person("Wei", "Shi"),
+               person("Gordon K.", "Smyth")),
+  journal  = "Nucleic Acids Research",
+  year     = "2015",
+  volume   = "43",
+  number   = "7",
+  pages    = "e47",
+  doi      = "10.1093/nar/gkv007",
+  textVersion = paste(
+    "Ritchie ME, Phipson B, Wu D, Hu Y, Law CW, Shi W, Smyth GK (2015).",
+    "limma powers differential expression analyses for RNA-sequencing and microarray studies.",
+    "Nucleic Acids Research, 43(7), e47. doi:10.1093/nar/gkv007"
+  )
+)
+
+bibentry(
+  bibtype  = "Manual",
+  key      = "nguyen2026rnaparallel",
+  title    = "rnaparallel: Parallel Companions for RNA-Seq Tools",
+  author   = person("Nam", "Nguyen"),
+  year     = "2026",
+  note     = paste("R package version", meta$Version),
+  url      = "https://github.com/GenomeRx/RNA-Parallel",
+  textVersion = paste(
+    "Nguyen N (2026). rnaparallel: Parallel Companions for RNA-Seq Tools.",
+    paste0("R package version ", meta$Version, "."),
+    "https://github.com/GenomeRx/RNA-Parallel"
+  )
+)

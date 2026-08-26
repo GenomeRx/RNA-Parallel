@@ -1,0 +1,24 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+*.Rproj
+*.Rcheck/
+*.tar.gz
+*.tgz
+.DS_Store
+*.html
+*_files/
+.claude/
+
+# the rendered reports are deliverables, keep them tracked
+!docs/index.html
+!docs/linux.html
+MANIFEST.txt
+GDCdata/
+
+# knitr caches: large, machine-specific, regenerable
+*_cache/
+Rplots.pdf
+*.bak
+render.log
