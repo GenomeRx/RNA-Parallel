@@ -40,27 +40,88 @@ remotes::install_github("GenomeRx/RNA-Parallel")
 ## Use
 
 Each companion takes its vendor's arguments in the same order with the same defaults, and adds
-`workers`, `chunks`, `parallel_backend` and `backend`.
+`workers`, `chunks`, `parallel_backend` and `backend`. All five in one pass:
 
 ```r
 library(rnaparallel); library(edgeR); library(limma)
 
-adjusted <- ComBat_seq_parallel(counts, batch = batch, group = NULL, workers = 4L)
+# raw counts, batch corrected
+adjusted <- ComBat_seq_parallel(counts, batch = batch, group = NULL, workers = 8L)
 
 # limma-voom differential expression
-dge <- calcNormFactors_parallel(DGEList(counts), workers = 8L)
+dge <- calcNormFactors_parallel(DGEList(adjusted), workers = 8L)
 v   <- voom(dge, design)
 fit <- lmFit_parallel(v, design, workers = 8L)
 tt  <- topTable(eBayes(fit), coef = 2, number = Inf)
 
-# blocked design
+# blocked design, repeated measures on one subject
 cor <- duplicateCorrelation_parallel(v, design, block = subject, workers = 8L)
 fit <- lmFit_parallel(v, design, block = subject,
                       correlation = cor$consensus.correlation, workers = 8L)
+
+# batch out of a log-expression matrix, for PCA and heatmaps
+vis <- removeBatchEffect_parallel(v$E, batch = batch, design = design, workers = 8L)
 ```
 
 One interface difference: `duplicateCorrelation_parallel` requires `block`, whereas the vendor
 defaults it to `NULL`. [How it works](#how-it-works) says why.
+
+### Check it yourself
+
+No download, no configuration:
+
+```r
+set.seed(1)
+counts <- matrix(rnbinom(1600, mu = 50, size = 5), nrow = 200)
+batch  <- rep(1:2, each = 4)
+
+identical(ComBat_seq_parallel(counts, batch, group = NULL, workers = 4L),
+          sva::ComBat_seq(counts, batch, group = NULL))
+#> TRUE
+```
+
+[run_example.R](inst/examples/run_example.R) runs the same comparison at a size where the speedup
+shows, in minutes, still with nothing to download.
+
+```sh
+Rscript inst/examples/run_example.R
+```
+
+The rendered reports carry it at cohort scale, same sections on both platforms: cohort, argument
+parity, corrections, PCA, differential expression, worker sweep.
+[macOS](https://genomerx.github.io/RNA-Parallel/) ·
+[Linux](https://genomerx.github.io/RNA-Parallel/linux.html). Sources are
+[RNA_Parallel.Rmd](inst/examples/RNA_Parallel.Rmd) and
+[RNA_Parallel_linux.Rmd](inst/examples/RNA_Parallel_linux.Rmd), the second rendered with
+[render_linux.sh](inst/examples/render_linux.sh), which sets the BLAS environment before R starts.
+The first run downloads HNSC, LUAD and LUSC to the per-user cache, or `RNAPARALLEL_TCGA_DIR` if
+set.
+
+[tests/](tests/testthat) covers every argument path, chunk layout and backend, plus a dispatch
+count through the public entry point, because `identical()` alone cannot tell a working parallel
+layer from a dead one. Over 400 assertions.
+
+### Seeing what is running
+
+```r
+options(combat.timing = TRUE)      # one elapsed line per call
+options(combat.quiet  = TRUE)      # swallow the vendor's progress chatter
+options(combat.timing.min = 1)     # hide anything faster than a second
+```
+
+```
+  Breast ComBat-seq                  mclapply x6         23.2s
+  TMM 12,000 x 700                   mclapply x6          0.9s
+  TMM 200 x 8                        serial               0.0s  2 gated
+```
+
+The engine column reports what **ran**, not what was asked for: a call that fell under a size
+gate says `serial`, because a companion returning `identical()` output at serial pace otherwise
+looks exactly like one that forked. If a pinned vendor excerpt stands down after an upstream
+change, the line says `[match_quantiles stood down]`.
+
+**`rnaparallel_stale()`** returns TRUE if the package was reinstalled under a running session.
+The fix is to restart R.
 
 ## How it works
 
@@ -165,38 +226,6 @@ OpenBLAS moves DGEMM throughput 8x, from 28 to 225 GFLOPS, and moves `lmFit` by 
 against 8.71 s on 18,270 by 1,500. limma solves a small QR per gene and never reaches the size
 where threaded BLAS pays. Per-core speed separates the machines.
 
-## Verify it yourself
-
-Check the claim in ten lines:
-
-```r
-set.seed(1)
-counts <- matrix(rnbinom(1600, mu = 50, size = 5), nrow = 200)
-batch  <- rep(1:2, each = 4)
-
-identical(ComBat_seq_parallel(counts, batch, group = NULL, workers = 4L),
-          sva::ComBat_seq(counts, batch, group = NULL))
-#> TRUE
-```
-
-- **Rendered reports**, same sections on both platforms: cohort, argument parity, corrections,
-  PCA, differential expression, worker sweep.
-  [macOS](https://genomerx.github.io/RNA-Parallel/) ·
-  [Linux](https://genomerx.github.io/RNA-Parallel/linux.html)
-- **[run_example.R](inst/examples/run_example.R)** runs the whole claim in minutes without
-  downloading anything.
-  ```sh
-  Rscript inst/examples/run_example.R
-  ```
-- **Report sources.** [RNA_Parallel.Rmd](inst/examples/RNA_Parallel.Rmd) for macOS,
-  [RNA_Parallel_linux.Rmd](inst/examples/RNA_Parallel_linux.Rmd) for Linux, rendered with
-  [render_linux.sh](inst/examples/render_linux.sh), which sets the BLAS environment before R
-  starts. The first run downloads HNSC, LUAD and LUSC to the per-user cache, or
-  `RNAPARALLEL_TCGA_DIR` if set.
-- **[tests/](tests/testthat)** covers every argument path, chunk layout and backend, plus a
-  dispatch count through the public entry point, because `identical()` alone cannot tell a
-  working parallel layer from a dead one. Over 400 assertions.
-
 ## Tuning
 
 | knob | default | change it when |
@@ -228,28 +257,6 @@ cached clusters.
 **`calcNormFactors_parallel()`** wraps `normLibSizes` on current edgeR and `calcNormFactors` on
 older ones. `normLibSizes` **errors** on negative counts where the old name returned NaN-warned
 factors.
-
-### Seeing what is running
-
-```r
-options(combat.timing = TRUE)      # one elapsed line per call
-options(combat.quiet  = TRUE)      # swallow the vendor's progress chatter
-options(combat.timing.min = 1)     # hide anything faster than a second
-```
-
-```
-  Breast ComBat-seq                  mclapply x6         23.2s
-  TMM 12,000 x 700                   mclapply x6          0.9s
-  TMM 200 x 8                        serial               0.0s  2 gated
-```
-
-The engine column reports what **ran**, not what was asked for: a call that fell under a size
-gate says `serial`, because a companion returning `identical()` output at serial pace otherwise
-looks exactly like one that forked. If a pinned vendor excerpt stands down after an upstream
-change, the line says `[match_quantiles stood down]`.
-
-**`rnaparallel_stale()`** returns TRUE if the package was reinstalled under a running session.
-The fix is to restart R.
 
 ## License
 
