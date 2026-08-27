@@ -215,21 +215,11 @@ fastest companion arm on that machine, with its worker count. Bold marks the fas
 | lmFit | 4.4 s | **1.7 s** (4w) | 11.6 s | 4.1 s (16w) |
 | removeBatchEffect | 4.5 s | **1.3 s** (8w) | 2.6 s | 2.1 s (4w) |
 
-**Speedup is a ratio, not a speed.** The M3 runs the serial baseline 2.03x faster than the Xeon
-and holds that at every matched worker count. Linux scales further, 7.31x against 5.37x on twice
-the physical cores, and still finishes behind: 459.3 s against 308.0 s. Read the seconds, not the
-column. Hyperthreads do not count as cores either, 32 workers being slower than 16 here for every
-companion, 485.4 s against 459.3 s at cohort scale.
-
-**Linux takes `duplicateCorrelation` outright,** the only stage whose two vendor baselines sit
-within 0.5% of each other, so scaling decides it rather than per-core speed. Everything else
-follows the core.
-
-**The BLAS is the obvious suspect and is not the cause.** Unpinning OpenBLAS moves DGEMM
-throughput 8x, from 28 to 225 GFLOPS, and moves `lmFit` by 1.3%, 8.82 s against 8.71 s on 18,270
-by 1,500: limma solves a small QR per gene and never reaches the size where threaded BLAS pays.
-Pin `OPENBLAS_NUM_THREADS` before R starts anyway, or every forked worker opens its own thread
-pool.
+Speedup is a ratio and rewards a slower core: Linux scales further, 7.31x against 5.37x, and
+still finishes behind at 459.3 s against 308.0 s. Read the seconds. On Linux, pin
+`OPENBLAS_NUM_THREADS` before R starts or every forked worker opens its own thread pool, though it
+changes little here: unpinning moves DGEMM throughput 8x and `lmFit` by 1.3%, because limma solves
+a small QR per gene.
 
 ## Tuning
 
