@@ -34,8 +34,9 @@ rp_row_blocks <- function(M, weights, env, workers, chunks, parallel_backend, wh
   # otherwise only when the finiteness half holds. The two branches cost nothing alike, so
   # they cannot share one size gate. Speed only; both are exact either way.
   fast <- is.null(w) || !is.null(attr(w, "arrayweights"))
-  min_cells <- if (fast) getOption("combat.min.ls.cells", 6e6) else
-    getOption("combat.min.cells", 2e4)
+  # Both branches go through rp_ls_min_cells(), which closes them on a platform without fork().
+  # Passing the branch's own fork-side default keeps macOS and Linux exactly as they were.
+  min_cells <- rp_ls_min_cells(if (fast) 6e6 else getOption("combat.min.cells", 2e4))
 
   # Under the gate, take the vendor call WHOLE. combat_parallel_lapply honours the gate by
   # walking the blocks serially instead, and on the fast branch that is four lm.fit calls
@@ -169,7 +170,7 @@ rp_row_blocks <- function(M, weights, env, workers, chunks, parallel_backend, wh
 #'   Clamped so no chunk holds one gene.
 #' @param parallel_backend One of [combat_backends()], or a function
 #'   `function(idx, f, workers)` returning a list in the order of `idx`. Defaults to
-#'   `getOption("combat.backend", "mclapply")`.
+#'   `getOption("combat.backend", combat_default_backend())`.
 #' @param backend Optional `lmFit` to wrap. Defaults to `limma::lmFit`.
 #'
 #' @param label Optional name for this call in the timing line, when
@@ -195,7 +196,7 @@ rp_row_blocks <- function(M, weights, env, workers, chunks, parallel_backend, wh
 lmFit_parallel <- function(object, design = NULL, ndups = NULL, spacing = NULL,
                            block = NULL, correlation, weights = NULL, method = "ls", ...,
                            workers = NULL, chunks = NULL,
-                           parallel_backend = getOption("combat.backend", "mclapply"),
+                           parallel_backend = getOption("combat.backend", combat_default_backend()),
                            backend = NULL, label = NULL) {
   # no run leaves workers behind, crashed or not; children that predate this call are
   # someone else's and are spared

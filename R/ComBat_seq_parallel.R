@@ -102,7 +102,7 @@
 #'   function form plugs in any framework this package does not name, including
 #'   `parallel::parLapply` over a FORK or PSOCK cluster, `pbapply::pblapply`,
 #'   `furrr::future_map`, `doFuture::%dofuture%`, or any `BiocParallel` BPPARAM.
-#'   Defaults to `getOption("combat.backend", "mclapply")`.
+#'   Defaults to `getOption("combat.backend", combat_default_backend())`.
 #' @param backend Optional ComBat-seq function to wrap. Defaults to
 #'   `sva::ComBat_seq`, falling back to a visible top-level `ComBat_seq`.
 #'
@@ -137,7 +137,7 @@
 ComBat_seq_parallel <- function(counts, batch, group = NULL, covar_mod = NULL,
                                 full_mod = TRUE, shrink = FALSE, shrink.disp = FALSE,
                                 gene.subset.n = NULL, workers = NULL, chunks = NULL,
-                                parallel_backend = getOption("combat.backend", "mclapply"),
+                                parallel_backend = getOption("combat.backend", combat_default_backend()),
                                 backend = NULL, label = NULL) {
   # no run leaves workers behind, crashed or not; children that predate this call are
   # someone else's and are spared
@@ -313,8 +313,12 @@ ComBat_seq_parallel <- function(counts, batch, group = NULL, covar_mod = NULL,
     }
 
     # Each element is one whole-matrix estimate over every gene, so it always earns a
-    # dispatch. Nested forking cannot happen: combat_parallel_lapply passes
-    # mc.allow.recursive = FALSE, so a rebound tagwise inside a worker runs serially.
+    # dispatch. Nesting is prevented by combat_parallel_lapply, which marks the worker
+    # process it dispatches into and runs serially when it finds itself already inside one,
+    # so a rebound tagwise in the worker does not open a second pool. That guard used to be
+    # `mc.allow.recursive = FALSE`, which is an mclapply argument and covered the fork branch
+    # only; on Windows, where foreach/PSOCK is the sole working backend, this nested to
+    # workers + workers^2 processes until the flag replaced it.
     # idx is deliberately not passed: its row check compares a chunk's returned rows against
     # the indices it was given, and here one index returns a dispersion per gene. Dead workers
     # and thrown errors are still caught, and the shape is checked below instead.

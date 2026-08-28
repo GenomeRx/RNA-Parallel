@@ -1,7 +1,7 @@
 Package: rnaparallel
 Type: Package
 Title: Parallel Companions for RNA-Seq Tools
-Version: 0.4.9
+Version: 0.5.0
 Authors@R: c(
     person("GenomeRx", role = c("aut", "cph"),
            comment = "author of the parallel companion"),

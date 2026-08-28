@@ -144,6 +144,51 @@ test_that("combat.fork = FALSE overrides a custom executor too", {
   expect_false(called)
 })
 
+test_that("a dispatch inside a worker does not open a second pool", {
+  # ComBat-seq dispatches the tagwise loop across BATCHES and ships the vendor closure, whose
+  # environment still carries the rebound estimateGLMTagwiseDisp; inside the worker that symbol
+  # dispatched AGAIN over gene rows. Measured on Windows before the guard: workers = 2L gave 2
+  # outer and 4 nested processes, which is workers + workers^2, or 272 at the 16-worker arm.
+  #
+  # The old guard was mc.allow.recursive = FALSE, an argument to parallel::mclapply, so it
+  # covered the fork branch alone. Windows runs mclapply serially and reaches its workers only
+  # through foreach/PSOCK, so the one platform that needed the guard never had it.
+  #
+  # A spy executor rather than real workers: it runs in-process, so this is deterministic and
+  # costs nothing, and it counts DISPATCHES, which is the thing that must not happen twice.
+  dispatches <- 0L
+  spy <- function(idx, f, workers) { dispatches <<- dispatches + 1L; lapply(idx, f) }
+
+  inner <- function(i) {
+    rnaparallel:::combat_parallel_lapply(
+      rnaparallel:::combat_row_chunks(10L, chunks = 2L), function(j) sum(j),
+      workers = 4L, parallel_backend = spy, cells = Inf, min_cells = 0)
+    sum(i)
+  }
+  out <- rnaparallel:::combat_parallel_lapply(
+    rnaparallel:::combat_row_chunks(20L, chunks = 2L), inner,
+    workers = 2L, parallel_backend = spy, cells = Inf, min_cells = 0)
+
+  # exactly one: the outer dispatch. Both inner calls must have taken the serial path.
+  expect_identical(dispatches, 1L)
+  expect_length(out, 2L)
+  # and the flag must not survive into the caller's session
+  expect_identical(Sys.getenv("RNAPARALLEL_IN_WORKER"), "")
+})
+
+test_that("the nesting guard does not disturb a caller's own parallel loop", {
+  # The documented pattern is to spend the worker budget INSIDE a loop body. Nothing marks a
+  # caller's own workers, so a companion called from within their loop must still dispatch.
+  dispatches <- 0L
+  spy <- function(idx, f, workers) { dispatches <<- dispatches + 1L; lapply(idx, f) }
+  # a caller's loop that is not ours, then our dispatch inside it
+  invisible(lapply(1:2, function(k)
+    rnaparallel:::combat_parallel_lapply(
+      rnaparallel:::combat_row_chunks(10L, chunks = 2L), function(j) sum(j),
+      workers = 2L, parallel_backend = spy, cells = Inf, min_cells = 0)))
+  expect_identical(dispatches, 2L)
+})
+
 test_that("a dispatch too small to be worth a fork runs serially instead", {
   # ComBat-seq dispatches once per batch, so a 100-batch design hands over thin
   # slices. Below the threshold the fork cost more than the work: measured 0.80x
@@ -243,6 +288,7 @@ matrix_backends <- function() {
 }
 
 test_that("every backend agrees on every argument path, RNG paths included", {
+  skip_on_os("windows")   # matrix_backends()'s "presched" entry calls mclapply directly
   vendor <- backend_fn()
   d <- make_counts(30, G = 200, n_per_batch = c(7, 7, 6), with_group = TRUE)
   n <- ncol(d$counts)

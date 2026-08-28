@@ -4,23 +4,37 @@ Parallel companions for RNA-seq tools. Each calls the original function unmodifi
 output `identical()` to it, bit for bit. Same arguments, same defaults, same result, faster.
 
 Rendered analysis: [macOS](https://genomerx.github.io/RNA-Parallel/) ·
-[Linux](https://genomerx.github.io/RNA-Parallel/linux.html)
+[Linux](https://genomerx.github.io/RNA-Parallel/linux.html) ·
+[Windows](https://genomerx.github.io/RNA-Parallel/windows.html)
 
 ## Speedup
 
-TCGA, 18,270 genes by 1,500 tumours. Every arm `identical()` to the vendor on both platforms.
+TCGA, 18,270 genes by 1,500 tumours. Every arm `identical()` to the vendor on all three platforms.
 
-| companion | runs | macOS<br>M3, 8 cores | Linux<br>2x Xeon, 16 cores |
-|---|---|---:|---:|
-| `ComBat_seq_parallel()` | `sva::ComBat_seq` | 5.37x @ 8w | **7.31x @ 16w** |
-| `calcNormFactors_parallel()` | `edgeR::normLibSizes` | **6.86x @ 8w** | 3.89x @ 8w |
-| `lmFit_parallel()` | `limma::lmFit` | 2.66x @ 4w | **2.80x @ 16w** |
-| `duplicateCorrelation_parallel()` | `limma::duplicateCorrelation` | 3.63x @ 8w | **6.00x @ 16w** |
-| `removeBatchEffect_parallel()` | `limma::removeBatchEffect` | **3.37x @ 8w** | 1.22x @ 4w |
+| companion | runs | macOS<br>M3, 4P+4E | Linux<br>2x Xeon, 16 cores | Windows<br>Ultra 9 185H, 6P+10E |
+|---|---|---:|---:|---:|
+| `ComBat_seq_parallel()` | `sva::ComBat_seq` | 5.37x @ 8w | **7.31x @ 16w** | 2.92x @ 6w |
+| `calcNormFactors_parallel()` | `edgeR::normLibSizes` | **6.86x @ 8w** | 3.89x @ 8w | 1.63x @ 2w |
+| `lmFit_parallel()` | `limma::lmFit` | 2.66x @ 4w | **2.80x @ 16w** | serial |
+| `duplicateCorrelation_parallel()` | `limma::duplicateCorrelation` | 3.63x @ 8w | **6.00x @ 16w** | 2.21x @ 8w |
+| `removeBatchEffect_parallel()` | `limma::removeBatchEffect` | **3.37x @ 8w** | 1.22x @ 4w | serial |
 
 Originals are timed on both sides of the companion arms and averaged; short stages are the best
-of three. Bold marks the faster platform. Machine specs and what separates them are in
+of three. Bold marks the fastest platform. Machine specs and what separates them are in
 [Cross-platform](#cross-platform).
+
+**Windows is the odd column and the reason is architectural, not incidental.** It has no
+`fork()`, so a worker is a whole process that receives a copy rather than sharing the parent's
+pages, and only 6 of its 16 cores are performance cores. Both facts pull the useful worker count
+down: the ComBat-seq curve peaks at 6 and turns over after. `serial` is not a missing measurement.
+It is the companion declining to split, because `lmFit` is cheap enough per cell that no
+dispatch repays the transfer there. It measured 0.52x before that gate closed, so the honest
+Windows contribution for those two is parity, not a speedup.
+
+Read the seconds as well as the ratios. Windows has the fastest vendor baseline of the three
+(1,506 s against Linux's 3,356 s), and speedup rewards a slow starting point, which is why the
+dual Xeon posts 7.31x while finishing *behind* the M3 in wall clock. At 515 s the laptop lands
+within 12% of the Xeon's best.
 
 **Nothing is reimplemented.** The vendor function is the one that runs. It is called with its
 hot paths rebound in a child of its own environment, so every other symbol still resolves to
@@ -40,27 +54,114 @@ remotes::install_github("GenomeRx/RNA-Parallel")
 ## Use
 
 Each companion takes its vendor's arguments in the same order with the same defaults, and adds
-`workers`, `chunks`, `parallel_backend` and `backend`.
+`workers`, `chunks`, `parallel_backend` and `backend`. All five in one pass:
 
 ```r
 library(rnaparallel); library(edgeR); library(limma)
 
-adjusted <- ComBat_seq_parallel(counts, batch = batch, group = NULL, workers = 4L)
+# raw counts, batch corrected
+adjusted <- ComBat_seq_parallel(counts, batch = batch, group = NULL, workers = 8L)
 
 # limma-voom differential expression
-dge <- calcNormFactors_parallel(DGEList(counts), workers = 8L)
+dge <- calcNormFactors_parallel(DGEList(adjusted), workers = 8L)
 v   <- voom(dge, design)
 fit <- lmFit_parallel(v, design, workers = 8L)
 tt  <- topTable(eBayes(fit), coef = 2, number = Inf)
 
-# blocked design
+# blocked design, repeated measures on one subject
 cor <- duplicateCorrelation_parallel(v, design, block = subject, workers = 8L)
 fit <- lmFit_parallel(v, design, block = subject,
                       correlation = cor$consensus.correlation, workers = 8L)
+
+# batch out of a log-expression matrix, for PCA and heatmaps
+vis <- removeBatchEffect_parallel(v$E, batch = batch, design = design, workers = 8L)
 ```
 
 One interface difference: `duplicateCorrelation_parallel` requires `block`, whereas the vendor
 defaults it to `NULL`. [How it works](#how-it-works) says why.
+
+### Check it yourself
+
+All five companions against their vendors. No download, nothing to configure:
+
+```r
+library(rnaparallel); library(sva); library(edgeR); library(limma)
+
+set.seed(1)
+counts  <- matrix(rnbinom(4000, mu = 50, size = 5), nrow = 500)
+batch   <- rep(1:2, each = 4)
+group   <- rep(0:1, 4)
+design  <- model.matrix(~ group)
+subject <- rep(1:4, each = 2)
+
+dge <- DGEList(counts)
+v   <- voom(normLibSizes(dge), design)
+
+c(ComBat_seq        = identical(ComBat_seq_parallel(counts, batch, group = NULL, workers = 4L),
+                                ComBat_seq(counts, batch, group = NULL)),
+  normLibSizes      = identical(calcNormFactors_parallel(dge, workers = 4L),
+                                normLibSizes(dge)),
+  lmFit             = identical(lmFit_parallel(v, design, workers = 4L),
+                                lmFit(v, design)),
+  duplicateCor      = identical(duplicateCorrelation_parallel(v, design, ndups = 1,
+                                                              block = subject, workers = 4L),
+                                duplicateCorrelation(v, design, ndups = 1, block = subject)),
+  removeBatchEffect = identical(removeBatchEffect_parallel(v$E, batch, design = design,
+                                                           workers = 4L),
+                                removeBatchEffect(v$E, batch, design = design)))
+#>        ComBat_seq      normLibSizes             lmFit      duplicateCor
+#>              TRUE              TRUE              TRUE              TRUE
+#> removeBatchEffect
+#>              TRUE
+```
+
+Four thousand cells is under every size gate, so those arms run serially and are still
+`identical()`. [run_example.R](inst/examples/run_example.R) runs the same comparison at a size
+where the speedup shows, in minutes, still with nothing to download.
+
+```sh
+Rscript inst/examples/run_example.R
+```
+
+Rendered reports carry it at cohort scale, same sections on all three platforms: cohort,
+argument parity, corrections, PCA, differential expression, worker sweep.
+[macOS](https://genomerx.github.io/RNA-Parallel/) ·
+[Linux](https://genomerx.github.io/RNA-Parallel/linux.html) ·
+[Windows](https://genomerx.github.io/RNA-Parallel/windows.html). Sources are
+[RNA_Parallel.Rmd](inst/examples/RNA_Parallel.Rmd),
+[RNA_Parallel_linux.Rmd](inst/examples/RNA_Parallel_linux.Rmd) and
+[RNA_Parallel_windows.Rmd](inst/examples/RNA_Parallel_windows.Rmd), the second rendered with
+[render_linux.sh](inst/examples/render_linux.sh) and the third with
+[render_windows.ps1](inst/examples/render_windows.ps1), both of which pin BLAS before R starts.
+The Windows report adds a backend sweep the other two do not need, because without `fork()` the
+backend decides whether anything runs in parallel at all. The first run
+downloads HNSC, LUAD and LUSC to the per-user cache, or `RNAPARALLEL_TCGA_DIR` if set.
+
+[tests/](tests/testthat) covers every argument path, chunk layout and backend, plus a dispatch
+count through the public entry point, because `identical()` alone cannot tell a working parallel
+layer from a dead one. Over 400 assertions.
+
+### Seeing what is running
+
+```r
+options(combat.timing = TRUE)      # one elapsed line per call
+options(combat.quiet  = TRUE)      # swallow the vendor's progress chatter
+options(combat.timing.min = 1)     # hide anything faster than a second
+```
+
+```
+  Breast ComBat-seq                  mclapply x6         23.2s
+  TMM 12,000 x 700                   mclapply x6          0.9s
+  TMM 200 x 8                        serial               0.0s  2 gated
+```
+
+The engine column reports what **ran**, not what was asked for: a call that fell under a size
+gate says `serial`, because a companion returning `identical()` output at serial pace otherwise
+looks exactly like one that forked. If a pinned vendor excerpt stands down after an upstream
+change, the line says `[match_quantiles stood down]`.
+
+**`rnaparallel_stale()`** returns TRUE if the package was reinstalled under a running session.
+The fix is to restart R.
 
 ## How it works
 
@@ -75,49 +176,38 @@ calls `sva::ComBat_seq` unchanged. Shares are of serial time on 10,000 genes by 
 | `glmFit`, `glmFit.default` | remainder | gene rows | offset, dispersion, weights and start arrive explicitly and slice with the rows |
 | `monte_carlo_int_NB` | small | serial | draws depend on the previous batch's state |
 
-The limma and edgeR companions each split one axis: `calcNormFactors_parallel()` by sample
-column, `lmFit_parallel()` and `duplicateCorrelation_parallel()` by gene row.
+`calcNormFactors_parallel()` splits by sample column, `lmFit_parallel()` and
+`duplicateCorrelation_parallel()` by gene row. `removeBatchEffect_parallel()` splits nothing: it
+rebinds the one `lmFit` call inside the vendor to `lmFit_parallel()` and inherits its curve, which
+still pays, because the vendor does not finish inside ten minutes at 9,493 samples. Chunks are
+interleaved so a sorted matrix does not leave workers idle, each carries a tag, and a dead worker,
+duplicate chunk or short result halts the run.
 
-Assembly is what makes a split safe rather than only fast. Chunks are interleaved so a sorted
-matrix does not leave workers idle, each carries a tag and is reassembled by it, and a dead
-worker, duplicate chunk or short result halts the run instead of being patched.
+**What stays serial keeps the output identical:** anything reducing across genes (`eBayes`,
+`squeezeVar`, `fitFDist`, `arrayWeights`, `normalizeBetweenArrays`, `normalizeQuantiles`) or
+scaling with gene count (`voom`'s `lowess` span, `p.adjust` and so `topTable` and `decideTests`).
+`contrasts.fit` takes 0.001 s, less than a fork. `lmFit(method = "robust")` and `ndups >= 2`
+reshape the row axis through `unwrapdups` and error rather than split, which is why `block` is
+required for `duplicateCorrelation_parallel`.
 
-**One companion is second-order.** `removeBatchEffect_parallel()` splits nothing itself.
-`limma::removeBatchEffect` is argument shaping around a single `lmFit` call with no cross-gene
-reduction, so the companion rebinds that call to `lmFit_parallel()` and runs the vendor
-unchanged. It inherits `lmFit`'s curve rather than having its own. It pays off on absolute
-cost: the vendor measures 8.5 s at 948 samples, 44.2 s at 3,000, and does not finish
-inside ten minutes at 9,493.
+**Built, measured, deleted,** because a modest speedup does not buy different numbers.
 
-**Deliberately not parallelised.** Leaving these serial is what keeps the output identical.
-`voom`'s `lowess` trend takes its span as a *fraction* of gene count, so a block fits a different
-curve. `eBayes`, `squeezeVar` and `fitFDist` pool across all genes. `p.adjust` is
-length-dependent, so `topTable` and `decideTests` cannot be blocked. `arrayWeights`,
-`normalizeBetweenArrays` and `normalizeQuantiles` reduce across genes by construction.
-`contrasts.fit` takes 0.001 s, so a fork costs more than the work. `lmFit(method = "robust")` and
-`ndups >= 2` reshape the row axis through `unwrapdups`, so a split would pair different genes;
-both are refused with an error, which is also why `block` is required for
-`duplicateCorrelation_parallel`.
+| companion | reached | what it moved |
+|---|---|---|
+| `estimateDisp` | 1.4x | 19,999 of 20,000 tagwise dispersions, once one library was over-sequenced |
+| `glmQLFit` | 1.6x | 22 of 18,270 TCGA genes, where `mglmLevenberg` records a non-convergent deviance that depends on which genes share the block, with no flag set |
 
-**Two edgeR companions were built, measured and deleted.** `estimateDisp` reached 1.4x but moved
-19,999 of 20,000 tagwise dispersions once one library was over-sequenced. `glmQLFit` reached
-1.6x, then failed on real TCGA data at 22 of 18,270 genes: `mglmLevenberg` records a deviance
-whose value depends on which genes share the block when a fit does not converge, with no flag
-set. A modest speedup does not buy a companion that returns different numbers.
+**Three ways a limma row split goes wrong,** each reproduced against limma 3.62.2, each returning
+a wrong answer quietly rather than failing.
 
-**Three ways a limma row split goes wrong,** each reproduced against limma 3.62.2 before being
-guarded, each returning a wrong answer quietly rather than failing. `asMatrixWeights` dispatches
-on the *block's* row count, so a per-array weight vector is read as per-gene weights by any block
-whose height equals the sample count. `NoProbeWts` is an AND-reduction selecting between two
-numerically different algorithms, so an all-finite block flips to the fast path while the whole
-matrix took the slow one. `stats::lm.fit` drops a one-column response to a vector, so a one-gene
-block swaps `colMeans` for `mean`. Every chunk now carries at least two genes, weights are
-expanded once against the whole matrix, and the branch is proven unable to flip before anything
-is split.
+| trap | wrong answer | guard |
+|---|---|---|
+| `asMatrixWeights` dispatches on the *block's* row count | a per-array weight vector reads as per-gene weights in any block whose height equals the sample count | weights expanded once against the whole matrix |
+| `NoProbeWts` is an AND-reduction selecting between two numerically different algorithms | an all-finite block takes the fast path while the whole matrix took the slow one | the branch is proven unable to flip before anything is split |
+| `stats::lm.fit` drops a one-column response to a vector | a one-gene block swaps `colMeans` for `mean` | at least two genes per chunk |
 
-One inner loop is the exception. It is pinned to the vendor body it came from and stands down
-on any upstream change: `sva::match_quantiles`, 66.5% of ComBat-seq's serial time. See
-[License](#license).
+One inner loop is pinned to the vendor body it came from and stands down on any upstream change:
+`sva::match_quantiles`, 66.5% of ComBat-seq's serial time. See [License](#license).
 
 ## Cross-platform
 
@@ -144,112 +234,73 @@ fastest companion arm on that machine, with its worker count. Bold marks the fas
 | lmFit | 4.4 s | **1.7 s** (4w) | 11.6 s | 4.1 s (16w) |
 | removeBatchEffect | 4.5 s | **1.3 s** (8w) | 2.6 s | 2.1 s (4w) |
 
-**Speedup is a ratio, not a speed.** The M3 runs the serial baseline 2.03x faster than the Xeon
-and holds about 2x at every matched worker count. Linux scales further, 7.31x against 5.37x,
-because it has twice the physical cores, and still finishes behind on the clock: 459.3 s against
-308.0 s. A slower core inflates the speedup column; read the seconds.
-
-**Hyperthreads are not cores.** 32 workers is slower than 16 on this box for every companion:
-485.4 s against 459.3 s at cohort scale, 33.2 s against 31.4 s simulated.
-
-**Where each wins.** Linux takes `duplicateCorrelation` outright. It is also the only stage
-whose two vendor baselines sit within 0.5% of each other, so scaling decides it rather than
-per-core speed. Everything else follows the core.
-
-**Two Linux notes.** OpenBLAS is multi-threaded by default and reads `OPENBLAS_NUM_THREADS` when
-it loads, so pin it before R starts or every forked worker opens its own thread pool. Use
-`mclapply`: fork shares the parent's pages copy-on-write.
-
-The BLAS is the obvious suspect for the platform gap, and it is not the cause. Unpinning
-OpenBLAS moves DGEMM throughput 8x, from 28 to 225 GFLOPS, and moves `lmFit` by 1.3%: 8.82 s
-against 8.71 s on 18,270 by 1,500. limma solves a small QR per gene and never reaches the size
-where threaded BLAS pays. Per-core speed separates the machines.
-
-## Verify it yourself
-
-Check the claim in ten lines:
-
-```r
-set.seed(1)
-counts <- matrix(rnbinom(1600, mu = 50, size = 5), nrow = 200)
-batch  <- rep(1:2, each = 4)
-
-identical(ComBat_seq_parallel(counts, batch, group = NULL, workers = 4L),
-          sva::ComBat_seq(counts, batch, group = NULL))
-#> TRUE
-```
-
-- **Rendered reports**, same sections on both platforms: cohort, argument parity, corrections,
-  PCA, differential expression, worker sweep.
-  [macOS](https://genomerx.github.io/RNA-Parallel/) ·
-  [Linux](https://genomerx.github.io/RNA-Parallel/linux.html)
-- **[run_example.R](inst/examples/run_example.R)** runs the whole claim in minutes without
-  downloading anything.
-  ```sh
-  Rscript inst/examples/run_example.R
-  ```
-- **Report sources.** [RNA_Parallel.Rmd](inst/examples/RNA_Parallel.Rmd) for macOS,
-  [RNA_Parallel_linux.Rmd](inst/examples/RNA_Parallel_linux.Rmd) for Linux, rendered with
-  [render_linux.sh](inst/examples/render_linux.sh), which sets the BLAS environment before R
-  starts. The first run downloads HNSC, LUAD and LUSC to the per-user cache, or
-  `RNAPARALLEL_TCGA_DIR` if set.
-- **[tests/](tests/testthat)** covers every argument path, chunk layout and backend, plus a
-  dispatch count through the public entry point, because `identical()` alone cannot tell a
-  working parallel layer from a dead one. Over 400 assertions.
+Speedup is a ratio and rewards a slower core: Linux scales further, 7.31x against 5.37x, and
+still finishes behind at 459.3 s against 308.0 s. Read the seconds. On Linux, pin
+`OPENBLAS_NUM_THREADS` before R starts or every forked worker opens its own thread pool, though it
+changes little here: unpinning moves DGEMM throughput 8x and `lmFit` by 1.3%, because limma solves
+a small QR per gene.
 
 ## Tuning
 
 | knob | default | change it when |
 |---|---|---|
-| `workers` | `min(8, detectCores() - 2)` | rarely. Going past your *physical* core count can be slower, as the 32-worker Linux arm shows. See `?workers` |
+| `workers` | `min(8, detectCores() - 2)`, capped at performance cores without `fork()` | rarely. Going past your *physical* core count can be slower, as the 32-worker Linux arm shows. See `?workers` |
 | `chunks` | `workers` | only to cut peak memory per worker |
 | `parallel_backend` | `"mclapply"` | you cannot fork, or a cluster is already running |
 
 `workers` is not a safety ceiling. Six of them alongside a second forking R session have
 kernel-panicked a 24 GB machine, and nothing here can see that session.
 
-**Backends** are `"mclapply"` (forks), `"future"`, `"BiocParallel"`, `"foreach"`, `"serial"`, or
-any `function(idx, f, workers)`, all returning identical results. Forking is the default because
-a forked worker reads the matrix through copy-on-write, while socket backends re-serialise it
-per chunk and measured slower than not parallelising at all. **Windows** cannot fork, so `mclapply`
-runs serially and says so once, `BiocParallel` substitutes a serial parameter, and `"foreach"`
-runs over PSOCK but is slower than serial here. **Nesting** is safe on the default backend, where
-`mc.allow.recursive` is `FALSE`; `foreach` builds its own PSOCK cluster and does multiply, so
-spend the worker budget *inside* a loop body rather than across it. Inverting one 15-cohort
-screen measured 245 s to 81.6 s.
+**Backends** are `"mclapply"` (forks), `"future"`, `"BiocParallel"`, `"foreach"`, `"serial"`, or any
+`function(idx, f, workers)`, all returning identical results. Forking is the default because a
+forked worker reads the matrix copy-on-write, while socket backends re-serialise it per chunk and
+measured slower than not parallelising at all.
 
-**Size gates** are why a small input shows no speedup. Seven `combat.min` options set the size
-below which a call runs serially, because under them a fork costs more than the work:
-`combat.min.cells`, `combat.min.disp.cells`, `combat.min.glm.cells`, `combat.min.ls.cells`,
-`combat.min.norm.cells`, `combat.min.order.cells`, `combat.min.dupcor.cells`.
-`options(combat.fork = FALSE)` forces serial everywhere, and `combat_cluster_stop()` releases
-cached clusters.
+**Windows** cannot fork, so the backend is the whole decision there. `mclapply` runs serially and
+says so once; `BiocParallel` substitutes a serial parameter. That leaves two that really do run
+workers, and they are not interchangeable: `"foreach"` measured 1.18x, 0.94x, 0.57x and 0.28x at 2,
+4, 8 and 16 workers, getting *worse* with every worker added, because the cached cluster is rebuilt
+whenever the requested width changes and ComBat-seq alternates widths on every dispatch. `"future"`
+holds one `multisession` pool across all of them and shows the ordinary shape.
+
+**Set a plan and the package picks `"future"` for you:**
+
+```r
+library(future); plan(multisession, workers = 6)   # that is all
+```
+
+The default backend is resolved per call, so an active plan selects `"future"` and no plan leaves
+`mclapply` and its one-time serial notice. This package will not set a plan for you. A caller's
+plan is theirs, and starting worker processes inside someone's session unasked is worse than being
+slow, which is also why the default is not simply `"future"`: without a plan that would mean a
+warning on every dispatch and no speedup at all.
+
+**Nesting** is blocked on every backend: a dispatch that finds itself already inside one of this
+package's workers runs serially. On fork that used to rest on `mc.allow.recursive = FALSE`, which
+covered only that branch. Over PSOCK the same construction spawned workers + workers^2 processes.
+A caller's own parallel loop is unaffected, so spend the worker budget *inside* a loop body rather
+than across it. Inverting one 15-cohort screen measured 245 s to 81.6 s.
+
+**Size gates** are why a small input shows no speedup. Seven options set the cell count below which
+a call runs serially: `combat.min.cells` (20,000), `combat.min.disp.cells` (30,000),
+`combat.min.glm.cells` (100,000), `combat.min.ls.cells` (6e6), `combat.min.norm.cells` (2e5),
+`combat.min.order.cells` (4e6), `combat.min.dupcor.cells` (5,000).
+
+Those are *fork* break-evens, and two of them move without fork, in opposite directions because
+the underlying work is not alike. `lmFit` is cheap enough per cell that a serialised chunk is
+never repaid (measured 0.14x at 21.6M cells and 0.24x at 60M, improving with size and never
+reaching parity), so `combat.min.ls.cells` **closes** on Windows rather than merely rising, which
+also covers `removeBatchEffect_parallel()` since the vendor rebinds one `lmFit` call. The TMM
+column loop does pay once it is big enough (1.05x at 1.8M cells against 1.58x at 21.6M), so
+`combat.min.norm.cells` **rises** to 2e6 instead, an order of magnitude above the fork value.
+Set either explicitly to override. Output is `identical()` either way: a gate decides who
+computes, never what is computed.
+`options(combat.fork = FALSE)` forces serial everywhere, `combat_cluster_stop()` releases cached
+clusters.
 
 **`calcNormFactors_parallel()`** wraps `normLibSizes` on current edgeR and `calcNormFactors` on
 older ones. `normLibSizes` **errors** on negative counts where the old name returned NaN-warned
 factors.
-
-### Seeing what is running
-
-```r
-options(combat.timing = TRUE)      # one elapsed line per call
-options(combat.quiet  = TRUE)      # swallow the vendor's progress chatter
-options(combat.timing.min = 1)     # hide anything faster than a second
-```
-
-```
-  Breast ComBat-seq                  mclapply x6         23.2s
-  TMM 12,000 x 700                   mclapply x6          0.9s
-  TMM 200 x 8                        serial               0.0s  2 gated
-```
-
-The engine column reports what **ran**, not what was asked for: a call that fell under a size
-gate says `serial`, because a companion returning `identical()` output at serial pace otherwise
-looks exactly like one that forked. If a pinned vendor excerpt stands down after an upstream
-change, the line says `[match_quantiles stood down]`.
-
-**`rnaparallel_stale()`** returns TRUE if the package was reinstalled under a running session.
-The fix is to restart R.
 
 ## License
 

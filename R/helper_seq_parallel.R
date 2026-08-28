@@ -168,6 +168,98 @@ combat_row_chunks <- function(ntag, workers = 4L, chunks = NULL, interleave = TR
 combat_row_order <- function(idx) order(unlist(idx, use.names = FALSE))
 
 
+#' Size gate for the least-squares row split, which depends on having fork()
+#'
+#' 6e6 cells is a FORK break-even. A forked worker costs almost nothing to start and reads the
+#' matrix through copy-on-write, so a split earns its keep as soon as the arithmetic is big
+#' enough. Without fork() every chunk is serialised to a separate R process, and `lm.fit` is
+#' cheap enough per cell that the transfer never gets paid back. Measured on Windows over PSOCK,
+#' gate forced open, 1,200 samples:
+#'
+#'   18,000 genes  (21.6M cells, vendor 0.5 s)  0.14x at 2 workers, 0.08x at 4
+#'   50,000 genes  (60.0M cells, vendor 1.4 s)  0.24x at 2 workers, 0.10x at 4
+#'
+#' It improves with size and still does not approach 1.0x, and it gets worse with every worker
+#' added. On the TCGA cohort the same split measured 0.50x, and `removeBatchEffect` inherits it
+#' (the vendor rebinds one `lmFit` call), which is how two companions came to be slower than
+#' the functions they wrap. There is no threshold that rescues this, so the gate closes rather
+#' than rising: on a platform without fork the fast branch stays whole.
+#'
+#' An explicit `combat.min.ls.cells` still wins, so the split remains reachable for anyone who
+#' wants to measure it. Output is identical() either way: this decides who computes, never
+#' what is computed.
+#' Both branches are covered, which the first version of this got wrong. `lmFit_parallel` picks
+#' its gate by branch: the fast one on `combat.min.ls.cells`, the weighted one on
+#' `combat.min.cells`. Closing only the fast gate looked fixed against a weightless matrix and
+#' changed nothing for the report, whose call carries voom weights and so takes the weighted
+#' branch. Measured there, that branch loses too: 0.52x, 0.34x, 0.24x, 0.08x at 2, 4, 6 and 8
+#' workers on a 6.3 s vendor call. `combat.min.cells` cannot simply be raised instead: it is
+#' shared with ComBat-seq's `match_quantiles`, which is the split that earns 2.92x on the same
+#' cohort. So the gate is closed here, for this companion, on both of its branches.
+#' @param fork_default Threshold to use where fork() is available.
+#' @return Cell count below which the split does not run.
+#' @noRd
+rp_ls_min_cells <- function(fork_default = 6e6) {
+  o <- getOption("combat.min.ls.cells")
+  if (!is.null(o)) return(o)
+  if (identical(.Platform$OS.type, "windows")) Inf else fork_default
+}
+
+
+#' Size gate for the TMM column split, which also depends on having fork()
+#'
+#' Same shape of problem as [rp_ls_min_cells()] and a different answer, which is why it is
+#' measured rather than assumed. 2e5 cells is a fork break-even; over PSOCK the column loop has
+#' to earn a serialised copy per chunk as well. Measured on Windows with the gate forced open:
+#'
+#'   1.8M cells  (vendor 1.2 s)   1.05x at 2 workers, 0.89x at 4, 0.64x at 6
+#'   21.6M cells (vendor 15.8 s)  1.58x at 2 workers, 1.53x at 4, 1.36x at 6
+#'
+#' Unlike the least-squares split this one does pay at cohort scale, so the gate rises instead of
+#' closing: break-even sits around two million cells, an order of magnitude above the fork value,
+#' and below it the split is a loss at every worker count. On the cohort the companion measured
+#' 1.63x with the gate in place.
+#' @return Cell count below which the column split does not run.
+#' @noRd
+rp_norm_min_cells <- function() {
+  o <- getOption("combat.min.norm.cells")
+  if (!is.null(o)) return(o)
+  if (identical(.Platform$OS.type, "windows")) 2e6 else 2e5
+}
+
+
+#' The backend to use when the caller has not named one
+#'
+#' `mclapply` everywhere fork() exists, which is every platform this package was built on. On
+#' Windows it cannot fork, so it is correct, serial, and says so once: a companion that returns
+#' the right answer at the speed of the function it wraps.
+#'
+#' `future` is the only backend that runs real workers there without the caller registering a
+#' cluster first, and it measured 2.92x on the cohort against `foreach`'s 0.28x. But it needs a
+#' plan, and this package will not set one: a caller's plan is theirs, and silently starting
+#' sixteen processes inside someone's session is worse than being slow. Defaulting to `future`
+#' unconditionally would therefore hand most Windows users a warning on every dispatch and no
+#' speedup, which is strictly worse than what they have now.
+#'
+#' So it is chosen adaptively: taken when a plan is already active and it will actually do
+#' something, and left alone otherwise. A user who sets `plan(multisession)` gets parallelism
+#' without also having to discover `options(combat.backend=)`; a user who sets nothing gets
+#' exactly today's behaviour. Resolved per call, since a plan can be set at any time.
+#' @return A backend name from [combat_backends()].
+#' @noRd
+combat_default_backend <- function() {
+  if (!identical(.Platform$OS.type, "windows")) return("mclapply")
+  if (!requireNamespace("future", quietly = TRUE) ||
+      !requireNamespace("future.apply", quietly = TRUE)) return("mclapply")
+  # nbrOfWorkers() is the question that matters: a sequential plan, an unset plan and a
+  # one-worker plan all answer 1, and all three mean `future` would resolve in this process.
+  n <- tryCatch(future::nbrOfWorkers(), error = function(e) 1L)
+  if (isTRUE(n > 1L)) "future" else "mclapply"
+}
+
+
+
+
 # ---- entry-point prologue -----------------------------------------------------
 
 #' Validate the four shared controls once, identically, for every entry point
@@ -357,6 +449,13 @@ combat_wait_pids <- function(pids, identities = NULL, timeout = 2) {
 #' six workers alongside a SECOND forking R session kernel-panicked a 24 GB machine, and no
 #' core count this process can read knows about the other session, so a caller running two
 #' at once should pass a smaller number.
+#' Without fork() the pick is additionally capped at the PERFORMANCE core count, which is not
+#' the core count on a hybrid CPU. The distinction only matters where there is no fork: a forked
+#' worker on an efficiency core still adds throughput, which is why the macOS run measures 5.37x
+#' at eight workers on a chip with four performance cores and is left alone here. Over sockets
+#' every worker also costs a serialised copy, so a slow core stops paying for itself: on an Ultra
+#' 185H, 6 performance plus 10 efficiency, the ComBat-seq curve peaks at 6 workers and turns over
+#' after. Reading the core count alone would have picked 8.
 #' @noRd
 combat_default_workers <- function(workers = NULL) {
   if (!is.null(workers)) return(workers)
@@ -365,7 +464,38 @@ combat_default_workers <- function(workers = NULL) {
     ac <- max(1L, suppressWarnings(parallel::detectCores()), na.rm = TRUE)
     .combat_clusters$allcores <- ac
   }
-  max(1L, min(8L, ac - 2L))
+  n <- max(1L, min(8L, ac - 2L))
+  if (identical(.Platform$OS.type, "windows")) n <- min(n, rp_perf_cores())
+  max(1L, n)
+}
+
+#' Performance cores, distinguished from total cores on a hybrid CPU
+#'
+#' Only Darwin had a real answer here (`sysctl hw.perflevel0.physicalcpu`); everything else fell
+#' through to `detectCores(logical = FALSE)`, which reports 16 on an Ultra 185H that has 6
+#' performance cores and 10 efficiency ones. That is not a rounding error, it is the difference
+#' between a sensible default and one that recruits ten slow workers.
+#'
+#' The topology answers it without a vendor table: on Intel hybrid parts only performance cores
+#' carry SMT, so the number of logical processors ABOVE the physical count is the number of cores
+#' with a second thread. 22 logical against 16 physical gives 6, which is right. The formula
+#' degrades correctly everywhere else: on a uniformly hyperthreaded machine every core has a
+#' second thread, `logical - physical == physical`, and the guard below returns the physical
+#' count; with SMT off or absent the difference is 0 and it does the same. A cgroup-restricted
+#' container can report fewer logical than physical, which is also caught.
+#' @return Best available performance-core count, never below 1.
+#' @noRd
+rp_perf_cores <- function() {
+  p <- .combat_clusters$perfcores
+  if (!is.null(p)) return(p)
+  phys <- suppressWarnings(parallel::detectCores(logical = FALSE))
+  logi <- suppressWarnings(parallel::detectCores(logical = TRUE))
+  if (is.na(phys) || phys < 1L) phys <- if (is.na(logi) || logi < 1L) 1L else logi
+  smt <- if (is.na(logi)) 0L else logi - phys
+  p <- if (smt > 0L && smt < phys) smt else phys   # hybrid: only P-cores carry SMT
+  p <- max(1L, as.integer(p))
+  .combat_clusters$perfcores <- p
+  p
 }
 
 # A retired entry is retried on later calls, so it needs a stop condition. Without one, a
@@ -686,7 +816,7 @@ combat_backends <- function() {
 #' @return A list, one element per chunk, in order.
 #' @noRd
 combat_parallel_lapply <- function(idx, f, workers,
-                                   parallel_backend = getOption("combat.backend", "mclapply"),
+                                   parallel_backend = getOption("combat.backend", combat_default_backend()),
                                    cells = Inf,
                                    min_cells = getOption("combat.min.cells", 2e4),
                                    preschedule = FALSE) {
@@ -755,6 +885,15 @@ combat_parallel_lapply <- function(idx, f, workers,
   f_tagged <- function(ii) {
     k <- attr(ii, "combat_chunk")
     attr(ii, "combat_chunk") <- NULL
+    # Mark THIS process as running a dispatch, so a rebound hot path that dispatches again
+    # from inside the worker runs serially instead of opening a second pool. The flag is set
+    # here rather than in the master because the worker is the only process the nested call
+    # can consult: a PSOCK worker is a fresh R process that inherits nothing set after it
+    # started, and a fork child gets its own copy of the environment.
+    prev <- Sys.getenv("RNAPARALLEL_IN_WORKER", unset = NA_character_)
+    Sys.setenv(RNAPARALLEL_IN_WORKER = "1")
+    on.exit(if (is.na(prev)) Sys.unsetenv("RNAPARALLEL_IN_WORKER")
+            else Sys.setenv(RNAPARALLEL_IN_WORKER = prev), add = TRUE)
     list(combat_chunk = k, value = f(ii))
   }
 
@@ -797,6 +936,27 @@ combat_parallel_lapply <- function(idx, f, workers,
     spare <- which(!filled)
     for (j in which(!ok)) if (length(spare)) { res[spare[1]] <- list(out[[j]]); spare <- spare[-1] }
     res
+  }
+
+  # A dispatch already running inside one of this package's workers must not open a second
+  # pool. ComBat-seq dispatches the tagwise loop ACROSS BATCHES and ships the vendor closure,
+  # whose environment still carries the rebound `estimateGLMTagwiseDisp`; inside the worker
+  # that symbol dispatches AGAIN over gene rows. The result is workers + workers^2 processes:
+  # measured 2 outer and 4 inner for `workers = 2L` on Windows, which extrapolates to 272 at
+  # the 16-worker arm, each one a fresh R process with edgeR and limma loaded.
+  #
+  # This used to be handled by `mc.allow.recursive = FALSE`, but that is an argument to
+  # parallel::mclapply and guards the fork branch alone. On Windows mclapply is serial and
+  # foreach/PSOCK is the only backend that runs workers at all, so the one platform that
+  # needed the guard was the one platform without it. The flag is process-local and set by
+  # `f_tagged` above, so this covers every backend, custom executors included.
+  #
+  # A caller's OWN parallel loop is unaffected: nothing marks their workers, so a companion
+  # called once per cohort inside their loop still parallelises, which is the nesting pattern
+  # the documentation recommends.
+  if (nzchar(Sys.getenv("RNAPARALLEL_IN_WORKER"))) {
+    rp_count(FALSE)
+    return(lapply(idx, f))
   }
 
   if (custom) {
@@ -1149,7 +1309,7 @@ rp_per_gene <- function(x, ii) {
 glmFit_rows_parallel <- function(y, design, dispersion, offset, weights = NULL,
                                  prior.count = 0.125, start = NULL,
                                  workers = 4L, chunks = NULL,
-                                 parallel_backend = getOption("combat.backend", "mclapply")) {
+                                 parallel_backend = getOption("combat.backend", combat_default_backend())) {
   y <- as.matrix(y)
   idx <- combat_row_chunks(nrow(y), workers = workers, chunks = chunks)
 
@@ -1380,7 +1540,7 @@ combat_mq_dispatch <- function(mq, counts_sub, old_mu, old_phi) {
 #' @noRd
 match_quantiles_parallel <- function(mq, counts_sub, old_mu, old_phi, new_mu, new_phi,
                                      workers = 4L, chunks = NULL,
-                                     parallel_backend = getOption("combat.backend", "mclapply")) {
+                                     parallel_backend = getOption("combat.backend", combat_default_backend())) {
   idx <- combat_row_chunks(nrow(counts_sub), workers = workers, chunks = chunks)
 
   # gate resolved once, before the fork, so a worker inherits the decision rather than
@@ -1388,6 +1548,12 @@ match_quantiles_parallel <- function(mq, counts_sub, old_mu, old_phi, new_mu, ne
   mq_fun <- combat_mq_dispatch(mq, counts_sub, old_mu, old_phi)
   if (is.null(mq_fun)) return(mq(counts_sub, old_mu, old_phi, new_mu, new_phi))
 
+  # Slicing inside the worker, not before dispatch. Shipping each chunk a pre-sliced payload
+  # was tried and measured on Windows/PSOCK, where the closure below is serialised rather than
+  # inherited through copy-on-write: +3.9%, -6.6%, +4.3%, +8.0% at 2, 4, 6 and 8 workers,
+  # against 6.4% drift in the serial reference over the same run. That is noise, and one arm
+  # was slower. `future.apply` resolves the globals a closure actually reads rather than
+  # shipping its whole frame, so the cost this was aimed at was not being paid to begin with.
   do_rows <- function(ii) mq_fun(counts_sub = counts_sub[ii, , drop = FALSE],
                                  old_mu = old_mu[ii, , drop = FALSE],
                                  old_phi = old_phi[ii],
@@ -1452,7 +1618,7 @@ estimateGLMTagwiseDisp_rows_parallel <- function(y, design = NULL, dispersion = 
                                                  offset = NULL, prior.df = 10, trend = TRUE,
                                                  span = NULL, AveLogCPM = NULL, weights = NULL,
                                                  workers = 4L, chunks = NULL,
-                                                 parallel_backend = getOption("combat.backend", "mclapply")) {
+                                                 parallel_backend = getOption("combat.backend", combat_default_backend())) {
   y <- as.matrix(y)
   ntag <- nrow(y)
   # serial edgeR stops on a dispersion whose length is neither 1 nor nrow(y). Splitting by row
