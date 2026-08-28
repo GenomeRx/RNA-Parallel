@@ -12,11 +12,11 @@ TCGA, 18,270 genes by 1,500 tumours. Every arm `identical()` to the vendor on bo
 
 | companion | runs | macOS<br>M3, 8 cores | Linux<br>2x Xeon, 16 cores |
 |---|---|---:|---:|
-| `ComBat_seq_parallel()` | `sva::ComBat_seq` | 5.37x @ 8w | **7.31x @ 16w** |
-| `calcNormFactors_parallel()` | `edgeR::normLibSizes` | **6.86x @ 8w** | 3.89x @ 8w |
-| `lmFit_parallel()` | `limma::lmFit` | 2.66x @ 4w | **2.80x @ 16w** |
-| `duplicateCorrelation_parallel()` | `limma::duplicateCorrelation` | 3.63x @ 8w | **6.00x @ 16w** |
-| `removeBatchEffect_parallel()` | `limma::removeBatchEffect` | **3.37x @ 8w** | 1.22x @ 4w |
+| `ComBat_seq_parallel()` | `sva::ComBat_seq` | 5.37x @ 8w | **9.38x @ 16w** |
+| `calcNormFactors_parallel()` | `edgeR::normLibSizes` | **6.86x @ 8w** | 4.37x @ 8w |
+| `lmFit_parallel()` | `limma::lmFit` | 2.66x @ 4w | **3.42x @ 16w** |
+| `duplicateCorrelation_parallel()` | `limma::duplicateCorrelation` | 3.63x @ 8w | **7.31x @ 16w** |
+| `removeBatchEffect_parallel()` | `limma::removeBatchEffect` | **3.37x @ 8w** | 1.40x @ 8w |
 
 Originals are timed on both sides of the companion arms and averaged; short stages are the best
 of three. Bold marks the faster platform. Machine specs and what separates them are in
@@ -197,11 +197,11 @@ and Linux, fork and socket dispatch, threaded and single-threaded BLAS.
 
 | | macOS | Linux |
 |---|---|---|
-| CPU | Apple M3 | 2 x Intel Xeon Silver 4208 @ 2.10 GHz |
+| CPU | Apple M3 | 2 x Intel Xeon @ 2.80 GHz |
 | Physical cores | 8 (4 performance + 4 efficiency) | 16 |
 | Logical | 8 | 32 |
 | NUMA nodes | 1 | 2 |
-| BLAS | Accelerate | OpenBLAS 0.3.20 |
+| BLAS | Accelerate | OpenBLAS 0.3.26 |
 | Workers swept | 2, 4, 8 | 4, 8, 16, 32 |
 
 Absolute wall clock at cohort scale, every companion. Vendor is the serial original; best is the
@@ -209,17 +209,17 @@ fastest companion arm on that machine, with its worker count. Bold marks the fas
 
 | stage | macOS vendor | macOS best | Linux vendor | Linux best |
 |---|---:|---:|---:|---:|
-| ComBat-seq | 1,653.9 s | **308.0 s** (8w) | 3,355.6 s | 459.3 s (16w) |
-| duplicateCorrelation | 660.5 s | 182.0 s (8w) | 663.8 s | **110.6 s** (16w) |
-| calcNormFactors (TMM) | 10.3 s | **1.5 s** (8w) | 21.6 s | 5.5 s (8w) |
-| lmFit | 4.4 s | **1.7 s** (4w) | 11.6 s | 4.1 s (16w) |
-| removeBatchEffect | 4.5 s | **1.3 s** (8w) | 2.6 s | 2.1 s (4w) |
+| ComBat-seq | 1,653.9 s | **308.0 s** (8w) | 3,108.8 s | 331.5 s (16w) |
+| duplicateCorrelation | 660.5 s | 182.0 s (8w) | 519.3 s | **71.0 s** (16w) |
+| calcNormFactors (TMM) | 10.3 s | **1.5 s** (8w) | 21.4 s | 4.9 s (8w) |
+| lmFit | 4.4 s | **1.7 s** (4w) | 11.9 s | 3.5 s (16w) |
+| removeBatchEffect | 4.5 s | **1.3 s** (8w) | 2.6 s | 1.9 s (8w) |
 
-Speedup is a ratio and rewards a slower core: Linux scales further, 7.31x against 5.37x, and
-still finishes behind at 459.3 s against 308.0 s. Read the seconds. On Linux, pin
+Speedup is a ratio and rewards a slower core: Linux scales further, 9.38x against 5.37x, and
+still finishes behind at 331.5 s against 308.0 s. Read the seconds. On Linux, pin
 `OPENBLAS_NUM_THREADS` before R starts or every forked worker opens its own thread pool, though it
-changes little here: unpinning moves DGEMM throughput 8x and `lmFit` by 1.3%, because limma solves
-a small QR per gene.
+changes little here: unpinning moves DGEMM throughput 5x, from 62 to 314 GFLOPS, and `lmFit` by
+0.3%, because limma solves a small QR per gene.
 
 ## Tuning
 
