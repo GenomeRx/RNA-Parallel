@@ -25,7 +25,8 @@ $env:OPENBLAS_NUM_THREADS = "1"
 $env:OMP_NUM_THREADS      = "1"
 $env:MKL_NUM_THREADS      = "1"
 
-# pandoc ships with RStudio and is not on PATH in a plain PowerShell session.
+# pandoc ships with RStudio and is not on PATH in a plain PowerShell session. A machine with no
+# RStudio at all is the other common case here, so a standalone install and PATH both count.
 if (-not $env:RSTUDIO_PANDOC) {
   $roots = @($env:ProgramFiles, ${env:ProgramFiles(x86)}, "$env:LOCALAPPDATA\Programs") |
            Where-Object { $_ }
@@ -41,6 +42,16 @@ if (-not $env:RSTUDIO_PANDOC) {
       if (Test-Path (Join-Path $d "pandoc.exe")) { $env:RSTUDIO_PANDOC = $d; break }
     }
     if ($env:RSTUDIO_PANDOC) { break }
+  }
+}
+if (-not $env:RSTUDIO_PANDOC) {
+  $onPath = (Get-Command pandoc.exe -ErrorAction SilentlyContinue).Source
+  if ($onPath) {
+    $env:RSTUDIO_PANDOC = Split-Path $onPath
+  } else {
+    foreach ($d in @("$env:LOCALAPPDATA\Pandoc", "$env:ProgramFiles\Pandoc")) {
+      if (Test-Path (Join-Path $d "pandoc.exe")) { $env:RSTUDIO_PANDOC = $d; break }
+    }
   }
 }
 

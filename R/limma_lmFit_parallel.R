@@ -34,8 +34,9 @@ rp_row_blocks <- function(M, weights, env, workers, chunks, parallel_backend, wh
   # otherwise only when the finiteness half holds. The two branches cost nothing alike, so
   # they cannot share one size gate. Speed only; both are exact either way.
   fast <- is.null(w) || !is.null(attr(w, "arrayweights"))
-  min_cells <- if (fast) getOption("combat.min.ls.cells", 6e6) else
-    getOption("combat.min.cells", 2e4)
+  # Both branches go through rp_ls_min_cells(), which closes them on a platform without fork().
+  # Passing the branch's own fork-side default keeps macOS and Linux exactly as they were.
+  min_cells <- rp_ls_min_cells(if (fast) 6e6 else getOption("combat.min.cells", 2e4))
 
   # Under the gate, take the vendor call WHOLE. combat_parallel_lapply honours the gate by
   # walking the blocks serially instead, and on the fast branch that is four lm.fit calls

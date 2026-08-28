@@ -313,8 +313,12 @@ ComBat_seq_parallel <- function(counts, batch, group = NULL, covar_mod = NULL,
     }
 
     # Each element is one whole-matrix estimate over every gene, so it always earns a
-    # dispatch. Nested forking cannot happen: combat_parallel_lapply passes
-    # mc.allow.recursive = FALSE, so a rebound tagwise inside a worker runs serially.
+    # dispatch. Nesting is prevented by combat_parallel_lapply, which marks the worker
+    # process it dispatches into and runs serially when it finds itself already inside one,
+    # so a rebound tagwise in the worker does not open a second pool. That guard used to be
+    # `mc.allow.recursive = FALSE`, which is an mclapply argument and covered the fork branch
+    # only; on Windows, where foreach/PSOCK is the sole working backend, this nested to
+    # workers + workers^2 processes until the flag replaced it.
     # idx is deliberately not passed: its row check compares a chunk's returned rows against
     # the indices it was given, and here one index returns a dispersion per gene. Dead workers
     # and thrown errors are still caught, and the shape is checked below instead.

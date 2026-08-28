@@ -4,23 +4,37 @@ Parallel companions for RNA-seq tools. Each calls the original function unmodifi
 output `identical()` to it, bit for bit. Same arguments, same defaults, same result, faster.
 
 Rendered analysis: [macOS](https://genomerx.github.io/RNA-Parallel/) ·
-[Linux](https://genomerx.github.io/RNA-Parallel/linux.html)
+[Linux](https://genomerx.github.io/RNA-Parallel/linux.html) ·
+[Windows](https://genomerx.github.io/RNA-Parallel/windows.html)
 
 ## Speedup
 
-TCGA, 18,270 genes by 1,500 tumours. Every arm `identical()` to the vendor on both platforms.
+TCGA, 18,270 genes by 1,500 tumours. Every arm `identical()` to the vendor on all three platforms.
 
-| companion | runs | macOS<br>M3, 8 cores | Linux<br>2x Xeon, 16 cores |
-|---|---|---:|---:|
-| `ComBat_seq_parallel()` | `sva::ComBat_seq` | 5.37x @ 8w | **7.31x @ 16w** |
-| `calcNormFactors_parallel()` | `edgeR::normLibSizes` | **6.86x @ 8w** | 3.89x @ 8w |
-| `lmFit_parallel()` | `limma::lmFit` | 2.66x @ 4w | **2.80x @ 16w** |
-| `duplicateCorrelation_parallel()` | `limma::duplicateCorrelation` | 3.63x @ 8w | **6.00x @ 16w** |
-| `removeBatchEffect_parallel()` | `limma::removeBatchEffect` | **3.37x @ 8w** | 1.22x @ 4w |
+| companion | runs | macOS<br>M3, 4P+4E | Linux<br>2x Xeon, 16 cores | Windows<br>Ultra 9 185H, 6P+10E |
+|---|---|---:|---:|---:|
+| `ComBat_seq_parallel()` | `sva::ComBat_seq` | 5.37x @ 8w | **7.31x @ 16w** | 2.92x @ 6w |
+| `calcNormFactors_parallel()` | `edgeR::normLibSizes` | **6.86x @ 8w** | 3.89x @ 8w | 1.63x @ 2w |
+| `lmFit_parallel()` | `limma::lmFit` | 2.66x @ 4w | **2.80x @ 16w** | serial |
+| `duplicateCorrelation_parallel()` | `limma::duplicateCorrelation` | 3.63x @ 8w | **6.00x @ 16w** | 2.21x @ 8w |
+| `removeBatchEffect_parallel()` | `limma::removeBatchEffect` | **3.37x @ 8w** | 1.22x @ 4w | serial |
 
 Originals are timed on both sides of the companion arms and averaged; short stages are the best
-of three. Bold marks the faster platform. Machine specs and what separates them are in
+of three. Bold marks the fastest platform. Machine specs and what separates them are in
 [Cross-platform](#cross-platform).
+
+**Windows is the odd column and the reason is architectural, not incidental.** It has no
+`fork()`, so a worker is a whole process that receives a copy rather than sharing the parent's
+pages, and only 6 of its 16 cores are performance cores. Both facts pull the useful worker count
+down: the ComBat-seq curve peaks at 6 and turns over after. `serial` is not a missing measurement
+— it is the companion declining to split, because `lmFit` is cheap enough per cell that no
+dispatch repays the transfer there. It measured 0.52x before that gate closed, so the honest
+Windows contribution for those two is parity, not a speedup.
+
+Read the seconds as well as the ratios. Windows has the fastest vendor baseline of the three
+(1,506 s against Linux's 3,356 s), and speedup rewards a slow starting point — which is why the
+dual Xeon posts 7.31x while finishing *behind* the M3 in wall clock. At 515 s the laptop lands
+within 12% of the Xeon's best.
 
 **Nothing is reimplemented.** The vendor function is the one that runs. It is called with its
 hot paths rebound in a child of its own environment, so every other symbol still resolves to
@@ -109,13 +123,18 @@ where the speedup shows, in minutes, still with nothing to download.
 Rscript inst/examples/run_example.R
 ```
 
-Rendered reports carry it at cohort scale, same sections on both platforms: cohort, argument
-parity, corrections, PCA, differential expression, worker sweep.
+Rendered reports carry it at cohort scale, same sections on all three platforms: cohort,
+argument parity, corrections, PCA, differential expression, worker sweep.
 [macOS](https://genomerx.github.io/RNA-Parallel/) ·
-[Linux](https://genomerx.github.io/RNA-Parallel/linux.html). Sources are
-[RNA_Parallel.Rmd](inst/examples/RNA_Parallel.Rmd) and
-[RNA_Parallel_linux.Rmd](inst/examples/RNA_Parallel_linux.Rmd), the second rendered with
-[render_linux.sh](inst/examples/render_linux.sh), which pins BLAS before R starts. The first run
+[Linux](https://genomerx.github.io/RNA-Parallel/linux.html) ·
+[Windows](https://genomerx.github.io/RNA-Parallel/windows.html). Sources are
+[RNA_Parallel.Rmd](inst/examples/RNA_Parallel.Rmd),
+[RNA_Parallel_linux.Rmd](inst/examples/RNA_Parallel_linux.Rmd) and
+[RNA_Parallel_windows.Rmd](inst/examples/RNA_Parallel_windows.Rmd), the second rendered with
+[render_linux.sh](inst/examples/render_linux.sh) and the third with
+[render_windows.ps1](inst/examples/render_windows.ps1), both of which pin BLAS before R starts.
+The Windows report adds a backend sweep the other two do not need, because without `fork()` the
+backend decides whether anything runs in parallel at all. The first run
 downloads HNSC, LUAD and LUSC to the per-user cache, or `RNAPARALLEL_TCGA_DIR` if set.
 
 [tests/](tests/testthat) covers every argument path, chunk layout and backend, plus a dispatch
@@ -235,16 +254,38 @@ kernel-panicked a 24 GB machine, and nothing here can see that session.
 **Backends** are `"mclapply"` (forks), `"future"`, `"BiocParallel"`, `"foreach"`, `"serial"`, or any
 `function(idx, f, workers)`, all returning identical results. Forking is the default because a
 forked worker reads the matrix copy-on-write, while socket backends re-serialise it per chunk and
-measured slower than not parallelising at all. **Windows** cannot fork: `mclapply` runs serially and
-says so once, `BiocParallel` substitutes a serial parameter, `"foreach"` runs over PSOCK and is
-slower than serial here. **Nesting** is safe on the default backend, where `mc.allow.recursive` is
-`FALSE`; `foreach` builds its own cluster and does multiply, so spend the worker budget *inside* a
-loop body rather than across it. Inverting one 15-cohort screen measured 245 s to 81.6 s.
+measured slower than not parallelising at all.
+
+**Windows** cannot fork, so the backend is the whole decision there. `mclapply` runs serially and
+says so once; `BiocParallel` substitutes a serial parameter. That leaves two that really do run
+workers, and they are not interchangeable: `"foreach"` measured 1.18x, 0.94x, 0.57x and 0.28x at 2,
+4, 8 and 16 workers, getting *worse* with every worker added, because the cached cluster is rebuilt
+whenever the requested width changes and ComBat-seq alternates widths on every dispatch. `"future"`
+holds one `multisession` pool across all of them and shows the ordinary shape. **Use `"future"` on
+Windows**, and set the plan yourself — this package will not touch a session's plan, and without one
+every future resolves in the calling process while the timings still say "workers":
+
+```r
+library(future); plan(multisession, workers = 6)
+options(combat.backend = "future")
+```
+
+**Nesting** is blocked on every backend: a dispatch that finds itself already inside one of this
+package's workers runs serially. On fork that used to rest on `mc.allow.recursive = FALSE`, which
+covered only that branch — over PSOCK the same construction spawned workers + workers^2 processes.
+A caller's own parallel loop is unaffected, so spend the worker budget *inside* a loop body rather
+than across it. Inverting one 15-cohort screen measured 245 s to 81.6 s.
 
 **Size gates** are why a small input shows no speedup. Seven options set the cell count below which
 a call runs serially: `combat.min.cells` (20,000), `combat.min.disp.cells` (30,000),
 `combat.min.glm.cells` (100,000), `combat.min.ls.cells` (6e6), `combat.min.norm.cells` (2e5),
-`combat.min.order.cells` (4e6), `combat.min.dupcor.cells` (5,000).
+`combat.min.order.cells` (4e6), `combat.min.dupcor.cells` (5,000). Those are *fork* break-evens.
+Without fork a chunk is serialised to its own process, and `lmFit` is cheap enough per cell that
+the transfer is never repaid: measured 0.14x at 21.6M cells and 0.24x at 60M, improving with size
+and never reaching parity. So on Windows the least-squares split is closed rather than merely
+raised, which also covers `removeBatchEffect_parallel()` since the vendor rebinds one `lmFit` call.
+Set `combat.min.ls.cells` explicitly to reach it anyway. Output is `identical()` either way — a
+gate decides who computes, never what is computed.
 `options(combat.fork = FALSE)` forces serial everywhere, `combat_cluster_stop()` releases cached
 clusters.
 

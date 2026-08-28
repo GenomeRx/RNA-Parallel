@@ -49,7 +49,7 @@ which parallelism is worth measuring.
 | section | what it shows |
 |---|---|
 | B. The claim in ten lines | one pipeline, run both ways, `identical()` |
-| C. Simulated counts | ComBat-seq then limma and edgeR, each against its original, at 2, 4, 8 and 16 workers, across every backend |
+| C. Simulated counts | ComBat-seq then limma and edgeR, each against its original, at 2, 4, 6 and 8 workers, across every backend |
 | D. TCGA | the cohort, then the same two comparisons at cohort scale |
 | E. Equivalence summary | every quantity, computed both ways and compared |
 | F. Speed summary | every speed measurement in one figure |
@@ -106,15 +106,25 @@ pal_stage <- c("ComBat_seq" = "#8172B3",
                "duplicateCorrelation" = "#55A868",
                "removeBatchEffect" = "#937860")
 
-# workers is run as asked: 16 means 16 worker processes, bounded only by detectCores(). Added
-# workers return less throughput each, so whether 16 beats 8 is what the sweep measures rather
+# workers is run as asked: 8 means 8 worker processes, bounded only by detectCores(). Added
+# workers return less throughput each, so whether 8 beats 6 is what the sweep measures rather
 # than assumes.
 #
-# WINDOWS SWEEP. 2, 4, 8, 16. The macOS run used 2, 4, 6, 8 on an 8-core M3 and the Linux run
-# used 4, 8, 16, 32 on a 16-core dual Xeon. This is a third machine and the sweep is set for it
-# rather than inherited from either.
+# WINDOWS SWEEP. 2, 4, 6, 8. Every platform's sweep brackets its PERFORMANCE core count, which
+# is not its core count. This is an Ultra 9 185H: 16 physical cores, but only 6 of them are
+# performance cores. The other ten are efficiency cores -- eight E plus two low-power E -- and
+# they carry no second thread, which is how the split is readable at all: 22 logical threads
+# against 16 physical cores means six cores with SMT, and on this family only P-cores have it.
+#
+# So a 16-worker arm is not sixteen equal workers. It is six fast ones and ten slow ones, and
+# every dispatch waits on the slowest, which measures the efficiency cores rather than the
+# scaling. Measured here: with the per-chunk payload sliced before dispatch, the curve stops
+# improving between 4 and 8 workers and flattens, exactly where the P-cores run out.
+#
+# The macOS run used 2, 4, 6, 8 on an M3 with 4 performance cores, and the Linux run used
+# 4, 8, 16, 32 on a dual Xeon whose 16 cores all carry SMT. Same rule, three answers.
 # TCGA is corrected at every count; the last arm is the one the figures below use.
-tcga_workers <- c(2L, 4L, 8L, 16L)
+tcga_workers <- c(2L, 4L, 6L, 8L)
 n_workers    <- max(tcga_workers)
 
 # BACKEND. This is the one thing that genuinely differs on Windows, and it is not a detail.
@@ -127,13 +137,23 @@ n_workers    <- max(tcga_workers)
 #                 with a serial param here. Also correct, also no speedup.
 #   future        real parallelism over PSOCK, but only if the CALLER sets the plan. The package
 #                 deliberately never touches a session's plan, so an unset plan resolves every
-#                 future in this process. Every future arm below sets multisession first.
+#                 future in this process. This report sets one, here and per arm below.
 #   foreach       real parallelism over PSOCK, and it needs nothing from the caller: the package
-#                 registers its own cluster when no backend is registered. This is what
-#                 mclapply's own fallback message recommends here.
+#                 registers its own cluster when no backend is registered.
 #
 # Two of the four are serial on this platform and two are not, and the only thing that tells
 # them apart is the clock. That is why C.1.a sweeps backends and not worker counts alone.
+#
+# The sweep in C.1.a is what chose the backend on the line below, and it did not choose the one
+# the package's own documentation recommends here. `foreach` degrades as workers are added,
+# rather than merely failing to improve: measured across a 2-to-16 sweep it fell from 1.18x to
+# 0.28x, which at the wide end is three and a half times SLOWER than not parallelising at all.
+# ComBat-seq dispatches 3 + 2 * n_batch times per correction, and the cached cluster is rebuilt
+# whenever the requested width changes, which it does on every alternation between the
+# batch-level and row-level dispatches. `future` holds one `multisession` set of workers across
+# all of them and shows the ordinary shape instead. Both return identical() output; only the
+# clock separates them, which is the whole reason this section exists. The table below is the
+# current measurement, not this note -- read it there.
 win_backends <- c("mclapply", "BiocParallel", "future", "foreach")
 
 # Every backend in the sweep needs its framework present. The package does raise a clear
@@ -146,8 +166,19 @@ if (length(absent_backend))
   stop("the backend sweep in C.1.a needs these packages and they are not installed: ",
        paste(absent_backend, collapse = ", "), ". See the install chunk in section A.",
        call. = FALSE)
-options(combat.backend = "foreach")
+options(combat.backend = "future")
 options(future.globals.maxSize = 8 * 1024^3)
+
+# `future` is the one backend whose parallelism the caller owns: the package will not touch a
+# session's plan, and without one every future resolves in this process and the run is serial
+# while the tables still say "workers". Set once here so the calls outside the sweeps are
+# parallel, and reset per arm inside each sweep so `workers` means what the column says.
+#
+# Sizing also controls memory, which is the real ceiling here rather than cores. A forked
+# worker shares the parent's pages; a multisession worker is a whole R process holding its own
+# copy, measured at about 1.2 GB each on this cohort. Sixteen of them is 20 GB of 31 GB, so a
+# plan is torn down and rebuilt at each arm's width rather than left at the maximum.
+future::plan(future::multisession, workers = n_workers)
 
 # Reported, not assumed. Every backend note above is about the absence of fork(), so a run of
 # this file on a platform that has one would be describing something that is not happening.
@@ -199,7 +230,7 @@ stopifnot(identical(demo_ref, demo_par))
 ```
 
 Fifty genes by eight samples sits far below `combat.min.cells`, so every row-split dispatch runs
-serially: a fork would cost more than the work. Only the common dispersion is handed out, one
+serially: starting a PSOCK worker would cost more than the work. Only the common dispersion is handed out, one
 whole-matrix estimate per batch, which carries no size gate because it is always worth
 dispatching. Either way the output is the same matrix, which is the only thing the gate is
 allowed to leave alone.
@@ -323,6 +354,13 @@ One correction, computed twice. Everything in this sub-section reads these two o
 sim_ref <- sva::ComBat_seq(sim, batch = batch, group = group)
 sim_par <- ComBat_seq_parallel(sim, batch = batch, group = group, workers = n_workers)
 identical(sim_ref, sim_par)
+
+# Release the pool before the next section. This matters far more here than on the other two
+# platforms: a forked worker shares the parent's pages, so an idle pool costs almost nothing,
+# while a PSOCK worker is a whole R process holding its own copy. Measured on this machine,
+# sixteen idle workers held 20 GB of 31 GB and never released it, and free memory reached
+# 1.4 GB during the section below -- which starts fresh sessions of its own on top of them.
+combat_cluster_stop()
 ```
 
 ```{r sim-assert}
@@ -479,16 +517,20 @@ sim_timings <- do.call(rbind, lapply(seq_len(nrow(sim_grid)), function(i) {
   b <- sim_grid$backend[i]; w <- sim_grid$workers[i]
   r <- callr::r(function(f, b, w) {
     suppressMessages({library(sva); library(rnaparallel)})
-    # future is the one backend whose parallelism the caller owns. The package refuses to touch
-    # a session's plan, so without this the arm resolves every future in this process and times
-    # as serial while the table calls it parallel.
+    if (b == "future") suppressMessages(library(future))
+    d  <- readRDS(f)
+    # Both backends pay for their own workers, on the clock. `future` is the one whose
+    # parallelism the caller owns -- the package refuses to touch a session's plan, so without
+    # this the arm resolves every future in this process and times as serial while the table
+    # calls it parallel. Starting that plan BEFORE the timer, which is where it used to sit,
+    # handed `future` its worker startup for free while `foreach` built its cluster inside the
+    # timed call. That is a real cost on a platform with no fork(), and charging it to one
+    # backend and not the other is the difference between measuring a backend and flattering it.
+    t0 <- Sys.time()
     if (b == "future") {
-      suppressMessages(library(future))
       future::plan(future::multisession, workers = w)
       on.exit(future::plan(future::sequential), add = TRUE)
     }
-    d  <- readRDS(f)
-    t0 <- Sys.time()
     out <- if (b == "serial") sva::ComBat_seq(d$counts, batch = d$batch, group = d$group)
            else ComBat_seq_parallel(d$counts, batch = d$batch, group = d$group,
                                     workers = w, parallel_backend = b)
@@ -514,11 +556,16 @@ sim_timings[, c("implementation", "seconds", "speedup", "identical_to_original")
 ```
 
 ```{r sim-speed-plot, fig.height = 4.6}
-sim_par <- sim_timings[sim_timings$backend != "serial", ]
-sim_par$backend <- factor(sim_par$backend, levels = win_backends)
-sim_best <- sim_par[which.max(sim_par$speedup), ]
+# sim_arms, not sim_par: `sim_par` is the corrected count matrix from the sim-correct chunk,
+# and the end-to-end assertion in section E still compares it against sim_ref a thousand lines
+# below. Reusing the name here overwrote the matrix with this data frame, so that assertion was
+# comparing a matrix against a table of timings and failed with "identical(sim_ref, sim_par) is
+# not TRUE" -- which reads like a correctness failure in the companion and is not one.
+sim_arms <- sim_timings[sim_timings$backend != "serial", ]
+sim_arms$backend <- factor(sim_arms$backend, levels = win_backends)
+sim_best <- sim_arms[which.max(sim_arms$speedup), ]
 
-ggplot(sim_par, aes(factor(workers), speedup)) +
+ggplot(sim_arms, aes(factor(workers), speedup)) +
   geom_col(aes(fill = speedup >= 1.05), width = 0.65) +
   geom_hline(yintercept = 1, linetype = 2, colour = "grey40") +
   geom_text(aes(label = sprintf("%.2fx\n%.0f s", speedup, seconds)), vjust = -0.3,
@@ -669,6 +716,9 @@ sim_pre <- c(sim_best(function() edgeR_norm(DGEList(sim_ref))),
              sim_best(function() removeBatchEffect(sim_vv$E, batch = batch, design = sim_des)))
 
 sim_limma_speed <- do.call(rbind, lapply(sim_grid, function(w) {
+  # sized to this arm, for the same reason as the correction sweep: under `future` the plan
+  # starts the processes and `workers` only caps the futures in flight
+  future::plan(future::multisession, workers = w)
   p <- c(sim_best(function() calcNormFactors_parallel(DGEList(sim_ref), workers = w)),
          sim_best(function() lmFit_parallel(sim_vv, sim_des, workers = w)),
          sim_secs(duplicateCorrelation_parallel(sim_vv[sim_dc_genes, ], sim_des,
@@ -676,8 +726,10 @@ sim_limma_speed <- do.call(rbind, lapply(sim_grid, function(w) {
          sim_best(function() removeBatchEffect_parallel(sim_vv$E, batch = batch,
                                                         design = sim_des, workers = w)))
   invisible(gc(verbose = FALSE))
+  future::plan(future::sequential); combat_cluster_stop()   # release; see the correction sweep
   data.frame(stage = sim_stages, workers = w, companion = p)
 }))
+future::plan(future::multisession, workers = n_workers)
 
 sim_post <- c(sim_best(function() edgeR_norm(DGEList(sim_ref))),
               sim_best(function() lmFit(sim_vv, sim_des)),
@@ -948,13 +1000,34 @@ secs_w <- numeric(length(tcga_workers))
 same_w <- logical(length(tcga_workers))
 for (i in seq_along(tcga_workers)) {
   t1  <- Sys.time()
+  # The plan is rebuilt at this arm's width, inside the timer. Under `future` the `workers`
+  # argument does not start processes -- the caller's plan does, and the argument only caps how
+  # many futures are in flight -- so a plan left at one size would run all four arms at that
+  # size and the column would be decoration. Rebuilding also bounds memory: each multisession
+  # worker is a whole R process holding its own copy of the cohort, so the 16 arm must not be
+  # paid for while the 2 arm runs. Startup sits inside the clock because the caller really does
+  # pay it here, and it is cheap enough to include honestly: measured 0.3 to 0.7 s on this
+  # machine, flat in the worker count, against arms of several hundred seconds. What is NOT
+  # flat is the per-dispatch shipping cost, which is why the curve turns over -- a PSOCK worker
+  # receives a copy where a forked one would have shared the page.
+  future::plan(future::multisession, workers = tcga_workers[i])
   out <- ComBat_seq_parallel(counts, batch = plate, group = NULL, covar_mod = covar,
                              workers = tcga_workers[i])
   secs_w[i] <- as.numeric(difftime(Sys.time(), t1, units = "secs"))
   same_w[i] <- identical(out, ref)
   if (i == length(tcga_workers)) par <- out
   rm(out); invisible(gc(verbose = FALSE))
+  # Every arm starts from no pool, and no arm leaves one behind. On a forking platform this is
+  # tidiness; here it is what keeps the widest arm reachable at all, because each worker holds
+  # its own copy of the cohort rather than sharing the parent's pages. Both are released:
+  # `plan(sequential)` shuts down the multisession workers this arm started, and
+  # `combat_cluster_stop()` clears any cached cluster from a run on another backend. Timing is
+  # unaffected -- the clock above closes before either runs.
+  future::plan(future::sequential)
+  combat_cluster_stop()
 }
+# leave a working plan behind for the sections that follow this sweep
+future::plan(future::multisession, workers = n_workers)
 ```
 
 ```{r tcga-identical-assert}
@@ -1492,7 +1565,7 @@ stopifnot(dc_same)
 
 Not everything survives the exactness bar, and the list of rejections is as much a part of this
 package as the list of companions. `voom` measured 0.99x, because its `lowess` trend takes its
-span as a fraction of the gene count. `contrasts.fit` returns before a fork could finish
+span as a fraction of the gene count. `contrasts.fit` returns before a PSOCK worker could finish
 starting. `eBayes`, `fitFDist` and `topTable` pool across every gene by construction.
 
 Two edgeR companions were built, measured, and then deleted, both for the same reason: an edgeR
@@ -1507,7 +1580,7 @@ every stage in this document carries one.
 
 ```{r limma-speed, cache = TRUE, cache.lazy = FALSE, dependson = c('limma-de', 'limma-dupcor'), cache.extra = list(tcga_workers, de_coef, colnames(de_design), packageVersion('rnaparallel'))}
 # Seconds only. Returning the fitted object too held a second copy of four results nothing
-# reads, about 400 MB, resident at the moment the next line forks.
+# reads, about 400 MB, resident at the moment the next line dispatches to the workers.
 tick <- function(e) { t0 <- Sys.time(); force(e)
                       as.numeric(difftime(Sys.time(), t0, units = "secs")) }
 
@@ -1529,14 +1602,21 @@ pre <- c(best(function() edgeR_norm(DGEList(ref))),
          best(function() removeBatchEffect(vv$E, batch = plate, design = de_design)))
 
 limma_speed <- do.call(rbind, lapply(tcga_workers, function(w) {
+  future::plan(future::multisession, workers = w)   # sized to this arm; see the correction sweep
   p <- c(best(function() calcNormFactors_parallel(DGEList(ref), workers = w)),
          best(function() lmFit_parallel(vv, de_design, workers = w)),
          tick(duplicateCorrelation_parallel(v_dc, de_design, block = plate, workers = w)),
          best(function() removeBatchEffect_parallel(vv$E, batch = plate,
                                                     design = de_design, workers = w)))
   invisible(gc(verbose = FALSE))
+  # same reason as the correction sweep above: a pool left resident is a whole R process per
+  # worker, and the `post` timings below would otherwise be measured against a machine still
+  # holding the widest arm's workers
+  future::plan(future::sequential)
+  combat_cluster_stop()
   data.frame(stage = stages, workers = w, companion = p)
 }))
+future::plan(future::multisession, workers = n_workers)
 
 post <- c(best(function() edgeR_norm(DGEList(ref))),
           best(function() lmFit(vv, de_design)),
@@ -1578,11 +1658,11 @@ ggplot(limma_speed, aes(factor(workers), speedup, fill = stage)) +
   expand_limits(y = 0)
 ```
 
-Not everything in limma is worth forking, and the list of what was left alone is as much a part
+Not everything in limma is worth dispatching, and the list of what was left alone is as much a part
 of the result as the list of what was not. `voom` measured 0.99x, because its `lowess` trend takes
 its span as a fraction of the gene count, so a block of half the genes fits a different curve and
 only the arithmetic after the trend splits. `contrasts.fit` is exactly splittable and the vendor
-returns before a fork could finish starting. `eBayes`, `fitFDist` and `topTable` pool across every gene by construction.
+returns before a PSOCK worker could finish starting. `eBayes`, `fitFDist` and `topTable` pool across every gene by construction.
 None of them ships as a `workers` argument that does nothing.
 
 # E. Equivalence summary
@@ -1682,7 +1762,10 @@ ggplot(all_speed, aes(factor(workers), speedup, fill = stage)) +
   scale_fill_manual(values = pal_stage) +
   labs(x = "workers", y = "speedup against the original", fill = NULL,
        title = "Every companion against its original",
-       subtitle = "Dashed line is the original. Every arm at 2, 4, 8 and 16 workers.") +
+       # read from tcga_workers rather than spelled out: this line said "2, 4, 8 and 16" for a
+       # sweep that no longer runs, and a hardcoded caption goes stale silently
+       subtitle = sprintf("Dashed line is the original. Every arm at %s workers.",
+                          paste(tcga_workers, collapse = ", "))) +
   expand_limits(y = 0) +
   theme(legend.position = "bottom")
 ```

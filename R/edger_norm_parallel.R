@@ -318,12 +318,29 @@ rp_factor_shim <- function(vfun, loopvar, workers, chunks, parallel_backend, wha
       }
       seen <<- fr; fx <<- got$x; flib <<- got$lib.size; frc <<- got$refColumn
       targs <<- list(logratioTrim, sumTrim, doWeighting, Acutoff)
+      # The dispatched closure is SERIALISED on a socket backend, and a closure carries its
+      # whole defining environment whether the body reads it or not. This frame holds the
+      # backend's entire DGEList alongside `fx`, so at cohort scale the dispatch presented
+      # three globals of 2.05 GiB each and future refused it outright:
+      #   "Will not launch future due to the size of the globals 8.40 GiB exceeds 8.00 GiB"
+      # Rebuilding the closures against an environment holding only the nine objects the body
+      # actually reads leaves the counts and library sizes to travel and nothing else. On a
+      # forking backend this is invisible either way -- the child inherits the pages -- so the
+      # cost was only ever paid where there is no fork(). Nothing about the arithmetic changes.
+      lean <- new.env(parent = globalenv())
+      lean$fx <- fx; lean$ref <- ref; lean$flib <- flib
+      lean$libsize.ref <- libsize.ref; lean$vfun <- vfun
+      lean$logratioTrim <- logratioTrim; lean$sumTrim <- sumTrim
+      lean$doWeighting <- doWeighting; lean$Acutoff <- Acutoff
       one <- function(j) vfun(obs = fx[, j], ref = ref, libsize.obs = flib[j],
                               libsize.ref = libsize.ref, logratioTrim = logratioTrim,
                               sumTrim = sumTrim, doWeighting = doWeighting,
                               Acutoff = Acutoff)
-      vals <<- rp_norm_cols(ncol(fx), length(fx),
-                            function(jj) vapply(jj, one, numeric(1)),
+      environment(one) <- lean
+      lean$one <- one
+      per_chunk <- function(jj) vapply(jj, one, numeric(1))
+      environment(per_chunk) <- lean
+      vals <<- rp_norm_cols(ncol(fx), length(fx), per_chunk,
                             workers, chunks, parallel_backend,
                             getOption("combat.min.norm.cells", 2e5), what)
     }

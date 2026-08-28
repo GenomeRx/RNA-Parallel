@@ -14,6 +14,11 @@
 # the rendered reports are deliverables, keep them tracked
 !docs/index.html
 !docs/linux.html
+!docs/windows.html
+
+# byproducts the example writes next to itself while rendering
+inst/examples/df.rds
+inst/examples/results.rds
 MANIFEST.txt
 GDCdata/
 
