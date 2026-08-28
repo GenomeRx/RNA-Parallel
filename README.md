@@ -244,7 +244,7 @@ a small QR per gene.
 
 | knob | default | change it when |
 |---|---|---|
-| `workers` | `min(8, detectCores() - 2)` | rarely. Going past your *physical* core count can be slower, as the 32-worker Linux arm shows. See `?workers` |
+| `workers` | `min(8, detectCores() - 2)`, capped at performance cores without `fork()` | rarely. Going past your *physical* core count can be slower, as the 32-worker Linux arm shows. See `?workers` |
 | `chunks` | `workers` | only to cut peak memory per worker |
 | `parallel_backend` | `"mclapply"` | you cannot fork, or a cluster is already running |
 
@@ -261,14 +261,19 @@ says so once; `BiocParallel` substitutes a serial parameter. That leaves two tha
 workers, and they are not interchangeable: `"foreach"` measured 1.18x, 0.94x, 0.57x and 0.28x at 2,
 4, 8 and 16 workers, getting *worse* with every worker added, because the cached cluster is rebuilt
 whenever the requested width changes and ComBat-seq alternates widths on every dispatch. `"future"`
-holds one `multisession` pool across all of them and shows the ordinary shape. **Use `"future"` on
-Windows**, and set the plan yourself — this package will not touch a session's plan, and without one
-every future resolves in the calling process while the timings still say "workers":
+holds one `multisession` pool across all of them and shows the ordinary shape.
+
+**Set a plan and the package picks `"future"` for you:**
 
 ```r
-library(future); plan(multisession, workers = 6)
-options(combat.backend = "future")
+library(future); plan(multisession, workers = 6)   # that is all
 ```
+
+The default backend is resolved per call, so an active plan selects `"future"` and no plan leaves
+`mclapply` and its one-time serial notice. This package will not set a plan for you — a caller's
+plan is theirs, and starting worker processes inside someone's session unasked is worse than being
+slow — which is also why the default is not simply `"future"`: without a plan that would mean a
+warning on every dispatch and no speedup at all.
 
 **Nesting** is blocked on every backend: a dispatch that finds itself already inside one of this
 package's workers runs serially. On fork that used to rest on `mc.allow.recursive = FALSE`, which
@@ -279,13 +284,17 @@ than across it. Inverting one 15-cohort screen measured 245 s to 81.6 s.
 **Size gates** are why a small input shows no speedup. Seven options set the cell count below which
 a call runs serially: `combat.min.cells` (20,000), `combat.min.disp.cells` (30,000),
 `combat.min.glm.cells` (100,000), `combat.min.ls.cells` (6e6), `combat.min.norm.cells` (2e5),
-`combat.min.order.cells` (4e6), `combat.min.dupcor.cells` (5,000). Those are *fork* break-evens.
-Without fork a chunk is serialised to its own process, and `lmFit` is cheap enough per cell that
-the transfer is never repaid: measured 0.14x at 21.6M cells and 0.24x at 60M, improving with size
-and never reaching parity. So on Windows the least-squares split is closed rather than merely
-raised, which also covers `removeBatchEffect_parallel()` since the vendor rebinds one `lmFit` call.
-Set `combat.min.ls.cells` explicitly to reach it anyway. Output is `identical()` either way — a
-gate decides who computes, never what is computed.
+`combat.min.order.cells` (4e6), `combat.min.dupcor.cells` (5,000).
+
+Those are *fork* break-evens, and two of them move without fork, in opposite directions because
+the underlying work is not alike. `lmFit` is cheap enough per cell that a serialised chunk is
+never repaid — measured 0.14x at 21.6M cells and 0.24x at 60M, improving with size and never
+reaching parity — so `combat.min.ls.cells` **closes** on Windows rather than merely rising, which
+also covers `removeBatchEffect_parallel()` since the vendor rebinds one `lmFit` call. The TMM
+column loop does pay once it is big enough — 1.05x at 1.8M cells against 1.58x at 21.6M — so
+`combat.min.norm.cells` **rises** to 2e6 instead, an order of magnitude above the fork value.
+Set either explicitly to override. Output is `identical()` either way: a gate decides who
+computes, never what is computed.
 `options(combat.fork = FALSE)` forces serial everywhere, `combat_cluster_stop()` releases cached
 clusters.
 

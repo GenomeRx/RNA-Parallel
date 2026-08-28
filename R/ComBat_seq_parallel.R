@@ -102,7 +102,7 @@
 #'   function form plugs in any framework this package does not name, including
 #'   `parallel::parLapply` over a FORK or PSOCK cluster, `pbapply::pblapply`,
 #'   `furrr::future_map`, `doFuture::%dofuture%`, or any `BiocParallel` BPPARAM.
-#'   Defaults to `getOption("combat.backend", "mclapply")`.
+#'   Defaults to `getOption("combat.backend", combat_default_backend())`.
 #' @param backend Optional ComBat-seq function to wrap. Defaults to
 #'   `sva::ComBat_seq`, falling back to a visible top-level `ComBat_seq`.
 #'
@@ -137,7 +137,7 @@
 ComBat_seq_parallel <- function(counts, batch, group = NULL, covar_mod = NULL,
                                 full_mod = TRUE, shrink = FALSE, shrink.disp = FALSE,
                                 gene.subset.n = NULL, workers = NULL, chunks = NULL,
-                                parallel_backend = getOption("combat.backend", "mclapply"),
+                                parallel_backend = getOption("combat.backend", combat_default_backend()),
                                 backend = NULL, label = NULL) {
   # no run leaves workers behind, crashed or not; children that predate this call are
   # someone else's and are spared

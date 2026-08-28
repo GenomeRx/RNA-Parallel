@@ -206,6 +206,58 @@ rp_ls_min_cells <- function(fork_default = 6e6) {
 }
 
 
+#' Size gate for the TMM column split, which also depends on having fork()
+#'
+#' Same shape of problem as [rp_ls_min_cells()] and a different answer, which is why it is
+#' measured rather than assumed. 2e5 cells is a fork break-even; over PSOCK the column loop has
+#' to earn a serialised copy per chunk as well. Measured on Windows with the gate forced open:
+#'
+#'   1.8M cells  (vendor 1.2 s)   1.05x at 2 workers, 0.89x at 4, 0.64x at 6
+#'   21.6M cells (vendor 15.8 s)  1.58x at 2 workers, 1.53x at 4, 1.36x at 6
+#'
+#' Unlike the least-squares split this one does pay at cohort scale, so the gate rises instead of
+#' closing: break-even sits around two million cells, an order of magnitude above the fork value,
+#' and below it the split is a loss at every worker count. On the cohort the companion measured
+#' 1.63x with the gate in place.
+#' @return Cell count below which the column split does not run.
+#' @noRd
+rp_norm_min_cells <- function() {
+  o <- getOption("combat.min.norm.cells")
+  if (!is.null(o)) return(o)
+  if (identical(.Platform$OS.type, "windows")) 2e6 else 2e5
+}
+
+
+#' The backend to use when the caller has not named one
+#'
+#' `mclapply` everywhere fork() exists, which is every platform this package was built on. On
+#' Windows it cannot fork, so it is correct, serial, and says so once -- a companion that returns
+#' the right answer at the speed of the function it wraps.
+#'
+#' `future` is the only backend that runs real workers there without the caller registering a
+#' cluster first, and it measured 2.92x on the cohort against `foreach`'s 0.28x. But it needs a
+#' plan, and this package will not set one: a caller's plan is theirs, and silently starting
+#' sixteen processes inside someone's session is worse than being slow. Defaulting to `future`
+#' unconditionally would therefore hand most Windows users a warning on every dispatch and no
+#' speedup, which is strictly worse than what they have now.
+#'
+#' So it is chosen adaptively: taken when a plan is already active and it will actually do
+#' something, and left alone otherwise. A user who sets `plan(multisession)` gets parallelism
+#' without also having to discover `options(combat.backend=)`; a user who sets nothing gets
+#' exactly today's behaviour. Resolved per call, since a plan can be set at any time.
+#' @return A backend name from [combat_backends()].
+#' @noRd
+combat_default_backend <- function() {
+  if (!identical(.Platform$OS.type, "windows")) return("mclapply")
+  if (!requireNamespace("future", quietly = TRUE) ||
+      !requireNamespace("future.apply", quietly = TRUE)) return("mclapply")
+  # nbrOfWorkers() is the question that matters: a sequential plan, an unset plan and a
+  # one-worker plan all answer 1, and all three mean `future` would resolve in this process.
+  n <- tryCatch(future::nbrOfWorkers(), error = function(e) 1L)
+  if (isTRUE(n > 1L)) "future" else "mclapply"
+}
+
+
 
 
 # ---- entry-point prologue -----------------------------------------------------
@@ -397,6 +449,13 @@ combat_wait_pids <- function(pids, identities = NULL, timeout = 2) {
 #' six workers alongside a SECOND forking R session kernel-panicked a 24 GB machine, and no
 #' core count this process can read knows about the other session, so a caller running two
 #' at once should pass a smaller number.
+#' Without fork() the pick is additionally capped at the PERFORMANCE core count, which is not
+#' the core count on a hybrid CPU. The distinction only matters where there is no fork: a forked
+#' worker on an efficiency core still adds throughput, which is why the macOS run measures 5.37x
+#' at eight workers on a chip with four performance cores and is left alone here. Over sockets
+#' every worker also costs a serialised copy, so a slow core stops paying for itself: on an Ultra
+#' 185H, 6 performance plus 10 efficiency, the ComBat-seq curve peaks at 6 workers and turns over
+#' after. Reading the core count alone would have picked 8.
 #' @noRd
 combat_default_workers <- function(workers = NULL) {
   if (!is.null(workers)) return(workers)
@@ -405,7 +464,38 @@ combat_default_workers <- function(workers = NULL) {
     ac <- max(1L, suppressWarnings(parallel::detectCores()), na.rm = TRUE)
     .combat_clusters$allcores <- ac
   }
-  max(1L, min(8L, ac - 2L))
+  n <- max(1L, min(8L, ac - 2L))
+  if (identical(.Platform$OS.type, "windows")) n <- min(n, rp_perf_cores())
+  max(1L, n)
+}
+
+#' Performance cores, distinguished from total cores on a hybrid CPU
+#'
+#' Only Darwin had a real answer here (`sysctl hw.perflevel0.physicalcpu`); everything else fell
+#' through to `detectCores(logical = FALSE)`, which reports 16 on an Ultra 185H that has 6
+#' performance cores and 10 efficiency ones. That is not a rounding error, it is the difference
+#' between a sensible default and one that recruits ten slow workers.
+#'
+#' The topology answers it without a vendor table: on Intel hybrid parts only performance cores
+#' carry SMT, so the number of logical processors ABOVE the physical count is the number of cores
+#' with a second thread. 22 logical against 16 physical gives 6, which is right. The formula
+#' degrades correctly everywhere else: on a uniformly hyperthreaded machine every core has a
+#' second thread, `logical - physical == physical`, and the guard below returns the physical
+#' count; with SMT off or absent the difference is 0 and it does the same. A cgroup-restricted
+#' container can report fewer logical than physical, which is also caught.
+#' @return Best available performance-core count, never below 1.
+#' @noRd
+rp_perf_cores <- function() {
+  p <- .combat_clusters$perfcores
+  if (!is.null(p)) return(p)
+  phys <- suppressWarnings(parallel::detectCores(logical = FALSE))
+  logi <- suppressWarnings(parallel::detectCores(logical = TRUE))
+  if (is.na(phys) || phys < 1L) phys <- if (is.na(logi) || logi < 1L) 1L else logi
+  smt <- if (is.na(logi)) 0L else logi - phys
+  p <- if (smt > 0L && smt < phys) smt else phys   # hybrid: only P-cores carry SMT
+  p <- max(1L, as.integer(p))
+  .combat_clusters$perfcores <- p
+  p
 }
 
 # A retired entry is retried on later calls, so it needs a stop condition. Without one, a
@@ -726,7 +816,7 @@ combat_backends <- function() {
 #' @return A list, one element per chunk, in order.
 #' @noRd
 combat_parallel_lapply <- function(idx, f, workers,
-                                   parallel_backend = getOption("combat.backend", "mclapply"),
+                                   parallel_backend = getOption("combat.backend", combat_default_backend()),
                                    cells = Inf,
                                    min_cells = getOption("combat.min.cells", 2e4),
                                    preschedule = FALSE) {
@@ -1219,7 +1309,7 @@ rp_per_gene <- function(x, ii) {
 glmFit_rows_parallel <- function(y, design, dispersion, offset, weights = NULL,
                                  prior.count = 0.125, start = NULL,
                                  workers = 4L, chunks = NULL,
-                                 parallel_backend = getOption("combat.backend", "mclapply")) {
+                                 parallel_backend = getOption("combat.backend", combat_default_backend())) {
   y <- as.matrix(y)
   idx <- combat_row_chunks(nrow(y), workers = workers, chunks = chunks)
 
@@ -1450,7 +1540,7 @@ combat_mq_dispatch <- function(mq, counts_sub, old_mu, old_phi) {
 #' @noRd
 match_quantiles_parallel <- function(mq, counts_sub, old_mu, old_phi, new_mu, new_phi,
                                      workers = 4L, chunks = NULL,
-                                     parallel_backend = getOption("combat.backend", "mclapply")) {
+                                     parallel_backend = getOption("combat.backend", combat_default_backend())) {
   idx <- combat_row_chunks(nrow(counts_sub), workers = workers, chunks = chunks)
 
   # gate resolved once, before the fork, so a worker inherits the decision rather than
@@ -1528,7 +1618,7 @@ estimateGLMTagwiseDisp_rows_parallel <- function(y, design = NULL, dispersion = 
                                                  offset = NULL, prior.df = 10, trend = TRUE,
                                                  span = NULL, AveLogCPM = NULL, weights = NULL,
                                                  workers = 4L, chunks = NULL,
-                                                 parallel_backend = getOption("combat.backend", "mclapply")) {
+                                                 parallel_backend = getOption("combat.backend", combat_default_backend())) {
   y <- as.matrix(y)
   ntag <- nrow(y)
   # serial edgeR stops on a dispersion whose length is neither 1 nor nrow(y). Splitting by row

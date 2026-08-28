@@ -170,7 +170,7 @@ rp_row_blocks <- function(M, weights, env, workers, chunks, parallel_backend, wh
 #'   Clamped so no chunk holds one gene.
 #' @param parallel_backend One of [combat_backends()], or a function
 #'   `function(idx, f, workers)` returning a list in the order of `idx`. Defaults to
-#'   `getOption("combat.backend", "mclapply")`.
+#'   `getOption("combat.backend", combat_default_backend())`.
 #' @param backend Optional `lmFit` to wrap. Defaults to `limma::lmFit`.
 #'
 #' @param label Optional name for this call in the timing line, when
@@ -196,7 +196,7 @@ rp_row_blocks <- function(M, weights, env, workers, chunks, parallel_backend, wh
 lmFit_parallel <- function(object, design = NULL, ndups = NULL, spacing = NULL,
                            block = NULL, correlation, weights = NULL, method = "ls", ...,
                            workers = NULL, chunks = NULL,
-                           parallel_backend = getOption("combat.backend", "mclapply"),
+                           parallel_backend = getOption("combat.backend", combat_default_backend()),
                            backend = NULL, label = NULL) {
   # no run leaves workers behind, crashed or not; children that predate this call are
   # someone else's and are spared

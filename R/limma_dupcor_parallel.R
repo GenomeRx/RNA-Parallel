@@ -250,7 +250,7 @@ rp_tail_decomposes <- function(fn, ndups, max_block) {
 duplicateCorrelation_parallel <- function(object, design = NULL, ndups = 2L, spacing = 1L,
                                           block = NULL, trim = 0.15, weights = NULL,
                                           workers = NULL, chunks = NULL,
-                                          parallel_backend = getOption("combat.backend", "mclapply"),
+                                          parallel_backend = getOption("combat.backend", combat_default_backend()),
                                           backend = NULL, label = NULL) {
   # no run leaves workers behind, crashed or not; children that predate this call are
   # someone else's and are spared

@@ -342,7 +342,7 @@ rp_factor_shim <- function(vfun, loopvar, workers, chunks, parallel_backend, wha
       environment(per_chunk) <- lean
       vals <<- rp_norm_cols(ncol(fx), length(fx), per_chunk,
                             workers, chunks, parallel_backend,
-                            getOption("combat.min.norm.cells", 2e5), what)
+                            rp_norm_min_cells(), what)
     }
 
     if (!is.numeric(i) || length(i) != 1L || is.na(i) || i != trunc(i) ||
@@ -497,7 +497,7 @@ rp_apply_shim <- function(apply0, workers, chunks, parallel_backend) {
 #' @param chunks Column chunks per dispatch. Defaults to `workers`; passing `chunks = workers` explicitly is redundant.
 #' @param parallel_backend One of [combat_backends()], or a function
 #'   `function(idx, f, workers)` returning a list in the order of `idx`. Defaults to
-#'   `getOption("combat.backend", "mclapply")`.
+#'   `getOption("combat.backend", combat_default_backend())`.
 #' @param backend Optional edgeR default normalisation method to wrap. Defaults to
 #'   `normLibSizes.default` when available, with the older name as a fallback.
 #'

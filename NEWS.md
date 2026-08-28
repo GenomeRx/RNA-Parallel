@@ -14,6 +14,30 @@ Windows is a supported platform, and the dispatch layer no longer nests.
   worker process it dispatches into and takes the serial path when it finds itself already inside
   one. A caller's own parallel loop is unaffected, since nothing marks their workers.
 
+- **The default backend is chosen adaptively where there is no fork().** `mclapply` cannot fork on
+  Windows, so it is correct, serial, and says so once. `future` is the only backend that runs real
+  workers there without the caller registering a cluster, and it measured 2.92x on the cohort
+  against `foreach`'s 0.28x — but it needs a plan, and this package will not set one. Defaulting to
+  it unconditionally would hand most callers a warning per dispatch and no speedup. So it is taken
+  exactly when a plan is already active: `plan(multisession, workers = 6)` is now the whole step,
+  with no `options(combat.backend=)` to discover. Resolved per call, and unchanged on every
+  platform that can fork.
+
+- **The default worker count is capped at PERFORMANCE cores where there is no fork().** On a hybrid
+  CPU those are not the core count: an Ultra 185H reports 16 physical cores, 6 of which are
+  performance cores and 10 efficiency. Performance cores are read from the topology rather than a
+  vendor table — only they carry SMT, so logical minus physical gives 6 — degrading to the physical
+  count on uniform machines. The cap is deliberately not applied where fork() exists: macOS
+  measures 5.37x at eight workers on a chip with four performance cores, because a forked worker on
+  an efficiency core still adds throughput, while a socket worker also costs a serialised copy. On
+  Windows the default moves from 8 to 6, which is where the measured ComBat-seq curve peaks.
+
+- **The TMM column split gate rises without fork(), where the least-squares gate closes.** Same
+  problem, opposite answers, which is why both were measured rather than assumed. TMM does pay once
+  it is large enough — 1.05x at 1.8M cells against 1.58x at 21.6M — so `combat.min.norm.cells`
+  moves to 2e6, an order of magnitude above the fork break-even, instead of closing. Treating it
+  like `lmFit` would have discarded a real 1.6x.
+
 - **The least-squares row split no longer runs where it cannot pay.** `combat.min.ls.cells`
   defaults to 6e6 cells, which is a *fork* break-even: a forked worker starts almost free and
   reads the matrix through copy-on-write. Without `fork()` every chunk is serialised to its own
