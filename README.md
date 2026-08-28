@@ -211,34 +211,49 @@ One inner loop is pinned to the vendor body it came from and stands down on any 
 
 ## Cross-platform
 
-The same package on two unlike machines. Every arm on both returns `identical()` output: macOS
-and Linux, fork and socket dispatch, threaded and single-threaded BLAS.
+The same package on three unlike machines. Every arm on all three returns `identical()` output:
+macOS, Linux and Windows; fork and socket dispatch; threaded and single-threaded BLAS.
 
-| | macOS | Linux |
-|---|---|---|
-| CPU | Apple M3 | 2 x Intel Xeon Silver 4208 @ 2.10 GHz |
-| Physical cores | 8 (4 performance + 4 efficiency) | 16 |
-| Logical | 8 | 32 |
-| NUMA nodes | 1 | 2 |
-| BLAS | Accelerate | OpenBLAS 0.3.20 |
-| Workers swept | 2, 4, 8 | 4, 8, 16, 32 |
+| | macOS | Linux | Windows |
+|---|---|---|---|
+| CPU | Apple M3 | 2 x Intel Xeon Silver 4208 @ 2.10 GHz | Intel Core Ultra 9 185H |
+| Physical cores | 8 (4 performance + 4 efficiency) | 16 | 16 (6 performance + 8 efficiency + 2 low-power) |
+| Logical | 8 | 32 | 22 |
+| NUMA nodes | 1 | 2 | 1 |
+| BLAS | Accelerate | OpenBLAS 0.3.20 | reference, pinned to 1 thread |
+| `fork()` | yes | yes | **no** |
+| Dispatch | forked children | forked children | PSOCK processes |
+| Backend | `mclapply` | `mclapply` | `future` (`multisession`) |
+| Workers swept | 2, 4, 6, 8 | 4, 8, 16, 32 | 2, 4, 6, 8 |
 
 Absolute wall clock at cohort scale, every companion. Vendor is the serial original; best is the
-fastest companion arm on that machine, with its worker count. Bold marks the faster platform.
+fastest companion arm on that machine, with its worker count. Bold marks the fastest platform.
 
-| stage | macOS vendor | macOS best | Linux vendor | Linux best |
-|---|---:|---:|---:|---:|
-| ComBat-seq | 1,653.9 s | **308.0 s** (8w) | 3,355.6 s | 459.3 s (16w) |
-| duplicateCorrelation | 660.5 s | 182.0 s (8w) | 663.8 s | **110.6 s** (16w) |
-| calcNormFactors (TMM) | 10.3 s | **1.5 s** (8w) | 21.6 s | 5.5 s (8w) |
-| lmFit | 4.4 s | **1.7 s** (4w) | 11.6 s | 4.1 s (16w) |
-| removeBatchEffect | 4.5 s | **1.3 s** (8w) | 2.6 s | 2.1 s (4w) |
+| stage | macOS vendor | macOS best | Linux vendor | Linux best | Windows vendor | Windows best |
+|---|---:|---:|---:|---:|---:|---:|
+| ComBat-seq | 1,653.9 s | **308.0 s** (8w) | 3,355.6 s | 459.3 s (16w) | 1,506.4 s | 515.3 s (6w) |
+| duplicateCorrelation | 660.5 s | 182.0 s (8w) | 663.8 s | **110.6 s** (16w) | 439.9 s | 198.8 s (8w) |
+| calcNormFactors (TMM) | 10.3 s | **1.5 s** (8w) | 21.6 s | 5.5 s (8w) | 16.3 s | 10.0 s (2w) |
+| lmFit | 4.4 s | **1.7 s** (4w) | 11.6 s | 4.1 s (16w) | 6.4 s | 6.3 s (serial) |
+| removeBatchEffect | 4.5 s | **1.3 s** (8w) | 2.6 s | 2.1 s (4w) | 2.9 s | 2.9 s (serial) |
 
 Speedup is a ratio and rewards a slower core: Linux scales further, 7.31x against 5.37x, and
 still finishes behind at 459.3 s against 308.0 s. Read the seconds. On Linux, pin
 `OPENBLAS_NUM_THREADS` before R starts or every forked worker opens its own thread pool, though it
 changes little here: unpinning moves DGEMM throughput 8x and `lmFit` by 1.3%, because limma solves
 a small QR per gene.
+
+Windows reads lowest on ratio and lands mid-pack on the clock, for the same reason. Its vendor
+baseline is the fastest of the three -- 1,506.4 s against Linux's 3,355.6 s -- so there is less to
+win back, and at 515.3 s it finishes within 12% of a dual Xeon while running on a laptop. What it
+cannot do is scale as far, and that is architectural rather than incidental: no `fork()`, so a
+worker is a whole process that receives a copy instead of sharing the parent's pages, and only 6
+of its 16 cores are performance cores. Both push the useful worker count down, and the ComBat-seq
+curve shows it directly -- 1.80x, 2.77x, **2.92x**, 2.87x at 2, 4, 6 and 8 workers, peaking on the
+performance-core count and turning over after. The two `serial` entries are the companion
+declining to split rather than a missing measurement: `lmFit` is cheap enough per cell that no
+socket dispatch repays the transfer, measured at 0.14x on 21.6M cells and never reaching parity,
+so it runs whole and matches the vendor instead of losing to it.
 
 ## Tuning
 
