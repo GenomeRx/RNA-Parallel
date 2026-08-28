@@ -53,8 +53,15 @@ defs <- vapply(fns, function(f) is.null(formals(get(f))$workers), logical(1))
 chk(all(defs), "workers no longer defaults to NULL everywhere",
     paste(names(defs)[!defs], collapse = "/"))
 want <- max(1L, min(8L, max(1L, parallel::detectCores()) - 2L))
+## Without fork() the pick is capped again at the performance-core count, because an efficiency
+## core that has to be handed a serialised copy stops paying for itself. The check follows the
+## code rather than asserting one formula on every platform, which would fail on Windows for a
+## default that is deliberately lower there.
+if (identical(.Platform$OS.type, "windows")) {
+  want <- max(1L, min(want, rnaparallel:::rp_perf_cores()))
+}
 chk(identical(rnaparallel:::combat_default_workers(NULL), want),
-    "the resolved worker default is not min(8, detectCores() - 2)")
+    "the resolved worker default is not min(8, detectCores() - 2), capped at performance cores")
 chk(identical(rnaparallel:::combat_default_workers(3L), 3L),
     "an explicit workers value is not passed through untouched")
 chk(grepl("min(8, detectCores() - 2)", rdt, fixed = TRUE),

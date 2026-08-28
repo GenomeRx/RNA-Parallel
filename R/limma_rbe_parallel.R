@@ -43,7 +43,7 @@
 removeBatchEffect_parallel <- function(x, batch = NULL, batch2 = NULL, covariates = NULL,
                                        design = matrix(1, ncol(x), 1), group = NULL, ...,
                                        workers = NULL, chunks = NULL,
-                                       parallel_backend = getOption("combat.backend", "mclapply"),
+                                       parallel_backend = getOption("combat.backend", combat_default_backend()),
                                        backend = NULL, label = NULL) {
   if (!requireNamespace("limma", quietly = TRUE)) {
     stop("limma is required: BiocManager::install(\"limma\")", call. = FALSE)

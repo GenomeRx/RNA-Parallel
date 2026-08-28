@@ -1,3 +1,65 @@
+# rnaparallel 0.5.0
+
+Windows is a supported platform, and the dispatch layer no longer nests.
+
+- **Nested dispatch is blocked on every backend, not just fork.** `ComBat_seq_parallel()`
+  dispatches the tagwise loop across batches and ships the vendor closure, whose environment
+  still carries the rebound `estimateGLMTagwiseDisp`; inside the worker that symbol dispatched
+  again over gene rows. The guard against this was `mc.allow.recursive = FALSE`, an argument to
+  `parallel::mclapply`, so it covered the fork branch alone. Windows runs `mclapply` serially and
+  reaches its workers only through `foreach`/PSOCK, which had no equivalent, so the one platform
+  that needed the guard was the one platform without it. Measured there: `workers = 2L` produced
+  two outer workers and four nested ones, which extrapolates to 272 processes at a 16-worker arm,
+  each a fresh R process with edgeR and limma loaded. `combat_parallel_lapply()` now marks the
+  worker process it dispatches into and takes the serial path when it finds itself already inside
+  one. A caller's own parallel loop is unaffected, since nothing marks their workers.
+
+- **The default backend is chosen adaptively where there is no fork().** `mclapply` cannot fork on
+  Windows, so it is correct, serial, and says so once. `future` is the only backend that runs real
+  workers there without the caller registering a cluster, and it measured 2.92x on the cohort
+  against `foreach`'s 0.28x, but it needs a plan, and this package will not set one. Defaulting to
+  it unconditionally would hand most callers a warning per dispatch and no speedup. So it is taken
+  exactly when a plan is already active: `plan(multisession, workers = 6)` is now the whole step,
+  with no `options(combat.backend=)` to discover. Resolved per call, and unchanged on every
+  platform that can fork.
+
+- **The default worker count is capped at PERFORMANCE cores where there is no fork().** On a hybrid
+  CPU those are not the core count: an Ultra 185H reports 16 physical cores, 6 of which are
+  performance cores and 10 efficiency. Performance cores are read from the topology rather than a
+  vendor table (only they carry SMT, so logical minus physical gives 6), degrading to the physical
+  count on uniform machines. The cap is deliberately not applied where fork() exists: macOS
+  measures 5.37x at eight workers on a chip with four performance cores, because a forked worker on
+  an efficiency core still adds throughput, while a socket worker also costs a serialised copy. On
+  Windows the default moves from 8 to 6, which is where the measured ComBat-seq curve peaks.
+
+- **The TMM column split gate rises without fork(), where the least-squares gate closes.** Same
+  problem, opposite answers, which is why both were measured rather than assumed. TMM does pay once
+  it is large enough, 1.05x at 1.8M cells against 1.58x at 21.6M, so `combat.min.norm.cells`
+  moves to 2e6, an order of magnitude above the fork break-even, instead of closing. Treating it
+  like `lmFit` would have discarded a real 1.6x.
+
+- **The least-squares row split no longer runs where it cannot pay.** `combat.min.ls.cells`
+  defaults to 6e6 cells, which is a *fork* break-even: a forked worker starts almost free and
+  reads the matrix through copy-on-write. Without `fork()` every chunk is serialised to its own
+  R process, and `lm.fit` is cheap enough per cell that the transfer is never repaid. Measured
+  over PSOCK with the gate forced open, 1,200 samples: 0.14x at 21.6M cells and 0.24x at 60M,
+  improving with size and never approaching parity, and worse with every worker added. On the
+  TCGA cohort it measured 0.50x, and `removeBatchEffect_parallel()` inherits it because the
+  vendor rebinds a single `lmFit` call, so two companions were slower than the functions they
+  wrap. No threshold rescues that, so on a platform without fork the fast branch now stays
+  whole: both measure at parity instead of 0.50x and 0.38x. An explicit `combat.min.ls.cells`
+  still reaches the split, and output is `identical()` either way. This decides who computes,
+  never what is computed.
+
+- **New: the Windows verification report.** `inst/examples/RNA_Parallel_windows.Rmd` carries the
+  same sections in the same order as the macOS and Linux reports, and adds a backend sweep,
+  because on a platform with no `fork()` the backend decides whether anything runs in parallel
+  at all. `render_windows.ps1` pins the BLAS thread count before R starts and finds pandoc from
+  a standalone install as well as from RStudio.
+
+- A test that reaches `mclapply` through a custom executor now skips on Windows rather than
+  failing there, matching the guard its sibling tests already carried.
+
 # rnaparallel 0.4.9
 
 Diagnostic fix; the companions are unchanged from 0.4.8.
