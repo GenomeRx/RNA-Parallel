@@ -69,6 +69,17 @@
 #' `getOption("combat.min.glm.cells", 1e5)`. One shared threshold made the
 #' dispersion split a net loss on small matrices with many batches.
 #'
+#' @section When this is worth reaching for:
+#' Almost always, and it is the companion with the most to win: the vendor is measured in
+#' minutes on a real cohort. It does have a floor. Measured on an M3 at the default worker
+#' count, companion against vendor, every arm `identical()`: 0.69x at 300 genes by 20 samples,
+#' 0.89x at 500 x 20, 1.19x at 1,000 x 20, 1.45x at 2,000 x 20, and 4.63x at 6,000 x 120.
+#' Below about a thousand genes call `sva::ComBat_seq` directly.
+#'
+#' The row-split gates already decline on an input that small; what still dispatches there is
+#' the per-batch work, which carries no size gate because one whole-matrix estimate per batch
+#' is worth a fork at any realistic scale and is not worth one at three hundred genes.
+#'
 #' @param counts Raw count matrix, genes in rows, samples in columns.
 #' @param batch Batch vector, one entry per column of `counts`. Call
 #'   `droplevels()` on a factor first: ComBat-seq counts samples per level, so a

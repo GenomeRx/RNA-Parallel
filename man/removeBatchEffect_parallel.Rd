@@ -74,6 +74,20 @@ because a matrix product is not row-associative in floating point once BLAS is t
 the whole product costs a fraction of the fit it follows.
 }
 
+\section{When this is worth reaching for}{
+
+On large matrices, and not before. This companion IS the \code{lmFit} call inside the vendor, so
+it inherits that function's answer exactly: below the least-squares gate there is nothing to
+split and the companion is the vendor plus about a millisecond. Measured on an M3 at the
+default worker count, companion against vendor, every arm \code{identical()}: 1.00x at 2,000
+genes by 20 samples, 0.92x at 20,000 x 50, 0.98x at 20,000 x 200, then 1.91x at 20,000 x 500
+once the matrix is large enough for the split to run at all.
+
+A wide batch design is what makes it worth having: the vendor's cost grows worse than
+linearly in samples, measured 8.5 s at 948 samples and 154 batches against 44.2 s at 3,000
+samples and 250 batches.
+}
+
 \examples{
 \donttest{
 set.seed(1)

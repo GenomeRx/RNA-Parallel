@@ -147,6 +147,25 @@ that a gene no longer occupies one row. Neither is split, and both stop with an 
 rather than returning a serial result that looks parallel.
 }
 
+\section{When this is worth reaching for}{
+
+It depends entirely on which branch your call takes, and the two are not close.
+
+With voom or probe weights limma runs an R loop over genes, which forks well but has a
+floor. Measured on an M3 at the default worker count, companion against vendor, every arm
+\code{identical()}: 0.59x at 1,000 genes by 24 arrays, 0.87x at 2,000 x 24, 1.29x at 4,000 x 24,
+1.76x at 8,000 x 24, and 2.79x at 60,000 x 48. The crossover tracks gene count rather than
+cells, and sits near four thousand genes.
+
+Without probe weights limma fits every gene in one vectorised \code{lm.fit}, which costs
+milliseconds, so the companion declines to split until the matrix is very large and is
+parity until then. That is not a missing measurement, it is the gate doing its job.
+
+Under either gate the companion is one plain vendor call plus about half a millisecond.
+Nothing on a single call; worth avoiding in a loop over thousands of small fits, which is
+the one case a per-call size gate cannot help with.
+}
+
 \examples{
 \donttest{
 if (requireNamespace("limma", quietly = TRUE)) {

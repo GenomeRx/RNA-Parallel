@@ -255,6 +255,47 @@ declining to split rather than a missing measurement: `lmFit` is cheap enough pe
 socket dispatch repays the transfer, measured at 0.14x on 21.6M cells and never reaching parity,
 so it runs whole and matches the vendor instead of losing to it.
 
+## When a companion is worth reaching for
+
+Not every companion pays at every size, and the honest answer is per companion rather than one
+rule. Measured on the M3, at the default worker count, every arm `identical()` to its vendor.
+The ratio is companion against vendor, so below 1.00x the companion is the slower of the two.
+
+| companion | smallest measured | crossover | large |
+|---|---|---:|---:|
+| `duplicateCorrelation_parallel()` | 1.68x at 200 x 12 | pays at every size measured | 9.52x at 3,000 x 100 |
+| `calcNormFactors_parallel()` | 1.44x at 2,000 x 20 | pays at every size measured | 6.26x at 20,000 x 500 |
+| `ComBat_seq_parallel()` | 0.69x at 300 x 20 | about 1,000 genes | 5.37x on the cohort |
+| `lmFit_parallel()`, voom or probe weights | 0.59x at 1,000 x 24 | about 4,000 genes | 2.79x at 60,000 x 48 |
+| `lmFit_parallel()`, no probe weights | 1.00x | 6M cells | splits only above the gate |
+| `removeBatchEffect_parallel()` | 0.92x at 20,000 x 50 | 6M cells | 1.91x at 20,000 x 500 |
+
+Read it as three groups. **`duplicateCorrelation` and `calcNormFactors` are worth reaching for
+unconditionally** — one gene is one REML fit, and TMM's `rank` hoist pays with no workers at
+all, so both are ahead even on inputs too small to dispatch. **`ComBat-seq` and the weighted
+`lmFit` branch have a floor**, below which the fork costs more than the work it saves.
+**`lmFit` without probe weights, and `removeBatchEffect`, are parity until the input is large**:
+limma fits every gene in one vectorised `lm.fit`, which is milliseconds, and
+`removeBatchEffect` is that one `lmFit` call plus a BLAS product, so it inherits the same
+answer.
+
+The cost of choosing wrong is bounded and small. Under its gate a companion is one plain vendor
+call plus about 0.3 to 0.6 ms of entry overhead. That is nothing on a single call and real in a
+loop over thousands of small units, which is the one case where reaching for the vendor directly
+is worth doing deliberately. It is also the case the size gates cannot help with, because they
+decide per call.
+
+**To find out which happened, ask.** `options(combat.timing = TRUE)` prints one line per call
+whose engine column reports what actually *ran*, not what was requested:
+
+```
+  ComBat-seq 18,270 x 1,500          mclapply x6         308.0s
+  lmFit 20,000 x 24                  serial                0.0s  3 gated
+```
+
+`serial` with a gated count means every dispatch fell under a threshold and the companion was a
+pass-through. On that input, call the vendor.
+
 ## Tuning
 
 | knob | default | change it when |

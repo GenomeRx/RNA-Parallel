@@ -491,6 +491,13 @@ rp_apply_shim <- function(apply0, workers, chunks, parallel_backend) {
 #' `getOption("combat.min.order.cells", 4e6)`: measured 0.93x at 4e6 and 1.24x at 1e7. The
 #' `rank` hoist is not gated, because it never costs anything, and neither is `workers = 1`.
 #'
+#' @section When this is worth reaching for:
+#' Unconditionally. The `rank` hoist needs no workers at all, so this companion is ahead even
+#' on an input too small to dispatch. Measured on an M3 at the default worker count, companion
+#' against vendor, every arm `identical()`: 1.44x at 2,000 genes by 20 samples with every
+#' dispatch gated, then 2.12x at 5,000 x 50, 3.90x at 20,000 x 50, 6.07x at 20,000 x 200 and
+#' 6.26x at 20,000 x 500.
+#'
 #' @param object Count matrix, genes in rows and samples in columns, or a `DGEList`.
 #' @param lib.size Library sizes. Defaults to `colSums(object)`, computed by edgeR on the
 #'   whole matrix.
