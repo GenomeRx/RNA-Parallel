@@ -126,7 +126,12 @@ options(future.globals.maxSize = 8 * 1024^3)
 # its own thread pool on top of the fork. OPENBLAS_NUM_THREADS is read when the library
 # loads, so setting it here would be too late -- render via render_linux.sh, which exports it
 # before R starts. This reports whether that happened.
-blas_name   <- basename(sessionInfo()$BLAS)
+# sessionInfo()$BLAS is NULL on an R built against its own internal BLAS, and basename(NULL)
+# is character(0), not "". That would travel silently to the machine table and collapse the
+# data.frame's value column by one element, an error an hour into the render and a long way
+# from its cause. The Windows report already guarded this; the other two did not.
+blas_raw    <- sessionInfo()$BLAS
+blas_name   <- if (is.null(blas_raw) || !nzchar(blas_raw)) "R internal (reference)" else basename(blas_raw)
 blas_thread <- Sys.getenv("OPENBLAS_NUM_THREADS", Sys.getenv("MKL_NUM_THREADS", ""))
 blas_pinned <- identical(blas_thread, "1")
 if (grepl("openblas|mkl", blas_name, ignore.case = TRUE) && !blas_pinned)
