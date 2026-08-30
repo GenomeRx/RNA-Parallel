@@ -70,9 +70,9 @@
 #' dispersion split a net loss on small matrices with many batches.
 #'
 #' @section When this is worth reaching for:
-#' Almost always, and it is the companion with the most to win: the vendor is measured in
+#' Almost always, and it is the companion with the most to win: the original is measured in
 #' minutes on a real cohort. It does have a floor. Measured on an M3 at the default worker
-#' count, companion against vendor, every arm `identical()`: 0.69x at 300 genes by 20 samples,
+#' count, companion against original, every arm `identical()`: 0.69x at 300 genes by 20 samples,
 #' 0.89x at 500 x 20, 1.19x at 1,000 x 20, 1.45x at 2,000 x 20, and 4.63x at 6,000 x 120.
 #' Below about a thousand genes call `sva::ComBat_seq` directly.
 #'
@@ -274,10 +274,10 @@ ComBat_seq_parallel <- function(counts, batch, group = NULL, covar_mod = NULL,
     # A floor, measured rather than assumed. This used to pass min_cells = 0 on the argument
     # that a whole-matrix estimate per batch is always worth dispatching. That is true at
     # cohort scale and false at the small end, where it was the only thing still forking:
-    # measured on 4 batches, companion against vendor, 0.69x at 300 genes x 20 samples, 0.89x
+    # measured on 4 batches, companion against original, 0.69x at 300 genes x 20 samples, 0.89x
     # at 500 x 20, 1.19x at 1,000 x 20, 1.45x at 2,000 x 20. Batch count does not move the
     # crossover -- 4 and 10 batches at the same cell count measured the same ratio -- so the
-    # floor is on the matrix, with no per-batch term. Read from the vendor's own frame for the
+    # floor is on the matrix, with no per-batch term. Read from the original's own frame for the
     # same reason the shape check below is: ComBat-seq filters genes before this point.
     .cells <- tryCatch(length(get("counts", envir = environment(FUN), inherits = FALSE)),
                        error = function(e) Inf)
@@ -353,7 +353,7 @@ ComBat_seq_parallel <- function(counts, batch, group = NULL, covar_mod = NULL,
     # Compared against the matrix FUN actually operates on, not the entry-point argument:
     # ComBat-seq drops genes that are all zero within a batch before this lapply, so on any
     # sparse input the unfiltered row count failed every batch and the whole parallel stage
-    # was silently recomputed serially. environment(FUN) is the vendor's own frame.
+    # was silently recomputed serially. environment(FUN) is the original's own frame.
     expected <- tryCatch(nrow(get("counts", envir = environment(FUN), inherits = FALSE)),
                          error = function(e) NA_integer_)
     ok_shape <- !is.na(expected) && length(parts) == length(X) &&

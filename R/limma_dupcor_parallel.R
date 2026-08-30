@@ -6,9 +6,9 @@
 ## limma::duplicateCorrelation is called UNCHANGED on each row block, because its per-gene
 ## loop reads only M[i, ], weights[i, ], design and the block factor. What this file adds is
 ## resolving, once and on the full matrix, the two arguments a block would otherwise
-## re-derive from its own shape; evaluating the vendor's own pooled tail on the concatenated
+## re-derive from its own shape; evaluating the original's own pooled tail on the concatenated
 ## result rather than transcribing it; and memoising the design-invariant call statmod repeats
-## once per gene. No vendor source is held here: the vendor's own mixedModel2Fit object runs
+## once per gene. No original source is held here: the original's own mixedModel2Fit object runs
 ## unchanged and only the primitives it calls are shadowed. See rp_dupcor_memo().
 
 
@@ -17,15 +17,15 @@
 #' `statmod::mixedModel2Fit` calls `La.svd(QtZ, nu = mq, nv = 0)` once per gene, and `QtZ`
 #' reads only the `Z` columns of the effects, so every gene presents byte-identical arguments.
 #' Measured: 300 genes, 300 calls, every argument list identical to the first, and that one
-#' call is 47.5% of the vendor's wall clock. `factor` and `model.matrix` on the block variable
+#' call is 47.5% of the original's wall clock. `factor` and `model.matrix` on the block variable
 #' are invariant the same way.
 #'
 #' @section Why this needs no gate:
-#' Nothing here holds vendor source. The vendor's own `mixedModel2Fit` object runs unchanged;
-#' only the primitives it calls are shadowed, in a child of the vendor's own environment, by
+#' Nothing here holds original source. The original's own `mixedModel2Fit` object runs unchanged;
+#' only the primitives it calls are shadowed, in a child of the original's own environment, by
 #' memos keyed on a bitwise `identical()` of the actual arguments. A statmod that stops calling
 #' `La.svd`, or calls it with per-gene arguments, produces a cache that never hits: correct and
-#' slow, never wrong and quiet. The earlier form evaluated the vendor's statements in a stubbed
+#' slow, never wrong and quiet. The earlier form evaluated the original's statements in a stubbed
 #' environment, which could return NA for every gene against a drifted statmod, and needed
 #' roughly a hundred lines of body-text pinning to notice. None of that is needed to memoise a
 #' call, and none of it is here.
@@ -50,7 +50,7 @@ rp_dupcor_memo <- function(fn, env) {
 
   menv <- new.env(parent = senv)
   # La.svd is a pure function of its arguments, so a value keyed on all of them is right
-  # whichever of the vendor's two call sites produced it.
+  # whichever of the original's two call sites produced it.
   menv$La.svd <- local({
     k <- NULL; v <- NULL; has <- FALSE
     function(x, ...) {
@@ -61,7 +61,7 @@ rp_dupcor_memo <- function(fn, env) {
     }
   })
 
-  fast <- stat_fn                     # the installed vendor object, body untouched
+  fast <- stat_fn                     # the installed original object, body untouched
   environment(fast) <- menv
 
   env2 <- new.env(parent = env)
@@ -95,7 +95,7 @@ rp_dupcor_memo <- function(fn, env) {
 }
 
 
-#' Do the vendor's post-loop statements survive being run per block?
+#' Do the original's post-loop statements survive being run per block?
 #'
 #' Everything limma runs after its per-gene loop and before the pooled tail executes inside
 #' every block, on that block's own `rho`. Against limma 3.62.2 those seven statements
@@ -104,7 +104,7 @@ rp_dupcor_memo <- function(fn, env) {
 #' limma that made any of them depend on which genes share a block would return a quietly
 #' different consensus, and the existing gate two lines below reads only the last two.
 #'
-#' Pinning their text would put vendor source back in this file, which is the thing 0.4.4
+#' Pinning their text would put original source back in this file, which is the thing 0.4.4
 #' removed. This tests the property instead: run them on a probe whole, run them on the same
 #' probe split in two, and require the concatenation to agree. That catches a break however it
 #' is written, and holds nothing.
@@ -146,7 +146,7 @@ rp_tail_decomposes <- function(fn, ndups, max_block) {
 #' Intra-block correlation with the per-gene REML fits parallelised
 #'
 #' Runs [limma::duplicateCorrelation()] itself. The algorithm is not reimplemented and not
-#' copied: the vendor function is called on interleaved row blocks and the per-gene `atanh`
+#' copied: the original function is called on interleaved row blocks and the per-gene `atanh`
 #' correlations are concatenated back into gene order. Output is `identical()` to what
 #' `limma::duplicateCorrelation` returns for the same input, not merely close to it.
 #'
@@ -158,8 +158,8 @@ rp_tail_decomposes <- function(fn, ndups, max_block) {
 #' @section The pooled tail:
 #' `consensus.correlation` is `tanh(mean(arho, trim = trim, na.rm = TRUE))`, a trimmed mean
 #' over every gene, and a trimmed mean does not decompose over blocks. Copying that one line
-#' into this package would create a second copy of it to drift. Instead the vendor's last two
-#' top-level statements are lifted out of `body()` and evaluated in a child of the vendor's
+#' into this package would create a second copy of it to drift. Instead the original's last two
+#' top-level statements are lifted out of `body()` and evaluated in a child of the original's
 #' own environment carrying `arho` and `trim`, so a rewritten limma tail runs as the NEW
 #' tail. [all.vars()] checks the lifted slice reads nothing else before anything is
 #' dispatched, and the function refuses rather than guessing if it does.
@@ -168,7 +168,7 @@ rp_tail_decomposes <- function(fn, ndups, max_block) {
 #' `mixedModel2Fit` reaches `La.svd(QtZ, nu = mq, nv = 0)` once per gene, and `QtZ` reads only
 #' the `Z` columns of the effects, so every gene presents byte-identical arguments. Measured:
 #' 300 genes, 300 calls, every argument list identical to the first, and that one call is 47.5%
-#' of the vendor's wall clock. `mixedModel2Fit` is a bare call in the vendor's loop, so it is
+#' of the original's wall clock. `mixedModel2Fit` is a bare call in the original's loop, so it is
 #' rebound in a child of limma's environment onto a copy whose `La.svd` is memoised, along with
 #' the `factor` and `model.matrix` calls that rebuild the block design per gene.
 #'
@@ -201,13 +201,13 @@ rp_tail_decomposes <- function(fn, ndups, max_block) {
 #' @section When this is worth reaching for:
 #' Unconditionally, and it has the best ratio of the five. One gene is one REML fit, so the
 #' split pays at sizes where the matrix companions are still gated. Measured on an M3 at the
-#' default worker count, companion against vendor, every arm `identical()`: 1.68x at 200 genes
+#' default worker count, companion against original, every arm `identical()`: 1.68x at 200 genes
 #' by 12 arrays, 2.70x at 1,000 x 24, 4.65x at 3,000 x 50 and 9.52x at 3,000 x 100.
 #'
-#' @param object A matrix, `EList`, `MAList` or `ExpressionSet`, as the vendor takes it.
+#' @param object A matrix, `EList`, `MAList` or `ExpressionSet`, as the original takes it.
 #' @param design Design matrix. Resolved once from the object when `NULL`, because a block
 #'   is handed a bare matrix and would fall back to an intercept instead.
-#' @param ndups,spacing Duplicate-spot arguments. Kept so the signature mirrors the vendor;
+#' @param ndups,spacing Duplicate-spot arguments. Kept so the signature mirrors the original;
 #'   both are only read on the `block = NULL` path, which this function refuses.
 #' @param block Blocking factor, one entry per column. Required.
 #' @param trim Fraction trimmed from each end of the pooled mean.
@@ -275,7 +275,7 @@ duplicateCorrelation_parallel <- function(object, design = NULL, ndups = 2L, spa
   }
 
   if (is.null(block)) {
-    stop("`block` is required. With block = NULL the vendor pairs rows through unwrapdups, ",
+    stop("`block` is required. With block = NULL the original pairs rows through unwrapdups, ",
          "and `if (spacing == \"topbottom\") spacing <- nrow(M)/2` branches on the block's ",
          "own row count, so a row split would pair different genes and raise nothing. ",
          "Call limma::duplicateCorrelation directly for the ndups path.", call. = FALSE)
@@ -326,15 +326,15 @@ duplicateCorrelation_parallel <- function(object, design = NULL, ndups = 2L, spa
                  block = block, trim = trim, weights = weights))
   }
   # A block is handed a bare matrix, so getEAWP gives it design NULL and it would silently
-  # substitute an intercept. matrix(1, ncol(M), 1) is the vendor's own fallback and is the
+  # substitute an intercept. matrix(1, ncol(M), 1) is the original's own fallback and is the
   # same in every block, so resolving here changes nothing except the y$design case.
   if (is.null(design)) design <- eawp$design
   design <- if (is.null(design)) matrix(1, ncol(M), 1) else as.matrix(design)
   if (is.null(weights)) weights <- eawp$weights
-  # The vendor has degenerate early returns it reaches WITHOUT ever looking at weights, so
+  # The original has degenerate early returns it reaches WITHOUT ever looking at weights, so
   # expanding first turned inputs limma answers into errors here. Fall back rather than
   # refuse: a weight object this package cannot account for is a reason to run serially,
-  # not a reason to fail where the vendor succeeds.
+  # not a reason to fail where the original succeeds.
   w_raw <- weights
   weights <- tryCatch(rp_weights_matrix(weights, dim(M), be$env),
                       error = function(e) NULL)
@@ -357,7 +357,7 @@ duplicateCorrelation_parallel <- function(object, design = NULL, ndups = 2L, spa
 
   # Rebuilt against an environment holding only what the body reads. A closure is serialised
   # WITH its defining environment, so on a socket backend this frame's live bindings and its
-  # unforced promises travel with every task, and the promises reach back through the vendor's
+  # unforced promises travel with every task, and the promises reach back through the original's
   # frames into the entry point's raw inputs. Invisible on a forking backend, where the child
   # inherits the pages, which is why it survived this long.
   # Measured on a 4,000 x 24 EList: 5,961,556 B per task against 1,723,655 B. `object`,
@@ -404,7 +404,7 @@ duplicateCorrelation_parallel <- function(object, design = NULL, ndups = 2L, spa
   }
 
   vals <- lapply(parts, function(p) p$value)
-  # combat_parallel_check skips its height check on list results, and the vendor returns a
+  # combat_parallel_check skips its height check on list results, and the original returns a
   # list, so the per-block count is checked here instead. A short block plus a long one can
   # still total ngenes.
   got <- vapply(vals, function(v) length(v$atanh.correlations), integer(1))

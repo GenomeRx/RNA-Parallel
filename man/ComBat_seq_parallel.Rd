@@ -151,9 +151,9 @@ dispersion split a net loss on small matrices with many batches.
 
 \section{When this is worth reaching for}{
 
-Almost always, and it is the companion with the most to win: the vendor is measured in
+Almost always, and it is the companion with the most to win: the original is measured in
 minutes on a real cohort. It does have a floor. Measured on an M3 at the default worker
-count, companion against vendor, every arm \code{identical()}: 0.69x at 300 genes by 20 samples,
+count, companion against original, every arm \code{identical()}: 0.69x at 300 genes by 20 samples,
 0.89x at 500 x 20, 1.19x at 1,000 x 20, 1.45x at 2,000 x 20, and 4.63x at 6,000 x 120.
 Below about a thousand genes call \code{sva::ComBat_seq} directly.
 

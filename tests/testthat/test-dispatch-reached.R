@@ -111,7 +111,7 @@ test_that("a backend that namespace-qualifies a rebound call is refused", {
   expect_true("glmFit" %in% all.names(body(mk(TRUE))))
 })
 
-test_that("the glmFit row split is reached, and returns what the vendor returns", {
+test_that("the glmFit row split is reached, and returns what the original returns", {
   # Both tests above pass group = NULL, which builds a batch-only design that
   # combat_design_oneway refuses to split, so glmFit contributes nothing to their counts.
   # A design with a condition column is the only way into this path.
@@ -133,7 +133,7 @@ test_that("the glmFit row split is reached, and returns what the vendor returns"
                                                    prior.df = 0), ns), ng, ns)
   set.seed(23)
   off <- matrix(log(colSums(y)), ng, ns, byrow = TRUE) + matrix(rnorm(ng, 0, 0.4), ng, ns)
-  vendor <- edgeR::glmFit.default(y, design = des, dispersion = disp, offset = off,
+  original <- edgeR::glmFit.default(y, design = des, dispersion = disp, offset = off,
                                   lib.size = NULL, weights = NULL, prior.count = 1e-04,
                                   start = NULL)
 
@@ -144,17 +144,17 @@ test_that("the glmFit row split is reached, and returns what the vendor returns"
   for (w in c(2L, 4L)) for (k in c(2L, 3L, 7L)) {
     p <- rnaparallel:::glmFit_rows_parallel(y, design = des, dispersion = disp, offset = off,
                                             prior.count = 1e-04, workers = w, chunks = k)
-    # the split has two escapes back to the whole-matrix vendor fit, the one-way gate and the
+    # the split has two escapes back to the whole-matrix original fit, the one-way gate and the
     # failed-fit fallback, and either would make every assertion below pass trivially. The
     # split assembles a plain list; both escapes return edgeR's DGEGLM.
     expect_false(inherits(p, "DGEGLM"), info = sprintf("split not taken, w=%d k=%d", w, k))
-    for (nm in keep) expect_identical(p[[nm]], vendor[[nm]], info = sprintf("%s w=%d k=%d", nm, w, k))
+    for (nm in keep) expect_identical(p[[nm]], original[[nm]], info = sprintf("%s w=%d k=%d", nm, w, k))
   }
 })
 
 test_that("a condition column adds glmFit dispatches a batch-only design never makes", {
   # guards the parallel layer going dead: identical() alone cannot tell a working split from
-  # one that quietly calls the vendor whole, because ComBat-seq returns whole-number counts
+  # one that quietly calls the original whole, because ComBat-seq returns whole-number counts
   # and rounds small differences away. A spy backend rather than trace(): the counted function
   # forks, and a traced function inherited by a forked child wedges the worker.
   skip_if_not_installed("sva")

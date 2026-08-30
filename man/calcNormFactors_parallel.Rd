@@ -85,7 +85,7 @@ Output is \code{identical()} to the selected edgeR method for the same input, no
 \code{.calcFactorTMM} builds its trim mask from \code{rank(logR)} and \code{rank(absE)} twice each,
 which is four sorts where two would do. \code{rank} is rebound to compute each vector once,
 which is bit-identical and needs no workers at all: measured 1.28s to 0.81s on
-20000 x 200, \code{identical()} TRUE, max abs diff 0. On top of that the vendor's per-column
+20000 x 200, \code{identical()} TRUE, max abs diff 0. On top of that the original's per-column
 loops are dispatched across workers, taking the same call to 0.29s at four workers.
 }
 
@@ -93,7 +93,7 @@ loops are dispatched across workers, taking the same call to 0.29s at four worke
 
 Every method here ranks, medians or takes a quantile across genes, so a gene-row block is
 not a smaller version of the problem. The per-sample factor is independent only once the
-pooled quantities are fixed, which is why the vendor is called once on the full matrix
+pooled quantities are fixed, which is why the original is called once on the full matrix
 rather than once per block. Splitting the matrix would also have to rebuild
 \code{lib.size <- colSums(x)}, and \code{colSums} over fractional doubles is not block-associative
 on arm64, where \code{sizeof.longdouble} is 8: about 1.8e-14 relative, on the quantity every
@@ -115,7 +115,7 @@ one order statistic per column and cost roughly a fifteenth as much, so they wai
 
 Unconditionally. The \code{rank} hoist needs no workers at all, so this companion is ahead even
 on an input too small to dispatch. Measured on an M3 at the default worker count, companion
-against vendor, every arm \code{identical()}: 1.44x at 2,000 genes by 20 samples with every
+against original, every arm \code{identical()}: 1.44x at 2,000 genes by 20 samples with every
 dispatch gated, then 2.12x at 5,000 x 50, 3.90x at 20,000 x 50, 6.07x at 20,000 x 200 and
 6.26x at 20,000 x 500.
 }

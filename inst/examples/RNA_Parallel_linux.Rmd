@@ -36,8 +36,8 @@ knitr::opts_chunk$set(cache.path = "RNA_Parallel_linux_cache/")
 `rnaparallel` runs the original function itself and parallelises its hot paths.
 `ComBat_seq_parallel` corrects the counts; `calcNormFactors_parallel`, `lmFit_parallel`,
 and `duplicateCorrelation_parallel` run the differential expression that
-follows. None of them reimplements a method from its description: the vendor is called unchanged on blocks of genes or
-samples, with at most a symbol rebound in a child of the vendor's own environment.
+follows. None of them reimplements a method from its description: the original is called unchanged on blocks of genes or
+samples, with at most a symbol rebound in a child of the original's own environment.
 
 The question is narrow on purpose: **does each companion return exactly what the original
 returns, and how much time does it save.** Not close, not correlated at 0.999. Identical, or it
@@ -1589,7 +1589,7 @@ ggplot(limma_speed, aes(factor(workers), speedup, fill = stage)) +
 Not everything in limma is worth forking, and the list of what was left alone is as much a part
 of the result as the list of what was not. `voom` measured 0.99x, because its `lowess` trend takes
 its span as a fraction of the gene count, so a block of half the genes fits a different curve and
-only the arithmetic after the trend splits. `contrasts.fit` is exactly splittable and the vendor
+only the arithmetic after the trend splits. `contrasts.fit` is exactly splittable and the original
 returns before a fork could finish starting. `eBayes`, `fitFDist` and `topTable` pool across every gene by construction.
 None of them ships as a `workers` argument that does nothing.
 

@@ -11,7 +11,7 @@
 #' Split one limma row-fitter across gene blocks
 #'
 #' The shared body of both rebinds. `block_fn` gets one block's matrix and that block's
-#' slice of the once-expanded weights. `serial_fn` is the untouched whole-matrix vendor
+#' slice of the once-expanded weights. `serial_fn` is the untouched whole-matrix original
 #' call, taken whenever a split cannot be proved exact or cannot pay for itself.
 #'
 #' Only four fields vary by gene. Everything else either comes from the design alone or is
@@ -27,9 +27,9 @@ rp_row_blocks <- function(M, weights, env, workers, chunks, parallel_backend, wh
   # SIZE GATE FIRST. `fast` reads only is.null(w) and attr(w, "arrayweights"), neither of
   # which rp_branch_stable touches, so it is the same value in either order; and both guards
   # return the same expression, serial_fn(). What changes is that a call destined for the
-  # vendor no longer pays a full-matrix scan to get there. It was paying enough to lose:
+  # original no longer pays a full-matrix scan to get there. It was paying enough to lose:
   # measured on array-weighted input under the gate, the companion was SLOWER than the
-  # function it wraps -- 20,000 x 24 vendor 10.8 ms against 14.8 ms, 60,000 x 48 vendor
+  # function it wraps -- 20,000 x 24 original 10.8 ms against 14.8 ms, 60,000 x 48 original
   # 89.3 ms against 138.4 ms. On a platform where the gate is shut this scan ran on every
   # call and the split never followed it.
   fast <- is.null(w) || !is.null(attr(w, "arrayweights"))
@@ -39,7 +39,7 @@ rp_row_blocks <- function(M, weights, env, workers, chunks, parallel_backend, wh
   min_cells <- if (fast) rp_ls_min_cells("combat.min.ls.cells", 6e6, parallel_backend)
                else      rp_ls_min_cells("combat.min.cells",    2e4, parallel_backend)
 
-  # Under the gate, take the vendor call WHOLE. combat_parallel_lapply honours the gate by
+  # Under the gate, take the original call WHOLE. combat_parallel_lapply honours the gate by
   # walking the blocks serially instead, and on the fast branch that is four lm.fit calls
   # where one would do: measured 0.70x, a companion slower than the function it wraps. An
   # unusable option value falls through to the dispatch, which refuses it there.
@@ -133,7 +133,7 @@ rp_row_blocks <- function(M, weights, env, workers, chunks, parallel_backend, wh
 #' different component sets: the fast path returns `lm.fit`'s whole object including `qr`
 #' and `assign`, the slow path a bare seven-element list without them. One NA cell in a 400
 #' gene matrix put the whole matrix on the slow path and every block on the fast one, and
-#' 114 of 400 sigma differed. Splitting is refused, in favour of one plain vendor call,
+#' 114 of 400 sigma differed. Splitting is refused, in favour of one plain original call,
 #' unless every block provably lands on the same side as the full matrix.
 #'
 #' `stats::lm.fit` demotes a one-column response with `if (is.matrix(y) && ny == 1L)
@@ -174,7 +174,7 @@ rp_row_blocks <- function(M, weights, env, workers, chunks, parallel_backend, wh
 #' It depends entirely on which branch your call takes, and the two are not close.
 #'
 #' With voom or probe weights limma runs an R loop over genes, which forks well but has a
-#' floor. Measured on an M3 at the default worker count, companion against vendor, every arm
+#' floor. Measured on an M3 at the default worker count, companion against original, every arm
 #' `identical()`: 0.59x at 1,000 genes by 24 arrays, 0.87x at 2,000 x 24, 1.29x at 4,000 x 24,
 #' 1.76x at 8,000 x 24, and 2.79x at 60,000 x 48. The crossover tracks gene count rather than
 #' cells, and sits near four thousand genes.
@@ -183,7 +183,7 @@ rp_row_blocks <- function(M, weights, env, workers, chunks, parallel_backend, wh
 #' milliseconds, so the companion declines to split until the matrix is very large and is
 #' parity until then. That is not a missing measurement, it is the gate doing its job.
 #'
-#' Under either gate the companion is one plain vendor call plus about half a millisecond.
+#' Under either gate the companion is one plain original call plus about half a millisecond.
 #' Nothing on a single call; worth avoiding in a loop over thousands of small fits, which is
 #' the one case a per-call size gate cannot help with.
 #'
@@ -310,7 +310,7 @@ lmFit_parallel <- function(object, design = NULL, ndups = NULL, spacing = NULL,
   env$gls.series <- function(M, design = NULL, ndups = 2, spacing = 1, block = NULL,
                              correlation = NULL, weights = NULL, ...) {
     refuse_ndups(ndups)
-    # Resolved on the FULL matrix, with the raw weights, which is where the vendor resolves
+    # Resolved on the FULL matrix, with the raw weights, which is where the original resolves
     # it. Left to the blocks it would be a trimmed mean over each block's genes alone.
     if (is.null(correlation)) {
       dupcor <- get("duplicateCorrelation", envir = be$env, inherits = TRUE)

@@ -3,7 +3,7 @@
 ## removeBatchEffect is 26 lines and all but two of them are argument shaping. Its entire cost
 ## is one `lmFit` call, written as a bare symbol, followed by `x - beta %*% t(X.batch)`. So the
 ## companion is not a reimplementation and not even a split: it rebinds `lmFit` to
-## `lmFit_parallel` in a child of limma's own environment and calls the vendor unchanged.
+## `lmFit_parallel` in a child of limma's own environment and calls the original unchanged.
 ## Nothing in the body reduces across genes, which is why a row split inside lmFit is exact
 ## here for the same reason it is exact in lmFit_parallel.
 
@@ -11,7 +11,7 @@
 #'
 #' Runs `limma::removeBatchEffect` itself. The one expensive call inside it, `lmFit`, is rebound
 #' to [lmFit_parallel()] in a child of limma's environment; every other symbol in the body still
-#' resolves to limma's own code, and the returned matrix is `identical()` to the vendor's.
+#' resolves to limma's own code, and the returned matrix is `identical()` to the original's.
 #'
 #' @section Why this one is worth having:
 #' It is called once per cohort in a batch-effect PCA and again on the pooled matrix, and its
@@ -26,14 +26,14 @@
 #' the whole product costs a fraction of the fit it follows.
 #'
 #' @section When this is worth reaching for:
-#' On large matrices, and not before. This companion IS the `lmFit` call inside the vendor, so
+#' On large matrices, and not before. This companion IS the `lmFit` call inside the original, so
 #' it inherits that function's answer exactly: below the least-squares gate there is nothing to
-#' split and the companion is the vendor plus about a millisecond. Measured on an M3 at the
-#' default worker count, companion against vendor, every arm `identical()`: 1.00x at 2,000
+#' split and the companion is the original plus about a millisecond. Measured on an M3 at the
+#' default worker count, companion against original, every arm `identical()`: 1.00x at 2,000
 #' genes by 20 samples, 0.92x at 20,000 x 50, 0.98x at 20,000 x 200, then 1.91x at 20,000 x 500
 #' once the matrix is large enough for the split to run at all.
 #'
-#' A wide batch design is what makes it worth having: the vendor's cost grows worse than
+#' A wide batch design is what makes it worth having: the original's cost grows worse than
 #' linearly in samples, measured 8.5 s at 948 samples and 154 batches against 44.2 s at 3,000
 #' samples and 250 batches.
 #'
@@ -76,10 +76,10 @@ removeBatchEffect_parallel <- function(x, batch = NULL, batch2 = NULL, covariate
   }
 
   # The same gate every other rebind here carries. A limma that wrote `limma::lmFit(...)` would
-  # turn this into a pass-through: correct output, vendor speed, and nothing to see from outside.
+  # turn this into a pass-through: correct output, original speed, and nothing to see from outside.
   if (!("lmFit" %in% rp_bare_call_heads(body(fn)))) {
     stop("this limma removeBatchEffect no longer calls lmFit as a bare symbol, so rebinding ",
-         "cannot reach it. The companion would run the vendor serially while still returning ",
+         "cannot reach it. The companion would run the original serially while still returning ",
          "identical() output, which no equivalence test can detect. Refusing to run.",
          call. = FALSE)
   }

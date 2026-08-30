@@ -25,7 +25,7 @@ package will not set one. Warns if the plan resolves in one process.}
 \item{\code{BiocParallel}}{\code{BiocParallel::bplapply} with \code{MulticoreParam}. No new
 dependency in practice, since \pkg{sva} depends on it.}
 \item{\code{foreach}}{\verb{foreach::\%dopar\%} over a cached cluster from \code{doParallel},
-FORK on Unix and PSOCK on Windows. Slower than the vendor on the limma and
+FORK on Unix and PSOCK on Windows. Slower than the original on the limma and
 edgeR paths, measured 0.24x to 0.41x against \code{limma::lmFit} at four workers,
 because \code{doParallel} serialises each task's closure and the closure captures
 the matrix. Correct, and worth choosing only where a fork is unavailable.}

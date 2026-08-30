@@ -13,7 +13,7 @@ Rendered analysis: [macOS](https://genomerx.github.io/RNA-Parallel/) ·
 
 ## Speedup
 
-TCGA, 18,270 genes by 1,500 tumours. Every arm `identical()` to the vendor on all three platforms.
+TCGA, 18,270 genes by 1,500 tumours. Every arm `identical()` to the original on all three platforms.
 
 | companion | runs | macOS<br>M3, 4P+4E | Linux<br>2x Xeon, 16 cores | Windows<br>Ultra 9 185H, 6P+10E |
 |---|---|---:|---:|---:|
@@ -35,14 +35,14 @@ down: the ComBat-seq curve peaks at 6 and turns over after. `serial` is not a mi
 dispatch repays the transfer there. It measured 0.52x before that gate closed, so the honest
 Windows contribution for those two is parity, not a speedup.
 
-Read the seconds as well as the ratios. Windows has the fastest vendor baseline of the three
+Read the seconds as well as the ratios. Windows has the fastest original baseline of the three
 (1,506 s against Linux's 3,044 s), and speedup rewards a slow starting point, which is why the
 dual Xeon posts 9.34x while finishing *behind* the M3 in wall clock. The laptop is last on the
 clock at 515 s, 55% behind the Xeon's best and 73% behind the M3's.
 
-**Nothing is reimplemented.** The vendor function is the one that runs. It is called with its
+**Nothing is reimplemented.** The original function is the one that runs. It is called with its
 hot paths rebound in a child of its own environment, so every other symbol still resolves to
-vendor code. A companion is worth keeping only if it returns exactly what it replaces, so the
+original code. A companion is worth keeping only if it returns exactly what it replaces, so the
 suite asserts `identical()` rather than a tolerance.
 
 ## Install
@@ -57,7 +57,7 @@ remotes::install_github("GenomeRx/RNA-Parallel")
 
 ## Use
 
-Each companion takes its vendor's arguments in the same order with the same defaults, and adds
+Each companion takes its original's arguments in the same order with the same defaults, and adds
 `workers`, `chunks`, `parallel_backend` and `backend`. All five in one pass:
 
 ```r
@@ -81,12 +81,12 @@ fit <- lmFit_parallel(v, design, block = subject,
 vis <- removeBatchEffect_parallel(v$E, batch = batch, design = design, workers = 8L)
 ```
 
-One interface difference: `duplicateCorrelation_parallel` requires `block`, whereas the vendor
+One interface difference: `duplicateCorrelation_parallel` requires `block`, whereas the original
 defaults it to `NULL`. [How it works](#how-it-works) says why.
 
 ### Check it yourself
 
-All five companions against their vendors. No download, nothing to configure:
+All five companions against their originals. No download, nothing to configure:
 
 ```r
 library(rnaparallel); library(sva); library(edgeR); library(limma)
@@ -152,7 +152,7 @@ layer from a dead one. Over 400 assertions.
 
 ```r
 options(combat.timing = TRUE)      # one elapsed line per call
-options(combat.quiet  = TRUE)      # swallow the vendor's progress chatter
+options(combat.quiet  = TRUE)      # swallow the original's progress chatter
 options(combat.timing.min = 1)     # hide anything faster than a second
 ```
 
@@ -164,7 +164,7 @@ options(combat.timing.min = 1)     # hide anything faster than a second
 
 The engine column reports what **ran**, not what was asked for: a call that fell under a size
 gate says `serial`, because a companion returning `identical()` output at serial pace otherwise
-looks exactly like one that forked. If a pinned vendor excerpt stands down after an upstream
+looks exactly like one that forked. If a pinned original excerpt stands down after an upstream
 change, the line says `[match_quantiles stood down]`.
 
 **`rnaparallel_stale()`** returns TRUE if the package was reinstalled under a running session.
@@ -172,7 +172,7 @@ The fix is to restart R.
 
 ## How it works
 
-`ComBat_seq_parallel()` creates a child of the vendor's environment, binds six names in it, and
+`ComBat_seq_parallel()` creates a child of the original's environment, binds six names in it, and
 calls `sva::ComBat_seq` unchanged. Shares are of serial time on 10,000 genes by 500 samples.
 
 | ComBat-seq calls | share | split by | why that is exact |
@@ -185,8 +185,8 @@ calls `sva::ComBat_seq` unchanged. Shares are of serial time on 10,000 genes by 
 
 `calcNormFactors_parallel()` splits by sample column, `lmFit_parallel()` and
 `duplicateCorrelation_parallel()` by gene row. `removeBatchEffect_parallel()` splits nothing: it
-rebinds the one `lmFit` call inside the vendor to `lmFit_parallel()` and inherits its curve, which
-still pays, because the vendor does not finish inside ten minutes at 9,493 samples. Chunks are
+rebinds the one `lmFit` call inside the original to `lmFit_parallel()` and inherits its curve, which
+still pays, because the original does not finish inside ten minutes at 9,493 samples. Chunks are
 interleaved so a sorted matrix does not leave workers idle, each carries a tag, and a dead worker,
 duplicate chunk or short result halts the run.
 
@@ -213,7 +213,7 @@ a wrong answer quietly rather than failing.
 | `NoProbeWts` is an AND-reduction selecting between two numerically different algorithms | an all-finite block takes the fast path while the whole matrix took the slow one | the branch is proven unable to flip before anything is split |
 | `stats::lm.fit` drops a one-column response to a vector | a one-gene block swaps `colMeans` for `mean` | at least two genes per chunk |
 
-One inner loop is pinned to the vendor body it came from and stands down on any upstream change:
+One inner loop is pinned to the original body it came from and stands down on any upstream change:
 `sva::match_quantiles`, 66.5% of ComBat-seq's serial time. See [License](#license).
 
 ## Cross-platform
@@ -233,10 +233,10 @@ macOS, Linux and Windows; fork and socket dispatch; threaded and single-threaded
 | Backend | `mclapply` | `mclapply` | `future` (`multisession`) |
 | Workers swept | 2, 4, 6, 8 | 2, 4, 8, 16 | 2, 4, 6, 8 |
 
-Absolute wall clock at cohort scale, every companion. Vendor is the serial original; best is the
+Absolute wall clock at cohort scale, every companion. Original is the serial upstream function; best is the
 fastest companion arm on that machine, with its worker count. Bold marks the fastest platform.
 
-| stage | macOS vendor | macOS best | Linux vendor | Linux best | Windows vendor | Windows best |
+| stage | macOS original | macOS best | Linux original | Linux best | Windows original | Windows best |
 |---|---:|---:|---:|---:|---:|---:|
 | ComBat-seq | 1,619.8 s | **298.6 s** (8w) | 3,043.8 s | 325.9 s (16w) | 1,506.4 s | 515.3 s (6w) |
 | duplicateCorrelation | 663.7 s | 175.0 s (6w) | 469.1 s | **64.9 s** (16w) | 439.9 s | 198.8 s (8w) |
@@ -250,7 +250,7 @@ still finishes behind at 325.9 s against 298.6 s. Read the seconds. On Linux, pi
 changes little here: unpinning moves DGEMM throughput 3.6x, from 61 to 216 GFLOPS, and `lmFit` by
 0.3%, because limma solves a small QR per gene.
 
-Windows reads lowest on ratio and last on the clock, for the same reason. Its vendor baseline is
+Windows reads lowest on ratio and last on the clock, for the same reason. Its original baseline is
 the fastest of the three, 1,506.4 s against Linux's 3,043.8 s, so there is less to win back, and
 at 515.3 s it finishes 55% behind a dual Xeon while running on a laptop. What it
 cannot do is scale as far, and that is architectural rather than incidental: no `fork()`, so a
@@ -260,13 +260,13 @@ curve shows it directly -- 1.80x, 2.77x, **2.92x**, 2.87x at 2, 4, 6 and 8 worke
 performance-core count and turning over after. The two `serial` entries are the companion
 declining to split rather than a missing measurement: `lmFit` is cheap enough per cell that no
 socket dispatch repays the transfer, measured at 0.14x on 21.6M cells and never reaching parity,
-so it runs whole and matches the vendor instead of losing to it.
+so it runs whole and matches the original instead of losing to it.
 
 ## When a companion is worth reaching for
 
 Not every companion pays at every size, and the honest answer is per companion rather than one
-rule. Measured on the M3, at the default worker count, every arm `identical()` to its vendor.
-The ratio is companion against vendor, so below 1.00x the companion is the slower of the two.
+rule. Measured on the M3, at the default worker count, every arm `identical()` to its original.
+The ratio is companion against original, so below 1.00x the companion is the slower of the two.
 
 | companion | smallest measured | crossover | large |
 |---|---|---:|---:|
@@ -286,9 +286,9 @@ limma fits every gene in one vectorised `lm.fit`, which is milliseconds, and
 `removeBatchEffect` is that one `lmFit` call plus a BLAS product, so it inherits the same
 answer.
 
-The cost of choosing wrong is bounded and small. Under its gate a companion is one plain vendor
+The cost of choosing wrong is bounded and small. Under its gate a companion is one plain original
 call plus about 0.3 to 0.6 ms of entry overhead. That is nothing on a single call and real in a
-loop over thousands of small units, which is the one case where reaching for the vendor directly
+loop over thousands of small units, which is the one case where reaching for the original directly
 is worth doing deliberately. It is also the case the size gates cannot help with, because they
 decide per call.
 
@@ -301,7 +301,7 @@ whose engine column reports what actually *ran*, not what was requested:
 ```
 
 `serial` with a gated count means every dispatch fell under a threshold and the companion was a
-pass-through. On that input, call the vendor.
+pass-through. On that input, call the original.
 
 ## Tuning
 
@@ -360,7 +360,7 @@ Those are *fork* break-evens, and two of them move without fork, in opposite dir
 the underlying work is not alike. `lmFit` is cheap enough per cell that a serialised chunk is
 never repaid — measured 0.14x at 21.6M cells and 0.24x at 60M, improving with size and never
 reaching parity — so `combat.min.ls.cells` **closes** on Windows rather than merely rising, which
-also covers `removeBatchEffect_parallel()` since the vendor rebinds one `lmFit` call. The TMM
+also covers `removeBatchEffect_parallel()` since the original rebinds one `lmFit` call. The TMM
 column loop does pay once it is big enough — 1.05x at 1.8M cells against 1.58x at 21.6M — so
 `combat.min.norm.cells` **rises** to 2e6 instead, an order of magnitude above the fork value.
 Set either explicitly to override. Output is `identical()` either way: a gate decides who
@@ -374,14 +374,14 @@ factors.
 
 ## License
 
-MIT for this companion, copyright GenomeRx 2026, in [LICENSE](LICENSE). The vendor packages are
+MIT for this companion, copyright GenomeRx 2026, in [LICENSE](LICENSE). The original packages are
 called at run time from your own installation and none of them is redistributed here: sva is
 Artistic-2.0, limma and edgeR are GPL (>= 2).
 
 One block is the exception and is marked as such in the source. `R/helper_seq_parallel.R` carries
 the deparsed `sva::match_quantiles` body and a row-vectorised transcription of it, so the
 companion can detect an upstream change and stand down. It derives from Artistic-2.0 code by
-Zhang, Parmigiani and Johnson. Nothing else here reproduces vendor code.
+Zhang, Parmigiani and Johnson. Nothing else here reproduces original code.
 
 ## Citation
 
