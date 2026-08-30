@@ -17,14 +17,25 @@
 #' the degradation the rebind gates exist to catch, so only bare heads count. `e[[i]]` is
 #' indexed inline: binding it first makes R treat an empty symbol as a missing argument.
 #' @noRd
-rp_bare_call_heads <- function(e) {
+rp_bare_call_heads <- function(e) unique(rp_call_heads_raw(e))
+
+#' The walk itself, without the dedup
+#'
+#' `unique()` used to run at every node. It keeps first occurrences in input order, and a
+#' value's globally-first occurrence is also the first inside its own subtree, so no inner
+#' pass could ever delete one: the result is identical, order included, with the dedup done
+#' once at the top. Measured on the bodies this package actually walks -- limma::lmFit 483 to
+#' 229 us, duplicateCorrelation 612 to 333 us, sva::ComBat_seq 926 to 482 us. That is fixed
+#' overhead on every companion call, and most of the wrapper's cost on a small input.
+#' @noRd
+rp_call_heads_raw <- function(e) {
   if (!is.call(e)) return(character())
   h <- e[[1L]]
   out <- if (is.name(h)) as.character(h) else character()
   for (i in seq_along(e)) {
-    if (is.call(e[[i]])) out <- c(out, rp_bare_call_heads(e[[i]]))
+    if (is.call(e[[i]])) out <- c(out, rp_call_heads_raw(e[[i]]))
   }
-  unique(out)
+  out
 }
 
 #' Resolve a ComBat-seq backend and its helper
@@ -173,40 +184,46 @@ combat_row_chunks <- function(ntag, workers = 4L, chunks = NULL, interleave = TR
 combat_row_order <- function(idx) order(unlist(idx, use.names = FALSE))
 
 
-#' Will a dispatch on this backend actually fork?
+#' Does a dispatch on this backend hand a worker the payload without copying it?
 #'
-#' The three size gates below are FORK break-evens: a forked worker starts almost free and
-#' reads the matrix through copy-on-write, so a split earns its keep as soon as the arithmetic
-#' is big enough. Without fork() every chunk is serialised into a separate R process, and the
-#' cheap-per-cell paths never repay the transfer.
+#' The three size gates below were tuned where a worker INHERITS the matrix: a forked child
+#' starts almost free and reads the parent's pages copy-on-write, so a split earns its keep as
+#' soon as the arithmetic is big enough. Where every chunk is serialised into a worker instead,
+#' the cheap-per-cell paths never repay the transfer.
 #'
-#' These gates used to ask `.Platform$OS.type == "windows"`, which is the wrong question.
-#' Windows is a SUFFICIENT condition for having no fork, not a necessary one: `foreach` runs
-#' over PSOCK on every platform, a `multisession` plan is socket-based everywhere, a custom
-#' executor is whatever the caller made it, and `options(combat.fork = FALSE)` turns the whole
-#' thing serial by request. So a macOS or Linux caller on a socket backend got the fork-side
-#' threshold and split anyway. Measured here on 300,000 x 24, four workers, every arm
-#' `identical()`: `limma::lmFit` 0.15 s, the companion on `mclapply` 0.10 s (1.51x), on
-#' `foreach` 1.75 s (0.08x). Twelve times slower than the function it wraps, on a backend
-#' `combat_backends()` advertises and the README recommends to anyone whose IDE dislikes
-#' forking. `removeBatchEffect_parallel()` inherits it, because the vendor rebinds one `lmFit`.
+#' The gates used to ask `.Platform$OS.type == "windows"`, which is the wrong question twice
+#' over. Windows is a SUFFICIENT condition for copying, not a necessary one: a `multisession`
+#' plan is socket-based everywhere, and `options(combat.fork = FALSE)` turns the lot serial by
+#' request. And the question is not fork() at all. `foreach` here builds a FORK cluster on
+#' Unix, so it does fork, and is still slow, because doParallel's cluster form serialises every
+#' TASK over a socket whatever its nodes were made with. Measured on 300,000 x 24, four
+#' workers, every arm `identical()`:
+#'
+#'   limma::lmFit                              0.150 s
+#'   mclapply                                  0.111 s   1.35x
+#'   foreach, this package's own pool          0.628 s   0.24x
+#'   foreach, registerDoParallel(cores = 4)    0.135 s   1.11x
+#'
+#' So the predicate is about the COPY, not the fork, and `foreach` has to be asked rather than
+#' assumed: doParallel reports `doParallelMC` when it is driving `mclapply`, which copies
+#' nothing, and `doParallelSNOW` when it is driving a cluster, which copies every task. An
+#' unregistered `foreach` gets this package's own cluster and is therefore the copying form.
 #'
 #' `serial` answers FALSE deliberately. Nothing dispatches there, so the gate decides between
 #' one whole vendor call and the vendor walked over blocks in one process, and the whole call
 #' is the faster of the two: the fast `lm.series` branch measured 0.70x split that way.
 #' @param parallel_backend The resolved backend, a name or a function.
-#' @return TRUE when a dispatch would fork.
+#' @return TRUE when a worker reads the payload without a serialised copy.
 #' @noRd
-rp_forking <- function(parallel_backend) {
+rp_copy_free <- function(parallel_backend) {
   if (identical(.Platform$OS.type, "windows")) return(FALSE)
-  fk <- getOption("combat.fork", TRUE)
-  if (!isTRUE(fk)) return(FALSE)
-  # A custom executor keeps the fork answer where fork() exists. It could be either -- the
+  if (!isTRUE(getOption("combat.fork", TRUE))) return(FALSE)
+  # A custom executor keeps the inherited answer where fork() exists. It could be either -- the
   # documented examples span parLapply over a FORK cluster and furrr over a socket plan -- and
-  # the two ways to be wrong are not symmetric. Guessing "socket" would silently switch off a
+  # the two ways to be wrong are not symmetric. Guessing "copies" would silently switch off a
   # split a caller had been getting, which is the class of change this package refuses to make
-  # behind someone's back; guessing "fork" leaves them exactly where they are, and the option
-  # is there for anyone who measures otherwise.
+  # behind someone's back; guessing "inherits" leaves them where they are, and the option is
+  # there for anyone who measures otherwise.
   if (is.function(parallel_backend)) return(TRUE)
   switch(as.character(parallel_backend)[1L],
     mclapply = TRUE,
@@ -214,13 +231,19 @@ rp_forking <- function(parallel_backend) {
     future = isTRUE(tryCatch(
       future::supportsMulticore() && inherits(future::plan(), "multicore"),
       error = function(e) FALSE)),
-    FALSE)                             # foreach (PSOCK), serial, anything unrecognised
+    foreach = {
+      nm <- tryCatch(if (foreach::getDoParRegistered()) foreach::getDoParName() else NULL,
+                     error = function(e) NULL)
+      isTRUE(nm %in% c("doParallelMC", "doMC"))
+    },
+    FALSE)                             # serial, and anything unrecognised
 }
 
 
 #' Size gate for a row or column split, resolved against the backend that will run it
 #'
-#' 6e6 cells is the least-squares FORK break-even and 2e4 the weighted branch's. Measured on
+#' 6e6 cells is the least-squares break-even where the payload is INHERITED, and 2e4 the
+#' weighted branch's. Measured on
 #' Windows over PSOCK with the gate forced open, 1,200 samples, the split never approaches
 #' parity and gets worse with every worker added:
 #'
@@ -244,7 +267,7 @@ rp_forking <- function(parallel_backend) {
 rp_ls_min_cells <- function(option, fork_default, parallel_backend) {
   o <- getOption(option)
   if (!is.null(o)) return(o)
-  if (rp_forking(parallel_backend)) fork_default else Inf
+  if (rp_copy_free(parallel_backend)) fork_default else Inf
 }
 
 
@@ -266,7 +289,7 @@ rp_ls_min_cells <- function(option, fork_default, parallel_backend) {
 rp_norm_min_cells <- function(parallel_backend) {
   o <- getOption("combat.min.norm.cells")
   if (!is.null(o)) return(o)
-  if (rp_forking(parallel_backend)) 2e5 else 2e6
+  if (rp_copy_free(parallel_backend)) 2e5 else 2e6
 }
 
 
@@ -281,7 +304,7 @@ rp_norm_min_cells <- function(parallel_backend) {
 rp_order_min_cells <- function(parallel_backend) {
   o <- getOption("combat.min.order.cells")
   if (!is.null(o)) return(o)
-  if (rp_forking(parallel_backend)) 4e6 else 4e7
+  if (rp_copy_free(parallel_backend)) 4e6 else 4e7
 }
 
 
@@ -910,6 +933,13 @@ combat_parallel_lapply <- function(idx, f, workers,
                                    cells = Inf,
                                    min_cells = getOption("combat.min.cells", 2e4),
                                    preschedule = FALSE) {
+  # `f` is evaluated on every path this function has, but not until a worker touches it, and
+  # until then it is a promise. serialize() writes a promise together with its PRENV, so each
+  # dispatched task carried the caller's evaluation frame, that frame's own unforced promises,
+  # and through them the vendor's frames and the entry point's raw inputs. Measured on the
+  # upperquartile dispatch: 14,387,651 B per task before, 2,026,039 B after. `idx` needs no
+  # such treatment; the tagging below forces it before any branch.
+  force(f)
   workers <- as.integer(workers)
   if (is.na(workers)) stop("`workers` must be a positive integer", call. = FALSE)
 
@@ -1111,7 +1141,7 @@ combat_parallel_lapply <- function(idx, f, workers,
   # performance cores -- so the package warned that its default might be slower than a number
   # it had declined to pick, and contradicted its own published measurement. Over sockets the
   # warning is real, because there each added worker also costs a serialised copy.
-  if (!rp_forking(parallel_backend) && ncore > perf &&
+  if (!rp_copy_free(parallel_backend) && ncore > perf &&
       is.null(.combat_clusters$warned_ecores)) {
     .combat_clusters$warned_ecores <- TRUE
     message("workers = ", workers, " exceeds the ", perf, " performance core(s) this machine ",

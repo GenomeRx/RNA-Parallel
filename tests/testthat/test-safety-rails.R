@@ -161,18 +161,32 @@ test_that("each least-squares branch reads its own size gate", {
   })
 })
 
-test_that("the fork break-even gates follow the backend, not the operating system", {
-  # These thresholds are fork break-evens, and Windows is sufficient for having no fork, not
-  # necessary: foreach runs over PSOCK everywhere. Keyed to the OS, a macOS caller on foreach
-  # got the fork gate and lmFit measured 0.08x -- twelve times slower than the vendor.
-  fk <- rnaparallel:::rp_forking
+test_that("the break-even gates follow the backend's copy behaviour, not the OS", {
+  # These thresholds were tuned where a worker INHERITS the matrix. Keyed to the OS, a macOS
+  # caller on foreach got the inherited gate and lmFit measured 0.24x against the vendor.
+  # The question is the COPY, not fork(): foreach builds a FORK cluster on Unix and is still
+  # slow, because doParallel's cluster form serialises every task. So foreach is asked rather
+  # than assumed -- doParallelMC drives mclapply and copies nothing, doParallelSNOW does not.
+  fk <- rnaparallel:::rp_copy_free
   skip_on_os("windows")
   withr::with_options(list(combat.fork = TRUE), {
     expect_true(fk("mclapply"))
     expect_true(fk("BiocParallel"))
-    expect_false(fk("foreach"))
     expect_false(fk("serial"))
-    expect_true(fk(function(idx, f, workers) lapply(idx, f)))  # custom keeps the fork answer
+    expect_true(fk(function(idx, f, workers) lapply(idx, f)))  # custom keeps the inherited answer
+  })
+  # foreach depends on what is registered, which is the whole point
+  skip_if_not_installed("doParallel")
+  withr::with_options(list(combat.fork = TRUE), {
+    foreach::registerDoSEQ()
+    expect_false(fk("foreach"))              # unregistered: it gets this package's own cluster
+    doParallel::registerDoParallel(cores = 2)
+    expect_true(fk("foreach"))               # doParallelMC drives mclapply, nothing is copied
+    cl <- parallel::makeCluster(2, type = "PSOCK")
+    doParallel::registerDoParallel(cl)
+    expect_false(fk("foreach"))              # doParallelSNOW serialises every task
+    parallel::stopCluster(cl)
+    foreach::registerDoSEQ()
   })
   # the escape hatch turns every dispatch serial, so no gate should read as forking
   withr::with_options(list(combat.fork = FALSE), {
@@ -183,6 +197,7 @@ test_that("the fork break-even gates follow the backend, not the operating syste
   withr::with_options(list(combat.min.ls.cells = NULL, combat.min.norm.cells = NULL,
                            combat.min.order.cells = NULL), {
     expect_identical(rnaparallel:::rp_ls_min_cells("combat.min.ls.cells", 6e6, "mclapply"), 6e6)
+    foreach::registerDoSEQ()
     expect_identical(rnaparallel:::rp_ls_min_cells("combat.min.ls.cells", 6e6, "foreach"), Inf)
     expect_identical(rnaparallel:::rp_norm_min_cells("mclapply"), 2e5)
     expect_identical(rnaparallel:::rp_norm_min_cells("foreach"), 2e6)

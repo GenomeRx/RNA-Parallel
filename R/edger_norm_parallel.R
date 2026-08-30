@@ -209,6 +209,12 @@ calcnorm_backend <- function(fn = NULL) {
 #' @return A closure standing in for `rank`.
 #' @noRd
 rp_rank_once <- function(rank0) {
+  # Read only inside the returned closure, so without this it stays a promise whose PRENV is
+  # calcNormFactors_parallel's frame, holding `object` and all four shims. The TMM shim's lean
+  # environment has to carry `vfun`, and `vfun`'s environment holds this closure, so the one
+  # door that lean environment exists to shut was reopened by the object it must carry.
+  # Measured: the rank shim serialised to 12,265,358 B against 11,348 B for its own frame.
+  force(rank0)
   last <- NULL
   ranked <- NULL
   function(x, na.last = TRUE,

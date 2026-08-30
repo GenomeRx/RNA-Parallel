@@ -100,15 +100,20 @@ rp_branch_stable <- function(M, weights, punch = c("lm", "gls")) {
   # here reports a split as safe when it is not: a weight strictly inside (0, 1e-15) is
   # punched by gls.series and not by lm.series, which put ten of forty sigma values on the
   # wrong branch with no error and no warning.
+  # The punch exists only to make a cell non-finite, and the answer is `all cells finite`, so
+  # the weights can be reduced instead of materialised. `w[w <= 0] <- NA` copied the weights,
+  # `is.finite(w)` built a second full logical, its negation a third, and the subassignment
+  # copied M as well: five full-size allocations to decide one TRUE or FALSE. min() and max()
+  # report every failure mode -- NA for any NA, NaN for any NaN, an infinity for either
+  # infinity -- so the two rules reduce exactly. lm passes a weight iff it is finite and > 0;
+  # gls maps NA to 0 first and punches below 1e-15, so it passes iff finite and >= 1e-15.
+  # Measured on array weights: 20,000 x 24 2.13 ms to 1.25 ms, 200,000 x 48 40.85 ms to
+  # 27.04 ms on the lm punch and 77.60 ms to 25.76 ms on the gls one.
+  if (!length(M)) return(TRUE)     # min() of nothing is +Inf and would flip the answer
   if (!is.null(weights)) {
-    w <- weights
-    if (punch == "lm") {
-      w[w <= 0] <- NA
-      M[!is.finite(w)] <- NA
-    } else {
-      w[is.na(w)] <- 0
-      M[!is.finite(w) | w < 1e-15] <- NA
-    }
+    lo <- suppressWarnings(min(weights)); hi <- suppressWarnings(max(weights))
+    if (!(is.finite(lo) && is.finite(hi))) return(FALSE)
+    if (punch == "lm") { if (!(lo > 0)) return(FALSE) } else if (!(lo >= 1e-15)) return(FALSE)
   }
   # rowSums is non-finite for every row holding a non-finite cell, so the cheap scan can
   # only over-report. The exact scan settles the one case it invents, an overflowing sum.

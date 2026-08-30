@@ -24,17 +24,16 @@ rp_row_blocks <- function(M, weights, env, workers, chunks, parallel_backend, wh
   M <- as.matrix(M)
   w <- rp_weights_matrix(weights, dim(M), env)
 
-  # A block landing on the other side of NoProbeWts returns a different component SET, not
-  # merely different numbers, so there would be nothing to reassemble. lm.series and
-  # gls.series punch weights into M by different rules, so the guard is told which.
-  if (!rp_branch_stable(M, w, punch)) return(serial_fn())
-
-  # Which branch the full matrix takes is already settled by the guard above:
-  # rp_branch_stable returns from its first line exactly when NoProbeWts is FALSE, and
-  # otherwise only when the finiteness half holds. The two branches cost nothing alike, so
-  # they cannot share one size gate. Speed only; both are exact either way.
+  # SIZE GATE FIRST. `fast` reads only is.null(w) and attr(w, "arrayweights"), neither of
+  # which rp_branch_stable touches, so it is the same value in either order; and both guards
+  # return the same expression, serial_fn(). What changes is that a call destined for the
+  # vendor no longer pays a full-matrix scan to get there. It was paying enough to lose:
+  # measured on array-weighted input under the gate, the companion was SLOWER than the
+  # function it wraps -- 20,000 x 24 vendor 10.8 ms against 14.8 ms, 60,000 x 48 vendor
+  # 89.3 ms against 138.4 ms. On a platform where the gate is shut this scan ran on every
+  # call and the split never followed it.
   fast <- is.null(w) || !is.null(attr(w, "arrayweights"))
-  # Each branch consults its OWN option, and both close where the dispatch would not fork.
+  # Each branch consults its OWN option, and both close where the payload would be copied.
   # Routing both through one option let a raised combat.min.ls.cells silently switch off the
   # weighted branch's split as well; see rp_ls_min_cells().
   min_cells <- if (fast) rp_ls_min_cells("combat.min.ls.cells", 6e6, parallel_backend)
@@ -45,6 +44,11 @@ rp_row_blocks <- function(M, weights, env, workers, chunks, parallel_backend, wh
   # where one would do: measured 0.70x, a companion slower than the function it wraps. An
   # unusable option value falls through to the dispatch, which refuses it there.
   if (isTRUE(length(M) < suppressWarnings(as.numeric(min_cells)))) return(serial_fn())
+
+  # A block landing on the other side of NoProbeWts returns a different component SET, not
+  # merely different numbers, so there would be nothing to reassemble. lm.series and
+  # gls.series punch weights into M by different rules, so the guard is told which.
+  if (!rp_branch_stable(M, w, punch)) return(serial_fn())
 
   # min_rows = 2 is exactness, not tuning: lm.fit drops a one-column response to a vector.
   idx <- combat_row_chunks(nrow(M), workers, chunks, min_rows = 2L)
