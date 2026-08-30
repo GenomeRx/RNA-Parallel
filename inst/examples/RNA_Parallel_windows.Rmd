@@ -545,6 +545,29 @@ sim_timings <- do.call(rbind, lapply(seq_len(nrow(sim_grid)), function(i) {
 }))
 unlink(sim_file)
 
+# Hand SIGCHLD back to `parallel`. processx, which callr runs on, calls sigaction(SIGCHLD, ...)
+# on every process it starts and restores SIG_DFL on teardown rather than the handler it
+# displaced; `parallel` installs its own once, latched, and never reinstalls. So from the first
+# callr call onward `parallel` can no longer observe its forked workers exiting, and every
+# dispatch leaves one unreaped zombie per worker for the rest of the session. They hold a
+# process-table slot each and nothing else -- no memory, no CPU -- but slots are the binding
+# limit here, not memory: measured 493 zombies from a single eight-worker correction at this
+# plate count, against a 4,000 per-user ceiling. This call clears parallel's latch so the next
+# mcfork reinstalls the handler, and it returns immediately because nothing is stuck yet.
+#
+# Deliberately NOT inside a companion: with shutdown = TRUE it acts on every child past every
+# cleanup mark, so it would kill a caller's own concurrent workers, which is exactly what
+# combat_reap()'s spare snapshot exists to prevent. The report is the layer that mixes the two
+# packages, so the report is where this belongs. Unix only; parallel::cleanup is in the fork
+# half of the package and does not exist on Windows, where mclapply is serial and there are no
+# forked children to lose in the first place.
+if (.Platform$OS.type != "windows") {
+  ok <- tryCatch({ parallel:::cleanup(kill = TRUE, detach = TRUE, shutdown = TRUE); TRUE },
+                 error = function(e) FALSE)
+  if (!ok) warning("could not hand SIGCHLD back to parallel after the callr sweep; forked ",
+                   "workers will accumulate as zombies for the rest of this render")
+}
+
 sim_timings$implementation <- ifelse(
   sim_timings$backend == "serial", "sva::ComBat_seq",
   sprintf("ComBat_seq_parallel, %s, %d workers", sim_timings$backend, sim_timings$workers))

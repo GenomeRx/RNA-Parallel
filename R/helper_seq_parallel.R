@@ -448,6 +448,20 @@ combat_children <- function() {
   vapply(ch, function(p) as.integer(p$pid), integer(1))
 }
 
+#' @section What this does NOT cover:
+#' Nothing on the default `mclapply` path, and that is not a defect here. `parallel::children()`
+#' maps to `mc_children`, which counts only entries that are not DETACHED, and `mclapply`
+#' detaches every child inside its own `on.exit(cleanup(mc.cleanup))` -- which runs on error and
+#' on interrupt alike, before an entry point's `on.exit(combat_reap(.spare))` is ever reached.
+#' Measured: after a normal dispatch, after an error thrown inside a worker, and after an error
+#' unwinding through `mclapply` in the caller, `children()` is 0 every time. So on the default
+#' backend this function correctly finds nothing, and in a healthy session that is because there
+#' is nothing: no live child, no zombie.
+#'
+#' What it does cover is an ATTACHED child, which is a `future` multicore worker that has not
+#' resolved, or a bare `mcparallel()`. Both are reaped. Worth stating because the rail in
+#' test-safety-rails.R exercises the `mcparallel` shape, which no companion creates through
+#' `mclapply`, so that test passing is not evidence about the default path.
 #' @noRd
 combat_reap <- function(spare = integer()) {
   if (.Platform$OS.type == "windows") return(invisible(0L))
