@@ -271,12 +271,20 @@ ComBat_seq_parallel <- function(counts, batch, group = NULL, covar_mod = NULL,
       return(base::sapply(X, FUN, ..., simplify = simplify, USE.NAMES = USE.NAMES))
     }
 
-    # No size gate here: each element is a whole common-dispersion estimate over every gene,
-    # which is always worth dispatching. Inf says that, where a real cell count would only be
-    # computed and then ignored by min_cells = 0.
+    # A floor, measured rather than assumed. This used to pass min_cells = 0 on the argument
+    # that a whole-matrix estimate per batch is always worth dispatching. That is true at
+    # cohort scale and false at the small end, where it was the only thing still forking:
+    # measured on 4 batches, companion against vendor, 0.69x at 300 genes x 20 samples, 0.89x
+    # at 500 x 20, 1.19x at 1,000 x 20, 1.45x at 2,000 x 20. Batch count does not move the
+    # crossover -- 4 and 10 batches at the same cell count measured the same ratio -- so the
+    # floor is on the matrix, with no per-batch term. Read from the vendor's own frame for the
+    # same reason the shape check below is: ComBat-seq filters genes before this point.
+    .cells <- tryCatch(length(get("counts", envir = environment(FUN), inherits = FALSE)),
+                       error = function(e) Inf)
     parts <- combat_parallel_check(
       combat_parallel_lapply(as.list(X), function(i) FUN(i, ...), workers,
-                             parallel_backend, cells = Inf, min_cells = 0,
+                             parallel_backend, cells = .cells,
+                             min_cells = getOption("combat.min.batch.cells", 2e4),
                              # one scalar per batch, and batch counts exceed worker counts on
                              # real designs, so one fork per worker beats one fork per batch.
                              # Measured at 100 batches: 1428 ms to 1063 ms.
@@ -333,9 +341,13 @@ ComBat_seq_parallel <- function(counts, batch, group = NULL, covar_mod = NULL,
     # idx is deliberately not passed: its row check compares a chunk's returned rows against
     # the indices it was given, and here one index returns a dispersion per gene. Dead workers
     # and thrown errors are still caught, and the shape is checked below instead.
+    # Same floor as the common-dispersion dispatch above, and the same reason.
+    .cells <- tryCatch(length(get("counts", envir = environment(FUN), inherits = FALSE)),
+                       error = function(e) Inf)
     parts <- combat_parallel_check(
       combat_parallel_lapply(as.list(X), function(i) FUN(i, ...), workers,
-                             parallel_backend, cells = Inf, min_cells = 0),
+                             parallel_backend, cells = .cells,
+                             min_cells = getOption("combat.min.batch.cells", 2e4)),
       "estimateGLMTagwiseDisp across batches")
 
     # Compared against the matrix FUN actually operates on, not the entry-point argument:

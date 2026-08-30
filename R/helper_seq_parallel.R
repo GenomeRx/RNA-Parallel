@@ -184,6 +184,24 @@ combat_row_chunks <- function(ntag, workers = 4L, chunks = NULL, interleave = TR
 combat_row_order <- function(idx) order(unlist(idx, use.names = FALSE))
 
 
+#' Where this package's own functions live
+#'
+#' The parent every lean environment gets. A dispatched closure is rebuilt against an
+#' environment holding just what its body reads, and that environment's PARENT decides how the
+#' body's remaining calls resolve -- `vapply`, `unname`, `do.call`, `[`. Parented at
+#' `globalenv()` they resolved through the user's workspace first, so a user binding named
+#' `vapply` changed the companion's numbers while leaving the vendor untouched: measured, a
+#' shadowed `vapply` moved `calcNormFactors_parallel` 8.59e-06 off `edgeR::normLibSizes` with
+#' no error and no warning, on the serial backend, on every platform.
+#'
+#' This resolves to the namespace when the package is installed and to whatever the files were
+#' sourced into otherwise, which the package supports and which is exactly where those calls
+#' resolved before the closures were leaned. Serialisation is unaffected: a namespace parent is
+#' written as a reference, the same as `globalenv()`.
+#' @noRd
+rp_home <- function() environment(rp_copy_free)
+
+
 #' Does a dispatch on this backend hand a worker the payload without copying it?
 #'
 #' The three size gates below were tuned where a worker INHERITS the matrix: a forked child
@@ -268,6 +286,37 @@ rp_ls_min_cells <- function(option, fork_default, parallel_backend) {
   o <- getOption(option)
   if (!is.null(o)) return(o)
   if (rp_copy_free(parallel_backend)) fork_default else Inf
+}
+
+
+#' Gene floor for limma's per-gene least-squares loop
+#'
+#' The weighted branch of `lm.series`/`gls.series` is an interpreted loop over genes, and its
+#' per-gene cost has a large component that does not scale with array count. So what amortises
+#' a fork here is GENES per worker, not cells, and a cell gate answers the wrong question: at a
+#' fixed 1,000 genes the split behaves the same at 8, 24 and 48 arrays while the cell count
+#' moves 8,000 to 48,000, straddling the 2e4 cell gate that used to decide it.
+#'
+#' Measured on this M3 at the default worker count, gate forced open, median of 9, companion
+#' against vendor, every arm `identical()`, at 8 / 24 / 48 arrays:
+#'
+#'   500 genes    0.71x  0.57x  0.75x
+#'   1,000        1.16x  1.26x  1.25x
+#'   2,000        1.39x  1.48x  1.75x
+#'   4,000        1.95x  2.02x  2.16x
+#'
+#' An independent review measured the same shape on the same machine and put 1,000 genes at
+#' 0.78x / 0.83x / 0.97x, a loss where this run has a win. The two disagree only there, and
+#' both agree from 2,000 up, so the default sits where both agree rather than at either run's
+#' own crossover. Being too high forgoes about 1.2x on a thin matrix; being too low returns
+#' 0.57x, and a companion slower than the function it wraps is the thing these gates exist to
+#' prevent.
+#' @return Gene count below which the weighted least-squares split does not run.
+#' @noRd
+rp_wt_min_genes <- function() {
+  o <- getOption("combat.min.wt.genes")
+  if (!is.null(o)) return(o)
+  2000L
 }
 
 
@@ -358,7 +407,7 @@ rp_prologue <- function(workers) {
   # a garbage combat.min.* value should refuse at the door, not one dispatch later
   for (op in c("combat.min.cells", "combat.min.disp.cells", "combat.min.ls.cells",
                "combat.min.norm.cells", "combat.min.order.cells", "combat.min.glm.cells",
-               "combat.min.dupcor.cells")) {
+               "combat.min.dupcor.cells", "combat.min.batch.cells", "combat.min.wt.genes")) {
     v <- getOption(op)
     if (!is.null(v)) {
       vv <- suppressWarnings(as.numeric(v))

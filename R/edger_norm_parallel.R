@@ -333,7 +333,7 @@ rp_factor_shim <- function(vfun, loopvar, workers, chunks, parallel_backend, wha
       # actually reads leaves the counts and library sizes to travel and nothing else. On a
       # forking backend this is invisible either way -- the child inherits the pages -- so the
       # cost was only ever paid where there is no fork(). Nothing about the arithmetic changes.
-      lean <- new.env(parent = globalenv())
+      lean <- new.env(parent = rp_home())
       lean$fx <- fx; lean$ref <- ref; lean$flib <- flib
       lean$libsize.ref <- libsize.ref; lean$vfun <- vfun
       lean$logratioTrim <- logratioTrim; lean$sumTrim <- sumTrim
@@ -403,7 +403,7 @@ rp_quantile_shim <- function(q0, loopvar, workers, chunks, parallel_backend) {
       # Leaned for the same reason the TMM loop above is: this frame holds `fr`, the VENDOR's
       # own call frame, and `got`, a second copy of the matrix, neither of which the body
       # reads. On a socket backend all of it would be serialised per chunk.
-      lean <- new.env(parent = globalenv())
+      lean <- new.env(parent = rp_home())
       lean$q0 <- q0; lean$fdata <- fdata; lean$probs <- probs
       per_chunk <- function(jj) vapply(jj, function(k)
         unname(q0(fdata[, k], probs = probs)), numeric(1))
@@ -441,7 +441,7 @@ rp_apply_shim <- function(apply0, workers, chunks, parallel_backend) {
     # FUN is carried over UNCHANGED and deliberately: it closes over the vendor's frame, which
     # is where the pooled `gm` lives, and that is the one thing each block must still read.
     # Only X and apply0 are leaned.
-    lean <- new.env(parent = globalenv())
+    lean <- new.env(parent = rp_home())
     lean$apply0 <- apply0; lean$X <- X; lean$FUN <- FUN
     per_chunk <- function(jj) apply0(X[, jj, drop = FALSE], 2, FUN)
     environment(per_chunk) <- lean

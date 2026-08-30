@@ -343,10 +343,14 @@ dispatches, while on the default `mclapply` backend `mc.allow.recursive = FALSE`
 to serial. Either way, spend the worker budget *inside* a loop body rather than across it.
 Inverting one 15-cohort screen measured 245 s to 81.6 s.
 
-**Size gates** are why a small input shows no speedup. Seven options set the cell count below which
-a call runs serially: `combat.min.cells` (20,000), `combat.min.disp.cells` (30,000),
+**Size gates** are why a small input shows no speedup. Nine options set the size below which a
+call runs serially: `combat.min.cells` (20,000), `combat.min.disp.cells` (30,000),
 `combat.min.glm.cells` (100,000), `combat.min.ls.cells` (6e6), `combat.min.norm.cells` (2e5),
-`combat.min.order.cells` (4e6), `combat.min.dupcor.cells` (5,000).
+`combat.min.order.cells` (4e6), `combat.min.dupcor.cells` (5,000),
+`combat.min.batch.cells` (20,000) and `combat.min.wt.genes` (2,000). All but the last are
+counted in matrix cells; `combat.min.wt.genes` is counted in GENES, because limma's weighted
+branch is an interpreted per-gene loop whose cost barely moves with array count, so genes are
+what amortise the fork.
 
 Those are *fork* break-evens, and two of them move without fork, in opposite directions because
 the underlying work is not alike. `lmFit` is cheap enough per cell that a serialised chunk is

@@ -45,6 +45,13 @@ rp_row_blocks <- function(M, weights, env, workers, chunks, parallel_backend, wh
   # unusable option value falls through to the dispatch, which refuses it there.
   if (isTRUE(length(M) < suppressWarnings(as.numeric(min_cells)))) return(serial_fn())
 
+  # The weighted branch is an interpreted per-gene loop, so it is genes that amortise the fork,
+  # not cells. A cell gate let a 1,000-gene matrix through at 48 arrays and refused the same
+  # matrix at 8, when the split behaves the same way at both. See rp_wt_min_genes().
+  if (!fast && isTRUE(nrow(M) < suppressWarnings(as.numeric(rp_wt_min_genes())))) {
+    return(serial_fn())
+  }
+
   # A block landing on the other side of NoProbeWts returns a different component SET, not
   # merely different numbers, so there would be nothing to reassemble. lm.series and
   # gls.series punch weights into M by different rules, so the guard is told which.
@@ -71,7 +78,7 @@ rp_row_blocks <- function(M, weights, env, workers, chunks, parallel_backend, wh
   # either way, since the child inherits the pages, so the cost was only ever paid where there
   # is no fork() -- which is where the adaptive default sends a Windows caller. The same fix
   # is at edger_norm_parallel.R for the TMM column loop. Nothing about the arithmetic changes.
-  lean <- new.env(parent = globalenv())
+  lean <- new.env(parent = rp_home())
   lean$M <- M; lean$w <- w; lean$block_fn <- block_fn
   lean$rp_weights_rows <- rp_weights_rows
   per_block <- function(ii) block_fn(M[ii, , drop = FALSE], rp_weights_rows(w, ii))
@@ -287,7 +294,7 @@ lmFit_parallel <- function(object, design = NULL, ndups = NULL, spacing = NULL,
     # Leaned for the same reason rp_row_blocks leans its own dispatch closure: this frame's
     # parent is the entry point's, which holds `object`, so a block closure defined here drags
     # a second full copy of the input onto every socket worker.
-    lean <- new.env(parent = globalenv())
+    lean <- new.env(parent = rp_home())
     lean$vendor_lm <- vendor_lm; lean$design <- design
     lean$ndups <- ndups; lean$spacing <- spacing
     blk <- function(Mi, wi) vendor_lm(Mi, design = design, ndups = ndups, spacing = spacing,
@@ -314,7 +321,7 @@ lmFit_parallel <- function(object, design = NULL, ndups = NULL, spacing = NULL,
     # dots are captured as a list and spliced back in the same position they occupied, which
     # leaves argument matching unchanged.
     dots <- list(...)
-    lean <- new.env(parent = globalenv())
+    lean <- new.env(parent = rp_home())
     lean$vendor_gls <- vendor_gls; lean$design <- design; lean$ndups <- ndups
     lean$spacing <- spacing; lean$block <- block; lean$correlation <- correlation
     lean$dots <- dots
