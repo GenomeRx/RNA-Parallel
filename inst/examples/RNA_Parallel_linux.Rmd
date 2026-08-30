@@ -27,7 +27,10 @@ knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = TRUE,
 # keys a cache on the chunk's own source, so editing prose or a figure label reuses them while
 # editing the correction itself invalidates them. Delete the _cache directory to force a
 # full recomputation.
-knitr::opts_chunk$set(cache.path = "RNA_Parallel_cache/")
+# Per-platform cache. All three reports previously shared RNA_Parallel_cache/, which is
+# also what Dropbox syncs between machines, so a render on one box could reuse a chunk
+# another box computed and a rename here would wipe the other platform's results.
+knitr::opts_chunk$set(cache.path = "RNA_Parallel_linux_cache/")
 ```
 
 `rnaparallel` runs the original function itself and parallelises its hot paths.

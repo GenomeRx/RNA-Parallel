@@ -5,7 +5,11 @@
 # has to be in the environment BEFORE R starts -- calling Sys.setenv() inside the R
 # session has no effect (measured on this machine: 0.97x, i.e. none). Without this,
 # every forked worker opens its own BLAS thread pool and the box is oversubscribed.
+#
+#   ./render_linux.sh
+#   ./render_linux.sh RNA_Parallel_linux.Rmd ../../docs/linux.html
 set -euo pipefail
+cd "$(dirname "$0")"
 
 export OPENBLAS_NUM_THREADS=1
 export OMP_NUM_THREADS=1
