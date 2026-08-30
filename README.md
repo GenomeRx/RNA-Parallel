@@ -130,9 +130,12 @@ argument parity, corrections, PCA, differential expression, worker sweep.
 [Windows](https://genomerx.github.io/RNA-Parallel/windows.html). Sources are
 [RNA_Parallel.Rmd](inst/examples/RNA_Parallel.Rmd),
 [RNA_Parallel_linux.Rmd](inst/examples/RNA_Parallel_linux.Rmd) and
-[RNA_Parallel_windows.Rmd](inst/examples/RNA_Parallel_windows.Rmd), the second rendered with
-[render_linux.sh](inst/examples/render_linux.sh) and the third with
-[render_windows.ps1](inst/examples/render_windows.ps1), both of which pin BLAS before R starts.
+[RNA_Parallel_windows.Rmd](inst/examples/RNA_Parallel_windows.Rmd), rendered with
+[render_macos.sh](inst/examples/render_macos.sh),
+[render_linux.sh](inst/examples/render_linux.sh) and
+[render_windows.ps1](inst/examples/render_windows.ps1), each of which pins BLAS before R starts,
+because a BLAS reads its thread count when the library loads and setting it inside the session
+is too late.
 The Windows report adds a backend sweep the other two do not need, because without `fork()` the
 backend decides whether anything runs in parallel at all. The first run
 downloads HNSC, LUAD and LUSC to the per-user cache, or `RNAPARALLEL_TCGA_DIR` if set.
