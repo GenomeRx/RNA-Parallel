@@ -44,6 +44,32 @@ work they throw away.
   `sva::match_quantiles` on 600 randomised cases. Interleaved chunking uses a strided sequence
   rather than `split()`, and a single chunk no longer copies every bound field twice.
 
+- **Two more size gates, for the two regimes that were still slower than the vendor.** limma's
+  weighted branch is an interpreted per-gene loop whose cost barely moves with array count, so
+  genes amortise the fork and cells were the wrong unit: at a fixed 1,000 genes the split behaved
+  the same at 8, 24 and 48 arrays while the cell count crossed the gate that decided it. New
+  `combat.min.wt.genes` (2,000) takes that branch from 0.57x-0.75x below it to parity, and 1.52x
+  above. ComBat-seq's two across-batch dispatches carried no floor at all, on the argument that a
+  whole-matrix estimate per batch is always worth a fork; true at cohort scale and false at 300
+  genes, where they measured 0.69x. New `combat.min.batch.cells` (20,000) takes that to 1.20x —
+  faster than the vendor while dispatching nothing, because the vectorised quantile match is a
+  serial win.
+
+- **A lean environment must be parented at the package, not at the global environment.** A
+  dispatched closure is rebuilt against an environment holding only what its body reads, and that
+  environment's parent decides how the body's remaining calls resolve. Parented at `globalenv()`,
+  a user binding named `vapply` reached them: measured, it moved `calcNormFactors_parallel`
+  8.59e-06 off `edgeR::normLibSizes` with no error and no warning, on the serial backend, on every
+  platform, while leaving the vendor untouched. Six sites, now parented where those calls resolved
+  before the closures were leaned.
+
+- The quantile-match gate refused non-finite inputs but not a negative `old_mu`, an `old_phi`
+  shorter than the matrix, or a mismatched `dim`. The vendor errors on all three; the vectorised
+  form returned a plausible half-matched matrix. Unreachable from ComBat-seq, whose fitted values
+  are non-negative, but the gate's contract is its own. Its finiteness tests are now reductions
+  rather than full-matrix logicals, and `combat_row_order` inverts a permutation by scatter
+  instead of sorting it.
+
 - **New: each companion's help page says when it is worth reaching for.** Two of the five lose to
   their vendor below a floor and nothing said so. `duplicateCorrelation` and `calcNormFactors` pay
   unconditionally; ComBat-seq has a floor near a thousand genes; the weighted `lmFit` branch one
