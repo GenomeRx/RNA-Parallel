@@ -181,7 +181,16 @@ combat_row_chunks <- function(ntag, workers = 4L, chunks = NULL, interleave = TR
 #' @param idx The chunk list the work was dispatched on.
 #' @return Integer permutation to apply to the bound rows.
 #' @noRd
-combat_row_order <- function(idx) order(unlist(idx, use.names = FALSE))
+combat_row_order <- function(idx) {
+  # The inverse permutation, built by scatter rather than by sorting. `unlist(idx)` is a
+  # permutation of seq_len(n), so its inverse is what `order()` returns, and computing it
+  # directly is O(n) against O(n log n): about 1 ms a bind at 18,000 genes, paid once per
+  # dispatch on every companion.
+  u <- unlist(idx, use.names = FALSE)
+  ord <- integer(length(u))
+  ord[u] <- seq_along(u)
+  ord
+}
 
 
 #' Where this package's own functions live
@@ -1700,10 +1709,26 @@ combat_mq_dispatch <- function(mq, counts_sub, old_mu, old_phi) {
   # non-positive dispersions into NaN probabilities the row form would silently keep.
   # is.finite has no data.frame method, and the vendor accepts data.frame counts, so a
   # non-matrix goes to the vendor whole before anything here can touch it.
+  #
+  # Three conditions below are not reachable from ComBat-seq, whose `mu_hat` is a matrix of
+  # fitted values and whose `phi` always has one entry per gene. They are here because this is
+  # the gate's contract, not ComBat-seq's: a NEGATIVE finite `old_mu`, an `old_phi` shorter
+  # than the matrix, or an `old_mu` whose dim differs all make `pnbinom` return NaN or read the
+  # wrong cell, and the vendor ERRORS on that (`if (abs(NaN - 1) < 1e-04)` is `if (NA)`) while
+  # the vectorised form's `which()` drops the NA and returns a plausible half-matched matrix
+  # with no signal. The whole point of falling back is to preserve the vendor's own behaviour,
+  # so the gate has to be complete rather than complete-for-today's-only-caller.
+  #
+  # The finiteness tests are reductions rather than `all(is.finite(x))`, which allocates a
+  # logical the size of the matrix on the path that is 66% of ComBat-seq's serial time. A
+  # numeric x is all-finite exactly when it holds no NA and its min and max are both finite.
+  finite_all <- function(x) !anyNA(x) && is.finite(min(x)) && is.finite(max(x))
   if (!is.matrix(counts_sub) || !is.matrix(old_mu) ||
       nrow(counts_sub) == 0L || ncol(counts_sub) == 0L ||
-      !all(is.finite(counts_sub)) || !all(is.finite(old_mu)) ||
-      !all(is.finite(old_phi)) || any(old_phi <= 0)) {
+      !identical(dim(old_mu), dim(counts_sub)) ||
+      length(old_phi) != nrow(counts_sub) ||
+      !finite_all(counts_sub) || !finite_all(old_mu) ||
+      !finite_all(old_phi) || any(old_phi <= 0) || any(old_mu < 0)) {
     return(NULL)
   }
   # deparse honours options(scipen), so an analyst's .Rprofile could silently shut this gate
