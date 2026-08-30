@@ -17,11 +17,11 @@ TCGA, 18,270 genes by 1,500 tumours. Every arm `identical()` to the vendor on al
 
 | companion | runs | macOS<br>M3, 4P+4E | Linux<br>2x Xeon, 16 cores | Windows<br>Ultra 9 185H, 6P+10E |
 |---|---|---:|---:|---:|
-| `ComBat_seq_parallel()` | `sva::ComBat_seq` | 5.43x @ 8w | **9.38x @ 16w** | 2.92x @ 6w |
-| `calcNormFactors_parallel()` | `edgeR::normLibSizes` | **6.78x @ 8w** | 4.37x @ 8w | 1.63x @ 2w |
-| `lmFit_parallel()` | `limma::lmFit` | 3.02x @ 8w | **3.42x @ 16w** | serial |
-| `duplicateCorrelation_parallel()` | `limma::duplicateCorrelation` | 3.79x @ 6w | **7.31x @ 16w** | 2.21x @ 8w |
-| `removeBatchEffect_parallel()` | `limma::removeBatchEffect` | **2.97x @ 6w** | 1.40x @ 8w | serial |
+| `ComBat_seq_parallel()` | `sva::ComBat_seq` | 5.43x @ 8w | **9.34x @ 16w** | 2.92x @ 6w |
+| `calcNormFactors_parallel()` | `edgeR::normLibSizes` | **6.78x @ 8w** | 4.12x @ 8w | 1.63x @ 2w |
+| `lmFit_parallel()` | `limma::lmFit` | 3.02x @ 8w | **3.37x @ 16w** | serial |
+| `duplicateCorrelation_parallel()` | `limma::duplicateCorrelation` | 3.79x @ 6w | **7.22x @ 16w** | 2.21x @ 8w |
+| `removeBatchEffect_parallel()` | `limma::removeBatchEffect` | **2.97x @ 6w** | 1.39x @ 8w | serial |
 
 Originals are timed on both sides of the companion arms and averaged; short stages are the best
 of three. Bold marks the fastest platform. Machine specs and what separates them are in
@@ -36,8 +36,8 @@ dispatch repays the transfer there. It measured 0.52x before that gate closed, s
 Windows contribution for those two is parity, not a speedup.
 
 Read the seconds as well as the ratios. Windows has the fastest vendor baseline of the three
-(1,506 s against Linux's 3,109 s), and speedup rewards a slow starting point, which is why the
-dual Xeon posts 9.38x while finishing *behind* the M3 in wall clock. The laptop is last on the
+(1,506 s against Linux's 3,044 s), and speedup rewards a slow starting point, which is why the
+dual Xeon posts 9.34x while finishing *behind* the M3 in wall clock. The laptop is last on the
 clock at 515 s, 55% behind the Xeon's best and 73% behind the M3's.
 
 **Nothing is reimplemented.** The vendor function is the one that runs. It is called with its
@@ -227,7 +227,7 @@ macOS, Linux and Windows; fork and socket dispatch; threaded and single-threaded
 | Physical cores | 8 (4 performance + 4 efficiency) | 16 | 16 (6 performance + 8 efficiency + 2 low-power) |
 | Logical | 8 | 32 | 22 |
 | NUMA nodes | 1 | 2 | 1 |
-| BLAS | Accelerate | OpenBLAS 0.3.26 | reference, pinned to 1 thread |
+| BLAS | Accelerate | OpenBLAS 0.3.8 | reference, pinned to 1 thread |
 | `fork()` | yes | yes | **no** |
 | Dispatch | forked children | forked children | PSOCK processes |
 | Backend | `mclapply` | `mclapply` | `future` (`multisession`) |
@@ -238,20 +238,20 @@ fastest companion arm on that machine, with its worker count. Bold marks the fas
 
 | stage | macOS vendor | macOS best | Linux vendor | Linux best | Windows vendor | Windows best |
 |---|---:|---:|---:|---:|---:|---:|
-| ComBat-seq | 1,619.8 s | **298.6 s** (8w) | 3,108.8 s | 331.5 s (16w) | 1,506.4 s | 515.3 s (6w) |
-| duplicateCorrelation | 663.7 s | 175.0 s (6w) | 519.3 s | **71.0 s** (16w) | 439.9 s | 198.8 s (8w) |
-| calcNormFactors (TMM) | 10.3 s | **1.5 s** (8w) | 21.4 s | 4.9 s (8w) | 16.3 s | 10.0 s (2w) |
-| lmFit | 4.4 s | **1.5 s** (8w) | 11.9 s | 3.5 s (16w) | 6.4 s | 6.3 s (serial) |
-| removeBatchEffect | 4.5 s | **1.5 s** (6w) | 2.6 s | 1.9 s (8w) | 2.9 s | 2.9 s (serial) |
+| ComBat-seq | 1,619.8 s | **298.6 s** (8w) | 3,043.8 s | 325.9 s (16w) | 1,506.4 s | 515.3 s (6w) |
+| duplicateCorrelation | 663.7 s | 175.0 s (6w) | 469.1 s | **64.9 s** (16w) | 439.9 s | 198.8 s (8w) |
+| calcNormFactors (TMM) | 10.3 s | **1.5 s** (8w) | 19.5 s | 4.7 s (8w) | 16.3 s | 10.0 s (2w) |
+| lmFit | 4.4 s | **1.5 s** (8w) | 11.4 s | 3.4 s (16w) | 6.4 s | 6.3 s (serial) |
+| removeBatchEffect | 4.5 s | **1.5 s** (6w) | 2.5 s | 1.8 s (8w) | 2.9 s | 2.9 s (serial) |
 
-Speedup is a ratio and rewards a slower core: Linux scales further, 9.38x against 5.43x, and
-still finishes behind at 331.5 s against 298.6 s. Read the seconds. On Linux, pin
+Speedup is a ratio and rewards a slower core: Linux scales further, 9.34x against 5.43x, and
+still finishes behind at 325.9 s against 298.6 s. Read the seconds. On Linux, pin
 `OPENBLAS_NUM_THREADS` before R starts or every forked worker opens its own thread pool, though it
-changes little here: unpinning moves DGEMM throughput 5x, from 62 to 314 GFLOPS, and `lmFit` by
+changes little here: unpinning moves DGEMM throughput 3.6x, from 61 to 216 GFLOPS, and `lmFit` by
 0.3%, because limma solves a small QR per gene.
 
 Windows reads lowest on ratio and last on the clock, for the same reason. Its vendor baseline is
-the fastest of the three, 1,506.4 s against Linux's 3,108.8 s, so there is less to win back, and
+the fastest of the three, 1,506.4 s against Linux's 3,043.8 s, so there is less to win back, and
 at 515.3 s it finishes 55% behind a dual Xeon while running on a laptop. What it
 cannot do is scale as far, and that is architectural rather than incidental: no `fork()`, so a
 worker is a whole process that receives a copy instead of sharing the parent's pages, and only 6
