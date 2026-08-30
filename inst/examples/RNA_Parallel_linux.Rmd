@@ -126,11 +126,21 @@ options(future.globals.maxSize = 8 * 1024^3)
 # its own thread pool on top of the fork. OPENBLAS_NUM_THREADS is read when the library
 # loads, so setting it here would be too late -- render via render_linux.sh, which exports it
 # before R starts. This reports whether that happened.
-blas_pinned <- identical(Sys.getenv("OPENBLAS_NUM_THREADS", ""), "1")
-if (grepl("openblas", sessionInfo()$BLAS, ignore.case = TRUE) && !blas_pinned)
-  warning("OpenBLAS is multi-threaded and OPENBLAS_NUM_THREADS is not 1. The worker sweep ",
-          "will oversubscribe this machine and speedups will be deflated. ",
+blas_name   <- basename(sessionInfo()$BLAS)
+blas_thread <- Sys.getenv("OPENBLAS_NUM_THREADS", Sys.getenv("MKL_NUM_THREADS", ""))
+blas_pinned <- identical(blas_thread, "1")
+if (grepl("openblas|mkl", blas_name, ignore.case = TRUE) && !blas_pinned)
+  warning("A multi-threaded BLAS (", blas_name, ") is loaded and its thread count is not 1. ",
+          "The worker sweep will oversubscribe this machine and speedups will be deflated. ",
           "Render with ./render_linux.sh")
+
+# Reported, not assumed. Every note in this file is about a homogeneous many-core Linux box
+# with fork(), so a run somewhere else would be describing something that is not happening.
+on_linux <- identical(Sys.info()[["sysname"]], "Linux")
+if (!on_linux)
+  warning("This is the Linux report and this is not Linux. Section A describes fork() and a ",
+          "uniformly hyperthreaded dual-socket machine. Render RNA_Parallel.Rmd or ",
+          "RNA_Parallel_windows.Rmd instead.")
 
 ```
 
@@ -1301,20 +1311,30 @@ lin_mem_gb <- function(key) {
 }
 n_phys <- lin_phys_cores(); n_log <- parallel::detectCores()
 
+# The same thirteen rows as the macOS and Windows reports, read from this platform's own
+# sources. Keeping the schema identical is what makes the three tables comparable side by
+# side; only where each value comes from changes.
+#
+# performance cores equals physical cores here and that is the finding, not a placeholder:
+# this is a homogeneous dual Xeon where every core is the same core, which is why its sweep
+# runs out to every hyperthread while the two hybrid machines stop at their P-core count.
 data.frame(
-  quantity = c("CPU", "physical cores", "logical CPUs", "threads per core", "NUMA nodes",
-               "memory", "OS", "BLAS", "OpenBLAS pinned to 1 thread", "backend",
+  quantity = c("CPU", "performance cores", "physical cores", "logical CPUs",
+               "threads per core", "NUMA nodes", "memory", "OS",
+               "BLAS", "BLAS pinned to 1 thread", "fork available", "backend",
                "worker counts"),
   value = as.character(c(
     lin_proc("model name"),
+    n_phys,
     n_phys,
     n_log,
     sprintf("%.0f", n_log / n_phys),
     max(1L, length(Sys.glob("/sys/devices/system/node/node[0-9]*"))),
     sprintf("%.0f GB", lin_mem_gb("MemTotal")),
     paste(Sys.info()[["sysname"]], Sys.info()[["release"]]),
-    basename(sessionInfo()$BLAS),
+    blas_name,
     blas_pinned,
+    !identical(.Platform$OS.type, "windows"),
     getOption("combat.backend"),
     paste(tcga_workers, collapse = ", "))))
 ```

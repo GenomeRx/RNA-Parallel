@@ -1444,14 +1444,40 @@ if (is.na(n_phys)) n_phys <- suppressWarnings(parallel::detectCores(logical = FA
 if (is.na(n_phys) || n_phys < 1L) n_phys <- n_log
 mem_gb <- win_num("Win32_ComputerSystem", "TotalPhysicalMemory") / 2^30
 
+# The same thirteen rows as the macOS and Linux reports, read from this platform's own
+# sources. Keeping the schema identical is what makes the three tables comparable side by
+# side; only where each value comes from changes.
+#
+# performance cores are read from the topology rather than a vendor table, the same way the
+# package's own default does it: on this family only P-cores carry SMT, so the number of
+# logical processors above the physical count is the number of cores with a second thread.
+# 22 logical against 16 physical gives 6, which is right, and the guard degrades to the
+# physical count on a uniformly threaded or unthreaded machine.
+smt <- n_log - n_phys
+n_perf <- if (!is.na(smt) && smt > 0 && smt < n_phys) smt else n_phys
+
+# Windows exposes no single NUMA-node count that is present on every edition, so this asks
+# the OS and falls back to one rather than erroring or printing NA. A laptop is one node; the
+# row exists so the three tables line up, and it is the Linux report that has more than one.
+win_numa <- function() {
+  n <- tryCatch(suppressWarnings(as.numeric(win_cim("Win32_ComputerSystem",
+                                                    "NumberOfProcessors"))),
+                error = function(e) NA_real_)
+  if (is.na(n) || n < 1) 1L else as.integer(n)
+}
+
 data.frame(
-  quantity = c("CPU", "physical cores", "logical CPUs", "threads per core", "memory", "OS",
-               "BLAS", "BLAS pinned to 1 thread", "fork available", "backend", "worker counts"),
+  quantity = c("CPU", "performance cores", "physical cores", "logical CPUs",
+               "threads per core", "NUMA nodes", "memory", "OS",
+               "BLAS", "BLAS pinned to 1 thread", "fork available", "backend",
+               "worker counts"),
   value = as.character(c(
     win_cim("Win32_Processor", "Name"),
+    n_perf,
     n_phys,
     n_log,
     sprintf("%.0f", n_log / n_phys),
+    win_numa(),
     if (is.na(mem_gb)) NA_character_ else sprintf("%.0f GB", mem_gb),
     paste(Sys.info()[["sysname"]], Sys.info()[["release"]]),
     blas_name,
