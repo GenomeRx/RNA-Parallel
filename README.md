@@ -1,5 +1,9 @@
 # RNA-Parallel
 
+[![version](https://img.shields.io/badge/version-0.5.0-blue)](NEWS.md)
+[![R](https://img.shields.io/badge/R-%E2%89%A5%204.1-blue)](DESCRIPTION)
+[![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE.md)
+
 Parallel companions for RNA-seq tools. Each calls the original function unmodified and returns
 output `identical()` to it, bit for bit. Same arguments, same defaults, same result, faster.
 
