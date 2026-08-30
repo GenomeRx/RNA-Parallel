@@ -155,7 +155,12 @@ combat_row_chunks <- function(ntag, workers = 4L, chunks = NULL, interleave = TR
   # this reduces to the old clamp exactly, so ComBat-seq callers are unaffected.
   nch <- max(1L, min(nch, ntag %/% min_rows))
   if (nch == 1L) return(list(seq_len(ntag)))
-  if (interleave) return(unname(split(seq_len(ntag), rep_len(seq_len(nch), ntag))))
+  # `rep_len(seq_len(nch), ntag)` puts chunk k at positions k, k + nch, k + 2*nch, ..., and
+  # split() returns those groups in sorted key order, so group k IS seq.int(k, ntag, by = nch).
+  # split.default gets there by coercing an ntag-long vector to a factor, which sorts its
+  # uniques and builds character levels: measured 0.312 ms against 0.0067 ms at ntag = 18,270.
+  # Same integer vectors, same unnamed list, so every downstream row mapping is untouched.
+  if (interleave) return(lapply(seq_len(nch), function(k) seq.int(k, ntag, by = nch)))
   unname(split(seq_len(ntag), cut(seq_len(ntag), nch, labels = FALSE)))
 }
 
@@ -1375,13 +1380,22 @@ glmFit_rows_parallel <- function(y, design, dispersion, offset, weights = NULL,
 
   # chunks are interleaved, so every gene-indexed result comes back permuted
   ord <- combat_row_order(idx)
+  # `ord` is a permutation of seq_len(nrow(y)), and the only sorted permutation of 1:n is 1:n,
+  # so an unsorted test decides exactly whether the gather moves anything. At one chunk both
+  # the rbind and the gather are no-ops on the values and pure copies in cost: measured on an
+  # 18,270 x 1,500 field, 136 ms for the rbind and 53 ms for the permute, both removed. That is
+  # the documented `workers = 1` and `chunks = 1` path, which paid for two full copies of every
+  # bound field to return what it was given. is.matrix guards the single-chunk shortcut so a
+  # vector field still goes through rbind, which would legitimately promote it to one row.
   bind <- function(nm) {
-    m <- do.call(rbind, lapply(fits, function(f) f[[nm]]))
+    pieces <- lapply(fits, function(f) f[[nm]])
+    m <- if (length(pieces) == 1L && is.matrix(pieces[[1L]])) pieces[[1L]]
+         else do.call(rbind, pieces)
     if (nrow(m) != nrow(y)) {
       stop("glmFit_rows_parallel: field '", nm, "' bound to ", nrow(m), " rows where ",
            nrow(y), " were dispatched", call. = FALSE)
     }
-    m[ord, , drop = FALSE]
+    if (is.unsorted(ord)) m[ord, , drop = FALSE] else m
   }
   vec <- function(nm) {
     v <- unlist(lapply(fits, function(f) f[[nm]]), use.names = FALSE)
@@ -1389,7 +1403,7 @@ glmFit_rows_parallel <- function(y, design, dispersion, offset, weights = NULL,
       stop("glmFit_rows_parallel: field '", nm, "' bound to ", length(v), " values where ",
            nrow(y), " were dispatched", call. = FALSE)
     }
-    v[ord]
+    if (is.unsorted(ord)) v[ord] else v
   }
   # `deviance` is deliberately absent. It is the ONE field edgeR returns that is not a pure
   # function of its own gene: in the Levenberg branch `mglmLevenberg` passes its raw slot
@@ -1441,35 +1455,44 @@ glmFit_rows_parallel <- function(y, design, dispersion, offset, weights = NULL,
   "    return(new_counts_sub)",
   "}")
 
-#' Row-vectorised transcription of the pinned `match_quantiles` body
+#' Whole-slice transcription of the pinned `match_quantiles` body
 #'
-#' The same three branches in the same order, one row per iteration instead of one cell.
-#' `pnbinom` and `qnbinom` are vectorised C, so a row call computes every cell from its own
-#' arguments exactly as the cell loop does. The `1 +` on the `qnbinom` branch is part of the
-#' vendor body and is easy to drop when transcribing from a description of it rather than
-#' from the body itself.
+#' The same three branches in the same order, taken over every cell at once instead of one
+#' cell at a time. `pnbinom` and `qnbinom` are vectorised C and each cell reads only its own
+#' arguments, so one call over the selected cells computes exactly what the cell loop computes.
+#' The `1 +` on the `qnbinom` branch is part of the vendor body and is easy to drop when
+#' transcribing from a description of it rather than from the body itself.
 #'
-#' The logical `NA` start matters: the vendor's result type is whatever its assignments
-#' promote that matrix to, integer while every cell keeps its count and double once one cell
-#' takes the `qnbinom` branch. Filling a row at a time promotes it identically.
+#' `old_phi` and `new_phi` are per GENE, so the row each selected cell belongs to has to be
+#' recovered from its linear index to look the dispersion up. That is the only arithmetic here
+#' the cell loop does not do, and it indexes rather than computes.
+#'
+#' The logical `NA` start matters: the vendor's result type is whatever its assignments promote
+#' that matrix to, integer while every cell keeps its count and double once one cell takes the
+#' `qnbinom` branch. `out[] <- counts_sub` promotes identically and, unlike `out <- counts_sub`,
+#' keeps the vendor's absent dimnames rather than carrying the input's.
+#'
+#' This replaced a per-row loop, which is why the type and dimnames notes above are stated
+#' rather than assumed: measured 0.508 s to 0.370 s on an 18,270 x 28 slice, and `identical()`
+#' to `sva::match_quantiles` on 600 randomised cases spanning integer and double storage,
+#' dimnames present and absent, all-counts-<=1 inputs and dispersions down to 1e-8.
 #'
 #' Reached only through `combat_mq_dispatch()`.
 #' @noRd
 match_quantiles_rows <- function(counts_sub, old_mu, old_phi, new_mu, new_phi) {
-  new_counts_sub <- matrix(NA, nrow = nrow(counts_sub), ncol = ncol(counts_sub))
-  for (a in seq_len(nrow(counts_sub))) {
-    res <- counts_sub[a, ]
-    big <- which(res > 1)
-    if (length(big)) {
-      tmp_p <- stats::pnbinom(res[big] - 1, mu = old_mu[a, big], size = 1/old_phi[a])
-      q <- which(abs(tmp_p - 1) >= 1e-04)
-      if (length(q)) {
-        res[big[q]] <- 1 + stats::qnbinom(tmp_p[q], mu = new_mu[a, big[q]], size = 1/new_phi[a])
-      }
+  out <- matrix(NA, nrow = nrow(counts_sub), ncol = ncol(counts_sub))
+  out[] <- counts_sub
+  big <- which(counts_sub > 1)
+  if (length(big)) {
+    r <- ((big - 1L) %% nrow(counts_sub)) + 1L        # gene each selected cell belongs to
+    tmp_p <- stats::pnbinom(counts_sub[big] - 1, mu = old_mu[big], size = 1/old_phi[r])
+    q <- which(abs(tmp_p - 1) >= 1e-04)
+    if (length(q)) {
+      out[big[q]] <- 1 + stats::qnbinom(tmp_p[q], mu = new_mu[big[q]],
+                                        size = 1/new_phi[r[q]])
     }
-    new_counts_sub[a, ] <- res
   }
-  new_counts_sub
+  out
 }
 
 #' Choose the quantile matcher for one call
@@ -1563,7 +1586,12 @@ match_quantiles_parallel <- function(mq, counts_sub, old_mu, old_phi, new_mu, ne
   parts <- combat_parallel_check(
     combat_parallel_lapply(idx, do_rows, workers, parallel_backend, cells = length(counts_sub)),
     "match_quantiles_parallel", idx)
-  do.call(rbind, parts)[combat_row_order(idx), , drop = FALSE]
+  # Same argument as glmFit_rows_parallel's bind(): one chunk makes both the rbind and the
+  # gather no-ops on the values, and a sorted `ord` makes the gather one too.
+  m <- if (length(parts) == 1L && is.matrix(parts[[1L]])) parts[[1L]]
+       else do.call(rbind, parts)
+  ord <- combat_row_order(idx)
+  if (is.unsorted(ord)) m[ord, , drop = FALSE] else m
 }
 
 #' Row-parallel tagwise dispersion estimation
@@ -1635,10 +1663,22 @@ estimateGLMTagwiseDisp_rows_parallel <- function(y, design = NULL, dispersion = 
   # adjustedProfileLik fits with glmFit inside every chunk, so the one-group kernel's
   # block dependence reaches the returned dispersions as finite, plausible, wrong numbers.
   # The existing non-finite post-check cannot see them.
+  # Design test FIRST. `&&` is order-independent for operands with no side effects, and these
+  # have none, so the decision is unchanged. What changes is that the two full-slice scans are
+  # no longer paid to reach a veto: ComBat-seq hands this a per-batch design of mod[batch, ],
+  # which is one-way on every batch of every run, so `separable` is always FALSE here and both
+  # scans were computed and discarded. Measured on an 18,270 x 28 slice, the shape a 54-batch
+  # cohort passes: 1.66 ms to 0.033 ms, plus about 6 MB of transient allocation per batch that
+  # was charged to the worker's RSS.
+  #
+  # The surviving scan is one pass and no allocation. `all(is.finite(y))` builds an n x m
+  # logical and `abs(y)` an n x m double; anyNA plus max plus min answer the same question
+  # about a numeric y, since a non-finite value is NA, NaN, Inf or -Inf and the three tests
+  # between them catch all four.
   separable <- is.numeric(prior.df) && length(prior.df) == 1L &&
     !is.na(prior.df) && prior.df == 0 &&
-    all(is.finite(y)) && max(abs(y)) < 1e150 &&
-    !combat_design_oneway(design)
+    !combat_design_oneway(design) &&
+    !anyNA(y) && max(y) < 1e150 && min(y) > -1e150
   if (!separable || ntag < 2L) {
     return(edgeR::estimateGLMTagwiseDisp(y, design = design, offset = offset,
                                          dispersion = dispersion, prior.df = prior.df,
