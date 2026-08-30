@@ -74,6 +74,14 @@ if (-not $rscript) { throw "Rscript.exe not found. Add R's bin directory to PATH
 
 Write-Host "Rscript        = $rscript"
 Write-Host "RSTUDIO_PANDOC = $(if ($env:RSTUDIO_PANDOC) { $env:RSTUDIO_PANDOC } else { '<not found>' })"
+
+# Fail here rather than after the render. Pandoc is the LAST step, so without this the report
+# computes the whole cohort -- over an hour -- and then dies with nothing written.
+if (-not $env:RSTUDIO_PANDOC -or -not (Test-Path (Join-Path $env:RSTUDIO_PANDOC "pandoc.exe"))) {
+  throw ("pandoc not found. rmarkdown needs it to write the HTML, and it is the last step of " +
+         "a render that takes over an hour, so this stops now rather than at the end. " +
+         "Install it, or set RSTUDIO_PANDOC to a directory holding pandoc.exe.")
+}
 Write-Host "BLAS threads   = $env:OPENBLAS_NUM_THREADS"
 Write-Host "rendering $In -> $Out"
 

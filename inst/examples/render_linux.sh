@@ -20,8 +20,24 @@ if [ -z "${RSTUDIO_PANDOC:-}" ]; then
     [ -x "$d/pandoc" ] && export RSTUDIO_PANDOC="$d" && break
   done
 fi
+# A machine with no RStudio Server at all is the other common case, and there pandoc is
+# usually just on PATH. Without this the guard below would refuse a machine that can in fact
+# render, which is worse than having no guard.
+if [ -z "${RSTUDIO_PANDOC:-}" ]; then
+  p="$(command -v pandoc || true)"
+  [ -n "$p" ] && export RSTUDIO_PANDOC="$(dirname "$p")"
+fi
 echo "RSTUDIO_PANDOC=${RSTUDIO_PANDOC:-<not found>}"
 echo "OPENBLAS_NUM_THREADS=$OPENBLAS_NUM_THREADS"
+
+# Fail here rather than after the render. Pandoc is the LAST step, so without this the report
+# computes the whole cohort -- over an hour -- and then dies with nothing written.
+if [ -z "${RSTUDIO_PANDOC:-}" ] || [ ! -x "${RSTUDIO_PANDOC}/pandoc" ]; then
+  echo "pandoc not found. rmarkdown needs it to write the HTML, and it is the last step of a" >&2
+  echo "render that takes over an hour, so this stops now rather than at the end." >&2
+  echo "Install it, or point RSTUDIO_PANDOC at a directory holding it." >&2
+  exit 1
+fi
 
 IN="${1:-RNA_Parallel_linux.Rmd}"
 OUT="${2:-${IN%.Rmd}.html}"
