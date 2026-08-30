@@ -1,5 +1,68 @@
 # rnaparallel 0.5.0
 
+Windows is a supported platform, the socket backends work, and the companions no longer pay for
+work they throw away.
+
+- **Three companions could not run on the `future` backend at all.** A closure is serialised with
+  its defining environment, and every dispatched job in the package was built in a frame holding
+  far more than its body reads. Under `plan(multisession)` on a 54.9 MiB matrix,
+  `lmFit_parallel()` exported 664.29 MiB of globals and `future` refused it outright;
+  `calcNormFactors_parallel()` exported 595.97 MiB. Both were hard errors where the vendor
+  returns a value, on the backend the new adaptive default selects. Every job is now built
+  against an environment holding only what it reads: measured payload per task, lmFit
+  13,209,456 B to 809,288 B, TMM 16,624,160 B to 1,987,841 B, `duplicateCorrelation` 5,961,556 B
+  to 853,219 B. Two unforced promises were part of it — `combat_parallel_lapply()` never forced
+  the function it dispatches, so each task carried the caller's frame and, through its own
+  unforced promises, the vendor's frames and the entry point's raw inputs.
+
+- **The size gates were keyed to the operating system when they are about the payload.** They are
+  break-evens for a worker that INHERITS the matrix, and Windows is a sufficient condition for
+  copying rather than a necessary one. It is not even about `fork()`: `foreach` builds a FORK
+  cluster on Unix and is still slow, because doParallel's cluster form serialises every task
+  whatever its nodes were made with. Measured on 300,000 x 24 at four workers, every arm
+  `identical()`: `limma::lmFit` 0.150 s, the companion on `mclapply` 0.111 s, on `foreach`
+  0.628 s. That last is 0.24x, and `removeBatchEffect_parallel()` inherited it. The gates now
+  resolve against the backend that will actually run, and `foreach` is asked rather than assumed —
+  `doParallelMC` drives `mclapply` and copies nothing, `doParallelSNOW` does not.
+
+- **Both `lmFit` branches were reading `combat.min.ls.cells`.** Raising the weightless gate also
+  switched off the voom branch's split, silently. The test suite could not see it: every
+  `combat.min.*` is set to 0 for the suite, which returns from the same first line for both
+  branches.
+
+- **`lmFit_parallel()` was slower than `limma::lmFit` on array-weighted input below its own
+  gate**, because it scanned the whole matrix for branch stability before reaching the gate that
+  sends the call serial anyway. 20,000 x 24 went from 0.73x to 1.09x, 60,000 x 48 from 0.65x to
+  1.02x. That scan also answered one TRUE or FALSE with five full-size allocations, now a min/max:
+  200,000 x 48 measured 40.85 ms to 27.04 ms.
+
+- **ComBat-seq stopped paying for scans it discards.** The tagwise separability gate ran two
+  full-slice scans before a design test that vetoes it on every batch of every run; testing the
+  design first is 1.66 ms to 0.033 ms on an 18,270 x 28 slice and stops charging each worker
+  ~6 MB of transient allocation per batch. `match_quantiles`, the dominant stage, is vectorised
+  over the whole slice instead of per row: 0.508 s to 0.370 s, checked against
+  `sva::match_quantiles` on 600 randomised cases. Interleaved chunking uses a strided sequence
+  rather than `split()`, and a single chunk no longer copies every bound field twice.
+
+- **New: each companion's help page says when it is worth reaching for.** Two of the five lose to
+  their vendor below a floor and nothing said so. `duplicateCorrelation` and `calcNormFactors` pay
+  unconditionally; ComBat-seq has a floor near a thousand genes; the weighted `lmFit` branch one
+  near four thousand; the unweighted branch and `removeBatchEffect` are parity until the matrix is
+  large. Under a gate a companion is one vendor call plus 0.3 to 0.6 ms.
+
+- **The package stopped warning about its own default.** `min(8, detectCores() - 2)` is 6 on an
+  M3 with 4 performance cores, so every fresh session opened by saying that might be slower than
+  a number it had declined to pick — contradicting the 5.37x at eight workers this package
+  publishes for that chip. There were two performance-core routines disagreeing (8 against 4);
+  there is one now, and the message fires only where the payload is copied, which is where it is
+  true.
+
+- A cached cluster is no longer torn down when a NARROWER pool is asked for. ComBat-seq alternates
+  widths within one run, and each change rebuilt the pool: measured on PSOCK, 20 calls alternating
+  3/6 workers took 6299 ms against 22 ms at a fixed width. `calcNormFactors_parallel()` was the one
+  companion still defaulting to a literal `"mclapply"` while its own documentation said otherwise,
+  and the Windows serial notice recommended `foreach`, which this release measures at 0.24x.
+
 Windows is a supported platform, and the dispatch layer no longer nests.
 
 - **Nested dispatch is blocked on every backend, not just fork.** `ComBat_seq_parallel()`
