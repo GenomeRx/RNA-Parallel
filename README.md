@@ -293,8 +293,11 @@ warning on every dispatch and no speedup at all.
 **Nesting** is blocked on every backend: a dispatch that finds itself already inside one of this
 package's workers runs serially. On fork that used to rest on `mc.allow.recursive = FALSE`, which
 covered only that branch — over PSOCK the same construction spawned workers + workers^2 processes.
-A caller's own parallel loop is unaffected, so spend the worker budget *inside* a loop body rather
-than across it. Inverting one 15-cohort screen measured 245 s to 81.6 s.
+Both guards are in place now, and they answer differently for a loop that is *yours*: nothing
+marks your workers, so on a socket backend a companion called inside your own loop still
+dispatches, while on the default `mclapply` backend `mc.allow.recursive = FALSE` still degrades it
+to serial. Either way, spend the worker budget *inside* a loop body rather than across it.
+Inverting one 15-cohort screen measured 245 s to 81.6 s.
 
 **Size gates** are why a small input shows no speedup. Seven options set the cell count below which
 a call runs serially: `combat.min.cells` (20,000), `combat.min.disp.cells` (30,000),

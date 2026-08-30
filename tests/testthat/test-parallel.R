@@ -189,6 +189,28 @@ test_that("the nesting guard does not disturb a caller's own parallel loop", {
   expect_identical(dispatches, 2L)
 })
 
+test_that("the two nesting guards answer differently for a caller's own fork", {
+  # The spy tests above run a CUSTOM executor, which never reaches the mclapply branch, so
+  # neither of them exercises mc.allow.recursive = FALSE. That guard is still passed, and on
+  # the default backend it fires for ANY enclosing fork child, including one the caller made.
+  # The env-var guard fires only for our own workers. The two therefore disagree about a
+  # caller's own loop, and the README says which is which, so it is pinned here by process
+  # count rather than left to prose.
+  skip_on_os("windows")
+  skip_if(!identical(Sys.getenv("NOT_CRAN"), "true"), "forking test")
+
+  pids <- function() rnaparallel:::combat_parallel_lapply(
+    rnaparallel:::combat_row_chunks(8L, chunks = 4L), function(j) Sys.getpid(),
+    workers = 4L, parallel_backend = "mclapply", cells = Inf, min_cells = 0)
+
+  # at top level the dispatch forks, so the chunks report several distinct PIDs
+  expect_gt(length(unique(unlist(pids()))), 1L)
+
+  # inside the caller's OWN fork child it degrades to serial: one PID, the child's
+  inner <- parallel::mclapply(1:2, function(k) length(unique(unlist(pids()))), mc.cores = 2L)
+  expect_identical(unlist(inner), c(1L, 1L))
+})
+
 test_that("a dispatch too small to be worth a fork runs serially instead", {
   # ComBat-seq dispatches once per batch, so a 100-batch design hands over thin
   # slices. Below the threshold the fork cost more than the work: measured 0.80x
