@@ -142,3 +142,51 @@ test_that("the dupcor tail gate refuses a limma whose post-loop run stops decomp
   # and one that does not
   expect_true(dec(inject(quote(rho <- rho * 1)), 2L, 4L))
 })
+
+
+test_that("each least-squares branch reads its own size gate", {
+  # The Windows merge routed both lmFit branches through one function whose first act was to
+  # return combat.min.ls.cells when it was set, so raising the weightless gate silently raised
+  # the voom/weighted one from 2e4 to the same value and switched off a split measured at
+  # 2.52x-3.39x. The whole suite is blind to it by construction: setup-parallel.R sets every
+  # combat.min.* to 0, and 0 is returned from the first line for both branches.
+  ls_gate <- rnaparallel:::rp_ls_min_cells
+  withr::with_options(list(combat.min.ls.cells = 6e7, combat.min.cells = NULL), {
+    expect_identical(ls_gate("combat.min.ls.cells", 6e6, "mclapply"), 6e7)
+    expect_identical(ls_gate("combat.min.cells", 2e4, "mclapply"), 2e4)   # NOT 6e7
+  })
+  withr::with_options(list(combat.min.ls.cells = NULL, combat.min.cells = 5e5), {
+    expect_identical(ls_gate("combat.min.cells", 2e4, "mclapply"), 5e5)
+    expect_identical(ls_gate("combat.min.ls.cells", 6e6, "mclapply"), 6e6)
+  })
+})
+
+test_that("the fork break-even gates follow the backend, not the operating system", {
+  # These thresholds are fork break-evens, and Windows is sufficient for having no fork, not
+  # necessary: foreach runs over PSOCK everywhere. Keyed to the OS, a macOS caller on foreach
+  # got the fork gate and lmFit measured 0.08x -- twelve times slower than the vendor.
+  fk <- rnaparallel:::rp_forking
+  skip_on_os("windows")
+  withr::with_options(list(combat.fork = TRUE), {
+    expect_true(fk("mclapply"))
+    expect_true(fk("BiocParallel"))
+    expect_false(fk("foreach"))
+    expect_false(fk("serial"))
+    expect_true(fk(function(idx, f, workers) lapply(idx, f)))  # custom keeps the fork answer
+  })
+  # the escape hatch turns every dispatch serial, so no gate should read as forking
+  withr::with_options(list(combat.fork = FALSE), {
+    expect_false(fk("mclapply"))
+    expect_false(fk(function(idx, f, workers) lapply(idx, f)))
+  })
+
+  withr::with_options(list(combat.min.ls.cells = NULL, combat.min.norm.cells = NULL,
+                           combat.min.order.cells = NULL), {
+    expect_identical(rnaparallel:::rp_ls_min_cells("combat.min.ls.cells", 6e6, "mclapply"), 6e6)
+    expect_identical(rnaparallel:::rp_ls_min_cells("combat.min.ls.cells", 6e6, "foreach"), Inf)
+    expect_identical(rnaparallel:::rp_norm_min_cells("mclapply"), 2e5)
+    expect_identical(rnaparallel:::rp_norm_min_cells("foreach"), 2e6)
+    expect_identical(rnaparallel:::rp_order_min_cells("mclapply"), 4e6)
+    expect_identical(rnaparallel:::rp_order_min_cells("foreach"), 4e7)
+  })
+})

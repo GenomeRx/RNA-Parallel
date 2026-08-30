@@ -173,63 +173,115 @@ combat_row_chunks <- function(ntag, workers = 4L, chunks = NULL, interleave = TR
 combat_row_order <- function(idx) order(unlist(idx, use.names = FALSE))
 
 
-#' Size gate for the least-squares row split, which depends on having fork()
+#' Will a dispatch on this backend actually fork?
 #'
-#' 6e6 cells is a FORK break-even. A forked worker costs almost nothing to start and reads the
-#' matrix through copy-on-write, so a split earns its keep as soon as the arithmetic is big
-#' enough. Without fork() every chunk is serialised to a separate R process, and `lm.fit` is
-#' cheap enough per cell that the transfer never gets paid back. Measured on Windows over PSOCK,
-#' gate forced open, 1,200 samples:
+#' The three size gates below are FORK break-evens: a forked worker starts almost free and
+#' reads the matrix through copy-on-write, so a split earns its keep as soon as the arithmetic
+#' is big enough. Without fork() every chunk is serialised into a separate R process, and the
+#' cheap-per-cell paths never repay the transfer.
+#'
+#' These gates used to ask `.Platform$OS.type == "windows"`, which is the wrong question.
+#' Windows is a SUFFICIENT condition for having no fork, not a necessary one: `foreach` runs
+#' over PSOCK on every platform, a `multisession` plan is socket-based everywhere, a custom
+#' executor is whatever the caller made it, and `options(combat.fork = FALSE)` turns the whole
+#' thing serial by request. So a macOS or Linux caller on a socket backend got the fork-side
+#' threshold and split anyway. Measured here on 300,000 x 24, four workers, every arm
+#' `identical()`: `limma::lmFit` 0.15 s, the companion on `mclapply` 0.10 s (1.51x), on
+#' `foreach` 1.75 s (0.08x). Twelve times slower than the function it wraps, on a backend
+#' `combat_backends()` advertises and the README recommends to anyone whose IDE dislikes
+#' forking. `removeBatchEffect_parallel()` inherits it, because the vendor rebinds one `lmFit`.
+#'
+#' `serial` answers FALSE deliberately. Nothing dispatches there, so the gate decides between
+#' one whole vendor call and the vendor walked over blocks in one process, and the whole call
+#' is the faster of the two: the fast `lm.series` branch measured 0.70x split that way.
+#' @param parallel_backend The resolved backend, a name or a function.
+#' @return TRUE when a dispatch would fork.
+#' @noRd
+rp_forking <- function(parallel_backend) {
+  if (identical(.Platform$OS.type, "windows")) return(FALSE)
+  fk <- getOption("combat.fork", TRUE)
+  if (!isTRUE(fk)) return(FALSE)
+  # A custom executor keeps the fork answer where fork() exists. It could be either -- the
+  # documented examples span parLapply over a FORK cluster and furrr over a socket plan -- and
+  # the two ways to be wrong are not symmetric. Guessing "socket" would silently switch off a
+  # split a caller had been getting, which is the class of change this package refuses to make
+  # behind someone's back; guessing "fork" leaves them exactly where they are, and the option
+  # is there for anyone who measures otherwise.
+  if (is.function(parallel_backend)) return(TRUE)
+  switch(as.character(parallel_backend)[1L],
+    mclapply = TRUE,
+    BiocParallel = TRUE,               # MulticoreParam forks wherever fork() exists
+    future = isTRUE(tryCatch(
+      future::supportsMulticore() && inherits(future::plan(), "multicore"),
+      error = function(e) FALSE)),
+    FALSE)                             # foreach (PSOCK), serial, anything unrecognised
+}
+
+
+#' Size gate for a row or column split, resolved against the backend that will run it
+#'
+#' 6e6 cells is the least-squares FORK break-even and 2e4 the weighted branch's. Measured on
+#' Windows over PSOCK with the gate forced open, 1,200 samples, the split never approaches
+#' parity and gets worse with every worker added:
 #'
 #'   18,000 genes  (21.6M cells, vendor 0.5 s)  0.14x at 2 workers, 0.08x at 4
 #'   50,000 genes  (60.0M cells, vendor 1.4 s)  0.24x at 2 workers, 0.10x at 4
 #'
-#' It improves with size and still does not approach 1.0x, and it gets worse with every worker
-#' added. On the TCGA cohort the same split measured 0.50x, and `removeBatchEffect` inherits it
-#' -- the vendor rebinds one `lmFit` call -- which is how two companions came to be slower than
-#' the functions they wrap. There is no threshold that rescues this, so the gate closes rather
-#' than rising: on a platform without fork the fast branch stays whole.
+#' On the TCGA cohort the same split measured 0.50x. There is no threshold that rescues that,
+#' so without fork the gate CLOSES rather than rising and the fast branch stays whole.
 #'
-#' An explicit `combat.min.ls.cells` still wins, so the split remains reachable for anyone who
-#' wants to measure it. Output is identical() either way -- this decides who computes, never
-#' what is computed.
-#' Both branches are covered, which the first version of this got wrong. `lmFit_parallel` picks
-#' its gate by branch: the fast one on `combat.min.ls.cells`, the weighted one on
-#' `combat.min.cells`. Closing only the fast gate looked fixed against a weightless matrix and
-#' changed nothing for the report, whose call carries voom weights and so takes the weighted
-#' branch. Measured there, that branch loses too: 0.52x, 0.34x, 0.24x, 0.08x at 2, 4, 6 and 8
-#' workers on a 6.3 s vendor call. `combat.min.cells` cannot simply be raised instead -- it is
-#' shared with ComBat-seq's `match_quantiles`, which is the split that earns 2.92x on the same
-#' cohort. So the gate is closed here, for this companion, on both of its branches.
-#' @param fork_default Threshold to use where fork() is available.
+#' Each branch consults its OWN option. That is not a detail: the merged Windows branch routed
+#' both branches through one function whose first act was to return `combat.min.ls.cells` when
+#' it was set, so a caller who raised the least-squares gate silently raised the voom/weighted
+#' one from 2e4 to the same value and switched off a split the docs measure at 2.52x-3.39x.
+#' The suite could not see it, because setup-parallel.R sets every gate to 0 and that function
+#' returns from its first line for both branches throughout.
+#' @param option Name of the option this branch honours.
+#' @param fork_default Threshold where a dispatch forks.
+#' @param parallel_backend The resolved backend.
 #' @return Cell count below which the split does not run.
 #' @noRd
-rp_ls_min_cells <- function(fork_default = 6e6) {
-  o <- getOption("combat.min.ls.cells")
+rp_ls_min_cells <- function(option, fork_default, parallel_backend) {
+  o <- getOption(option)
   if (!is.null(o)) return(o)
-  if (identical(.Platform$OS.type, "windows")) Inf else fork_default
+  if (rp_forking(parallel_backend)) fork_default else Inf
 }
 
 
-#' Size gate for the TMM column split, which also depends on having fork()
+#' Size gate for the TMM column split
 #'
 #' Same shape of problem as [rp_ls_min_cells()] and a different answer, which is why it is
-#' measured rather than assumed. 2e5 cells is a fork break-even; over PSOCK the column loop has
-#' to earn a serialised copy per chunk as well. Measured on Windows with the gate forced open:
+#' measured rather than assumed. 2e5 cells is the fork break-even; over sockets the column loop
+#' has to earn a serialised copy per chunk as well. Measured on Windows with the gate forced
+#' open:
 #'
 #'   1.8M cells  (vendor 1.2 s)   1.05x at 2 workers, 0.89x at 4, 0.64x at 6
 #'   21.6M cells (vendor 15.8 s)  1.58x at 2 workers, 1.53x at 4, 1.36x at 6
 #'
-#' Unlike the least-squares split this one does pay at cohort scale, so the gate rises instead of
-#' closing: break-even sits around two million cells, an order of magnitude above the fork value,
-#' and below it the split is a loss at every worker count. On the cohort the companion measured
-#' 1.63x with the gate in place.
+#' Unlike the least-squares split this one does pay at scale, so the gate rises instead of
+#' closing: break-even sits around two million cells, an order of magnitude above the fork
+#' value. On the cohort the companion measured 1.63x with the gate in place.
 #' @return Cell count below which the column split does not run.
 #' @noRd
-rp_norm_min_cells <- function() {
+rp_norm_min_cells <- function(parallel_backend) {
   o <- getOption("combat.min.norm.cells")
   if (!is.null(o)) return(o)
-  if (identical(.Platform$OS.type, "windows")) 2e6 else 2e5
+  if (rp_forking(parallel_backend)) 2e5 else 2e6
+}
+
+
+#' Size gate for the order-statistic column loops, RLE and upperquartile
+#'
+#' These take one order statistic per column and cost roughly a fifteenth as much per cell as
+#' the TMM loop, so 4e6 is their fork break-even where TMM's is 2e5. The same reasoning that
+#' raises TMM's gate tenfold without fork applies at least as strongly to a loop that cheap,
+#' so this rises by the same factor rather than being left at the fork value.
+#' @return Cell count below which the column split does not run.
+#' @noRd
+rp_order_min_cells <- function(parallel_backend) {
+  o <- getOption("combat.min.order.cells")
+  if (!is.null(o)) return(o)
+  if (rp_forking(parallel_backend)) 4e6 else 4e7
 }
 
 

@@ -34,9 +34,11 @@ rp_row_blocks <- function(M, weights, env, workers, chunks, parallel_backend, wh
   # otherwise only when the finiteness half holds. The two branches cost nothing alike, so
   # they cannot share one size gate. Speed only; both are exact either way.
   fast <- is.null(w) || !is.null(attr(w, "arrayweights"))
-  # Both branches go through rp_ls_min_cells(), which closes them on a platform without fork().
-  # Passing the branch's own fork-side default keeps macOS and Linux exactly as they were.
-  min_cells <- rp_ls_min_cells(if (fast) 6e6 else getOption("combat.min.cells", 2e4))
+  # Each branch consults its OWN option, and both close where the dispatch would not fork.
+  # Routing both through one option let a raised combat.min.ls.cells silently switch off the
+  # weighted branch's split as well; see rp_ls_min_cells().
+  min_cells <- if (fast) rp_ls_min_cells("combat.min.ls.cells", 6e6, parallel_backend)
+               else      rp_ls_min_cells("combat.min.cells",    2e4, parallel_backend)
 
   # Under the gate, take the vendor call WHOLE. combat_parallel_lapply honours the gate by
   # walking the blocks serially instead, and on the fast branch that is four lm.fit calls
@@ -55,10 +57,25 @@ rp_row_blocks <- function(M, weights, env, workers, chunks, parallel_backend, wh
   # Checked once the blocks are known, so it reads the leading rows and not the whole matrix.
   if (!rp_arrayweights_uniform(w, vapply(idx, `[[`, integer(1), 1L))) return(serial_fn())
 
+  # A dispatched closure is SERIALISED on a socket backend, and a closure carries its whole
+  # defining environment whether the body reads it or not. This frame reaches `M` a second
+  # time and, through block_fn, the entry point's own `object`, so the dispatch presented
+  # 664.29 MiB of globals for a 55 MiB matrix and `future` refused it outright:
+  #   "The total size of the 12 globals exported ... is 664.29 MiB. This exceeds the maximum"
+  # Rebuilding against an environment holding only the four objects the body reads leaves the
+  # matrix and its weights to travel and nothing else. On a forking backend this is invisible
+  # either way, since the child inherits the pages, so the cost was only ever paid where there
+  # is no fork() -- which is where the adaptive default sends a Windows caller. The same fix
+  # is at edger_norm_parallel.R for the TMM column loop. Nothing about the arithmetic changes.
+  lean <- new.env(parent = globalenv())
+  lean$M <- M; lean$w <- w; lean$block_fn <- block_fn
+  lean$rp_weights_rows <- rp_weights_rows
+  per_block <- function(ii) block_fn(M[ii, , drop = FALSE], rp_weights_rows(w, ii))
+  environment(per_block) <- lean
+
   parts <- combat_parallel_check(
     combat_parallel_lapply(
-      idx,
-      function(ii) block_fn(M[ii, , drop = FALSE], rp_weights_rows(w, ii)),
+      idx, per_block,
       workers, parallel_backend, cells = length(M), min_cells = min_cells),
     what, idx)
 
@@ -246,10 +263,18 @@ lmFit_parallel <- function(object, design = NULL, ndups = NULL, spacing = NULL,
 
   env$lm.series <- function(M, design = NULL, ndups = 1, spacing = 1, weights = NULL) {
     refuse_ndups(ndups)
+    # Leaned for the same reason rp_row_blocks leans its own dispatch closure: this frame's
+    # parent is the entry point's, which holds `object`, so a block closure defined here drags
+    # a second full copy of the input onto every socket worker.
+    lean <- new.env(parent = globalenv())
+    lean$vendor_lm <- vendor_lm; lean$design <- design
+    lean$ndups <- ndups; lean$spacing <- spacing
+    blk <- function(Mi, wi) vendor_lm(Mi, design = design, ndups = ndups, spacing = spacing,
+                                      weights = wi)
+    environment(blk) <- lean
     rp_row_blocks(
       M, weights, be$env, workers, chunks, parallel_backend, "lmFit_parallel/lm.series",
-      function(Mi, wi) vendor_lm(Mi, design = design, ndups = ndups, spacing = spacing,
-                                 weights = wi),
+      blk,
       function() vendor_lm(M, design = design, ndups = ndups, spacing = spacing,
                            weights = weights))
   }
@@ -264,10 +289,21 @@ lmFit_parallel <- function(object, design = NULL, ndups = NULL, spacing = NULL,
       correlation <- dupcor(M, design = design, ndups = ndups, spacing = spacing,
                             block = block, weights = weights, ...)$consensus.correlation
     }
+    # Same lean rebuild as lm.series. `...` cannot live in a detached environment, so the
+    # dots are captured as a list and spliced back in the same position they occupied, which
+    # leaves argument matching unchanged.
+    dots <- list(...)
+    lean <- new.env(parent = globalenv())
+    lean$vendor_gls <- vendor_gls; lean$design <- design; lean$ndups <- ndups
+    lean$spacing <- spacing; lean$block <- block; lean$correlation <- correlation
+    lean$dots <- dots
+    blk <- function(Mi, wi) do.call(vendor_gls,
+      c(list(Mi, design = design, ndups = ndups, spacing = spacing, block = block,
+             correlation = correlation, weights = wi), dots))
+    environment(blk) <- lean
     rp_row_blocks(
       M, weights, be$env, workers, chunks, parallel_backend, "lmFit_parallel/gls.series",
-      function(Mi, wi) vendor_gls(Mi, design = design, ndups = ndups, spacing = spacing,
-                                  block = block, correlation = correlation, weights = wi, ...),
+      blk,
       function() vendor_gls(M, design = design, ndups = ndups, spacing = spacing,
                             block = block, correlation = correlation, weights = weights, ...),
       punch = "gls")

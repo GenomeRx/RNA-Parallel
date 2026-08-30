@@ -342,7 +342,7 @@ rp_factor_shim <- function(vfun, loopvar, workers, chunks, parallel_backend, wha
       environment(per_chunk) <- lean
       vals <<- rp_norm_cols(ncol(fx), length(fx), per_chunk,
                             workers, chunks, parallel_backend,
-                            rp_norm_min_cells(), what)
+                            rp_norm_min_cells(parallel_backend), what)
     }
 
     if (!is.numeric(i) || length(i) != 1L || is.na(i) || i != trunc(i) ||
@@ -394,11 +394,17 @@ rp_quantile_shim <- function(q0, loopvar, workers, chunks, parallel_backend) {
       }
       seen <<- fr; fdata <<- got$data
       # unname because the vendor assigns into f[j], which drops the "75%" name anyway
-      vals <<- rp_norm_cols(ncol(fdata), length(fdata),
-                            function(jj) vapply(jj, function(k)
-                              unname(q0(fdata[, k], probs = probs)), numeric(1)),
+      # Leaned for the same reason the TMM loop above is: this frame holds `fr`, the VENDOR's
+      # own call frame, and `got`, a second copy of the matrix, neither of which the body
+      # reads. On a socket backend all of it would be serialised per chunk.
+      lean <- new.env(parent = globalenv())
+      lean$q0 <- q0; lean$fdata <- fdata; lean$probs <- probs
+      per_chunk <- function(jj) vapply(jj, function(k)
+        unname(q0(fdata[, k], probs = probs)), numeric(1))
+      environment(per_chunk) <- lean
+      vals <<- rp_norm_cols(ncol(fdata), length(fdata), per_chunk,
                             workers, chunks, parallel_backend,
-                            getOption("combat.min.order.cells", 4e6), what)
+                            rp_order_min_cells(parallel_backend), what)
     }
 
     if (!is.numeric(j) || length(j) != 1L || is.na(j) || j != trunc(j) ||
@@ -426,10 +432,16 @@ rp_apply_shim <- function(apply0, workers, chunks, parallel_backend) {
     if (!identical(MARGIN, 2) || !is.matrix(X) || ...length() || !isTRUE(simplify)) {
       return(apply0(X, MARGIN, FUN, ..., simplify = simplify))
     }
-    rp_norm_cols(ncol(X), length(X),
-                 function(jj) apply0(X[, jj, drop = FALSE], 2, FUN),
+    # FUN is carried over UNCHANGED and deliberately: it closes over the vendor's frame, which
+    # is where the pooled `gm` lives, and that is the one thing each block must still read.
+    # Only X and apply0 are leaned.
+    lean <- new.env(parent = globalenv())
+    lean$apply0 <- apply0; lean$X <- X; lean$FUN <- FUN
+    per_chunk <- function(jj) apply0(X[, jj, drop = FALSE], 2, FUN)
+    environment(per_chunk) <- lean
+    rp_norm_cols(ncol(X), length(X), per_chunk,
                  workers, chunks, parallel_backend,
-                 getOption("combat.min.order.cells", 4e6),
+                 rp_order_min_cells(parallel_backend),
                  "calcNormFactors_parallel RLE columns")
   }
 }
