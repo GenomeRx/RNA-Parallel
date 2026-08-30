@@ -16,7 +16,7 @@ lmFit_parallel(
   ...,
   workers = NULL,
   chunks = NULL,
-  parallel_backend = getOption("combat.backend", "mclapply"),
+  parallel_backend = getOption("combat.backend", combat_default_backend()),
   backend = NULL,
   label = NULL
 )
@@ -61,7 +61,7 @@ Clamped so no chunk holds one gene.}
 
 \item{parallel_backend}{One of \code{\link[=combat_backends]{combat_backends()}}, or a function
 \verb{function(idx, f, workers)} returning a list in the order of \code{idx}. Defaults to
-\code{getOption("combat.backend", "mclapply")}.}
+\code{getOption("combat.backend", combat_default_backend())}.}
 
 \item{backend}{Optional \code{lmFit} to wrap. Defaults to \code{limma::lmFit}.}
 

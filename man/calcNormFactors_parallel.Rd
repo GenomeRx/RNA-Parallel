@@ -56,7 +56,7 @@ four. The default resolved to 6 there and was optimal; raising it by hand made i
 
 \item{parallel_backend}{One of \code{\link[=combat_backends]{combat_backends()}}, or a function
 \verb{function(idx, f, workers)} returning a list in the order of \code{idx}. Defaults to
-\code{getOption("combat.backend", "mclapply")}.}
+\code{getOption("combat.backend", combat_default_backend())}.}
 
 \item{backend}{Optional edgeR default normalisation method to wrap. Defaults to
 \code{normLibSizes.default} when available, with the older name as a fallback.}

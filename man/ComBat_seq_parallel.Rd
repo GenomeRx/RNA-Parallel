@@ -15,7 +15,7 @@ ComBat_seq_parallel(
   gene.subset.n = NULL,
   workers = NULL,
   chunks = NULL,
-  parallel_backend = getOption("combat.backend", "mclapply"),
+  parallel_backend = getOption("combat.backend", combat_default_backend()),
   backend = NULL,
   label = NULL
 )
@@ -64,7 +64,7 @@ what you want -- passing \code{chunks = workers} explicitly is redundant. Raise 
 function form plugs in any framework this package does not name, including
 \code{parallel::parLapply} over a FORK or PSOCK cluster, \code{pbapply::pblapply},
 \code{furrr::future_map}, \verb{doFuture::\%dofuture\%}, or any \code{BiocParallel} BPPARAM.
-Defaults to \code{getOption("combat.backend", "mclapply")}.}
+Defaults to \code{getOption("combat.backend", combat_default_backend())}.}
 
 \item{backend}{Optional ComBat-seq function to wrap. Defaults to
 \code{sva::ComBat_seq}, falling back to a visible top-level \code{ComBat_seq}.}

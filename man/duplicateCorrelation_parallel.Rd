@@ -14,7 +14,7 @@ duplicateCorrelation_parallel(
   weights = NULL,
   workers = NULL,
   chunks = NULL,
-  parallel_backend = getOption("combat.backend", "mclapply"),
+  parallel_backend = getOption("combat.backend", combat_default_backend()),
   backend = NULL,
   label = NULL
 )
