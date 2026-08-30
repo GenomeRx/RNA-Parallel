@@ -81,6 +81,23 @@ library(rnaparallel)
 library(SummarizedExperiment)
 library(ggplot2)
 
+# Refuse a stale install before anything expensive runs. `git pull` updates this file and the
+# package SOURCE; it does not reinstall the package, and nothing downstream would notice. The
+# report stamps its own sessionInfo and keys every timing cache on packageVersion("rnaparallel"),
+# so rendering against a previous install produces a report labelled with the wrong version that
+# measured the wrong code, silently, after an hour. Skipped when the working tree is not to hand,
+# which is the case for a reader rendering from an installed copy of the package.
+.desc <- file.path("..", "..", "DESCRIPTION")
+if (file.exists(.desc)) {
+  .want <- as.character(read.dcf(.desc, fields = "Version")[[1L]])
+  .have <- as.character(packageVersion("rnaparallel"))
+  if (!identical(.want, .have)) {
+    stop("this working tree is rnaparallel ", .want, " but the installed package is ", .have,
+         ". A pull does not reinstall. From the repository root: R CMD INSTALL . ",
+         "(or devtools::install()), restart R, and render again.", call. = FALSE)
+  }
+}
+
 edgeR_norm <- if (exists("normLibSizes.default", envir = asNamespace("edgeR"), inherits = FALSE)) {
   edgeR::normLibSizes
 } else {
