@@ -49,7 +49,7 @@ which parallelism is worth measuring.
 | section | what it shows |
 |---|---|
 | B. The claim in ten lines | one pipeline, run both ways, `identical()` |
-| C. Simulated counts | ComBat-seq then limma and edgeR, each against its original, at 4, 8, 16 and 32 workers |
+| C. Simulated counts | ComBat-seq then limma and edgeR, each against its original, at 2, 4, 8 and 16 workers |
 | D. TCGA | the cohort, then the same two comparisons at cohort scale |
 | E. Equivalence summary | every quantity, computed both ways and compared |
 | F. Speed summary | every speed measurement in one figure |
@@ -102,8 +102,8 @@ pal_stage <- c("ComBat_seq" = "#8172B3",
                "duplicateCorrelation" = "#55A868",
                "removeBatchEffect" = "#937860")
 
-# workers is run as asked: 32 means 32 forked processes, bounded only by detectCores(). Added
-# workers return less throughput each, so whether 32 beats 16 is what the sweep measures rather
+# workers is run as asked: 16 means 16 forked processes, bounded only by detectCores(). Added
+# workers return less throughput each, so whether 16 beats 8 is what the sweep measures rather
 # than assumes.
 #
 # LINUX SWEEP. The published macOS run used 2, 4, 6, 8 -- the whole of an 8-core Apple M3, half
@@ -111,10 +111,14 @@ pal_stage <- c("ComBat_seq" = "#8172B3",
 # the report shows the arms rather than naming a winner among them; earlier prose here claimed
 # that row peaked at 4 and fell back at 8, which the 0.5.0 re-render no longer supports. This is a
 # different machine: two sockets, 16 physical cores, 32 hardware threads, homogeneous. So the
-# sweep is 4, 8, 16, 32, where 16 is every physical core and 32 is every hyperthread. The
-# 16 -> 32 step adds no arithmetic units, only a second thread per core, and is read that way.
+# sweep is 2, 4, 8, 16, ending on every physical core. It deliberately shares its low arms with
+# the other two reports -- all three now start at 2 and all three measure 4 and 8 -- so the three
+# tables can be read against each other at matched worker counts rather than only at the ends.
+# The hyperthread arm is not swept: 32 workers add a second thread per core and no arithmetic
+# units, so it measures SMT rather than scaling, and it is the one arm whose result says more
+# about the chip than about the companion.
 # TCGA is corrected at every count; the last arm is the one the figures below use.
-tcga_workers <- c(4L, 8L, 16L, 32L)
+tcga_workers <- c(2L, 4L, 8L, 16L)
 n_workers    <- max(tcga_workers)
 
 # Backend: mclapply, the same one the macOS run used. On Linux fork() hands each worker the
@@ -1535,9 +1539,11 @@ do not return twice what sixteen return, and on this machine the reason is struc
 than mysterious: sixteen is every physical core, so the last doubling buys only a second
 hardware thread on each of them. The published macOS run had a different reason for the same
 shape -- half its cores were efficiency cores -- which is why that argument does not appear
-here and this sweep extends to 32 instead of stopping at 8. Concurrency is what costs, so each
-added worker returns less throughput than the one before it, and the 16 to 32 step is where
-that is most visible.
+here and this sweep extends to 16 instead of stopping at 8. Concurrency is what costs, so each
+added worker returns less throughput than the one before it, and the 8 to 16 step is where that
+is most visible. Sixteen is every physical core and the sweep stops there deliberately: a
+32-worker arm would add a second hardware thread per core and no arithmetic units, so it would
+measure this chip's SMT rather than how the companion scales.
 
 Method as in C.2: `calcNormFactors` and `lmFit` are the best of three runs, and originals are
 bracketed before and after the companion arms, those two readings differing by at most
@@ -1663,7 +1669,7 @@ ggplot(all_speed, aes(factor(workers), speedup, fill = stage)) +
   scale_fill_manual(values = pal_stage) +
   labs(x = "workers", y = "speedup against the original", fill = NULL,
        title = "Every companion against its original",
-       subtitle = "Dashed line is the original. Every arm at 4, 8, 16 and 32 workers.") +
+       subtitle = "Dashed line is the original. Every arm at 2, 4, 8 and 16 workers.") +
   expand_limits(y = 0) +
   theme(legend.position = "bottom")
 ```

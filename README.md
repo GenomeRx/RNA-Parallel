@@ -227,7 +227,7 @@ macOS, Linux and Windows; fork and socket dispatch; threaded and single-threaded
 | `fork()` | yes | yes | **no** |
 | Dispatch | forked children | forked children | PSOCK processes |
 | Backend | `mclapply` | `mclapply` | `future` (`multisession`) |
-| Workers swept | 2, 4, 6, 8 | 4, 8, 16, 32 | 2, 4, 6, 8 |
+| Workers swept | 2, 4, 6, 8 | 2, 4, 8, 16 | 2, 4, 6, 8 |
 
 Absolute wall clock at cohort scale, every companion. Vendor is the serial original; best is the
 fastest companion arm on that machine, with its worker count. Bold marks the fastest platform.
@@ -303,7 +303,7 @@ pass-through. On that input, call the vendor.
 
 | knob | default | change it when |
 |---|---|---|
-| `workers` | `min(8, detectCores() - 2)`, capped at performance cores without `fork()` | rarely. Going past your *physical* core count can be slower, as the 32-worker Linux arm shows. See `?workers` |
+| `workers` | `min(8, detectCores() - 2)`, capped at performance cores without `fork()` | rarely. Going past your *performance* core count can be slower, as the Windows curve shows: 1.80x, 2.77x, **2.92x**, 2.87x at 2, 4, 6 and 8 workers on a chip with six. See `?workers` |
 | `chunks` | `workers` | only to cut peak memory per worker |
 | `parallel_backend` | `"mclapply"` | you cannot fork, or a cluster is already running |
 
