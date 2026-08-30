@@ -1002,6 +1002,12 @@ combat_parallel_lapply <- function(idx, f, workers,
   # missing chunk is refused.
   tag <- function(k) structure(idx[[k]], combat_chunk = k)
   idx_tagged <- lapply(seq_along(idx), tag)
+  # f_tagged wraps every job, so its own frame travels on every task of every backend. Left on
+  # this frame it carried `idx`, the full duplicate `idx_tagged`, `tag` and `untag`: measured
+  # 22,295 B per task at 6,000 rows, about 150 KB at 18,270 genes, times chunks, times up to
+  # 2 * n_batch + 3 dispatches a run.
+  .lean_tag <- new.env(parent = parent.env(environment()))
+  .lean_tag$f <- f
   f_tagged <- function(ii) {
     k <- attr(ii, "combat_chunk")
     attr(ii, "combat_chunk") <- NULL
@@ -1016,6 +1022,7 @@ combat_parallel_lapply <- function(idx, f, workers,
             else Sys.setenv(RNAPARALLEL_IN_WORKER = prev), add = TRUE)
     list(combat_chunk = k, value = f(ii))
   }
+  environment(f_tagged) <- .lean_tag
 
   # Put results back in dispatch order and strip the wrapper. Anything that is not a tagged
   # result (a try-error, a NULL from a killed worker, a condition from foreach) is passed
@@ -1468,6 +1475,17 @@ glmFit_rows_parallel <- function(y, design, dispersion, offset, weights = NULL,
                                  prior.count = prior.count, start = start))
   }
 
+  # Rebuilt against an environment holding only what the body reads. A closure is serialised
+  # WITH its defining environment, so on a socket backend this frame's live bindings and its
+  # unforced promises travel with every task, and the promises reach back through the vendor's
+  # frames into the entry point's raw inputs. Invisible on a forking backend, where the child
+  # inherits the pages, which is why it survived this long.
+  # Measured on 1,200 x 60: the two glmFit dispatches went 5,560,242 B to 1,201,690 B and
+  # 8,013,222 B to 1,777,238 B.
+  .lean <- new.env(parent = parent.env(environment()))
+  .lean$y <- y; .lean$design <- design; .lean$dispersion <- dispersion
+  .lean$offset <- offset; .lean$weights <- weights
+  .lean$prior.count <- prior.count; .lean$start <- start
   fit_rows <- function(ii) {
     f <- edgeR::glmFit.default(
       y[ii, , drop = FALSE], design = design, dispersion = rp_per_gene(dispersion, ii),
@@ -1480,6 +1498,7 @@ glmFit_rows_parallel <- function(y, design, dispersion, offset, weights = NULL,
          df.residual = f$df.residual, unshrunk.coefficients = f$unshrunk.coefficients,
          method = f$method, failed = f$failed)
   }
+  environment(fit_rows) <- .lean
 
   fits <- combat_parallel_check(
     combat_parallel_lapply(idx, fit_rows, workers, parallel_backend, cells = length(y),
@@ -1693,11 +1712,21 @@ match_quantiles_parallel <- function(mq, counts_sub, old_mu, old_phi, new_mu, ne
   # against 6.4% drift in the serial reference over the same run. That is noise, and one arm
   # was slower. `future.apply` resolves the globals a closure actually reads rather than
   # shipping its whole frame, so the cost this was aimed at was not being paid to begin with.
+  # Rebuilt against an environment holding only what the body reads. A closure is serialised
+  # WITH its defining environment, so on a socket backend this frame's live bindings and its
+  # unforced promises travel with every task, and the promises reach back through the vendor's
+  # frames into the entry point's raw inputs. Invisible on a forking backend, where the child
+  # inherits the pages, which is why it survived this long.
+  # Measured on 1,200 x 60 counts: 8,603,855 B shipped per task against 662,975 B after.
+  .lean <- new.env(parent = parent.env(environment()))
+  .lean$mq_fun <- mq_fun; .lean$counts_sub <- counts_sub; .lean$old_mu <- old_mu
+  .lean$old_phi <- old_phi; .lean$new_mu <- new_mu; .lean$new_phi <- new_phi
   do_rows <- function(ii) mq_fun(counts_sub = counts_sub[ii, , drop = FALSE],
                                  old_mu = old_mu[ii, , drop = FALSE],
                                  old_phi = old_phi[ii],
                                  new_mu = new_mu[ii, , drop = FALSE],
                                  new_phi = new_phi[ii])
+  environment(do_rows) <- .lean
 
   parts <- combat_parallel_check(
     combat_parallel_lapply(idx, do_rows, workers, parallel_backend, cells = length(counts_sub)),
@@ -1809,10 +1838,20 @@ estimateGLMTagwiseDisp_rows_parallel <- function(y, design = NULL, dispersion = 
 
   idx <- combat_row_chunks(ntag, workers = workers, chunks = chunks)
 
+  # Rebuilt against an environment holding only what the body reads. A closure is serialised
+  # WITH its defining environment, so on a socket backend this frame's live bindings and its
+  # unforced promises travel with every task, and the promises reach back through the vendor's
+  # frames into the entry point's raw inputs. Invisible on a forking backend, where the child
+  # inherits the pages, which is why it survived this long.
+  .lean <- new.env(parent = parent.env(environment()))
+  .lean$y <- y; .lean$design <- design; .lean$offset <- offset
+  .lean$dispersion <- dispersion; .lean$trend <- trend; .lean$span <- span
+  .lean$AveLogCPM <- AveLogCPM; .lean$weights <- weights
   disp_rows <- function(ii) edgeR::estimateGLMTagwiseDisp(
     y[ii, , drop = FALSE], design = design, offset = rp_rows(offset, ii),
     dispersion = rp_per_gene(dispersion, ii), prior.df = 0, trend = trend,
     span = span, AveLogCPM = AveLogCPM[ii], weights = rp_rows(weights, ii))
+  environment(disp_rows) <- .lean
 
   # higher threshold than the other two paths: measured on 10-column slices this path
   # returns 0.65x at 10,000 cells, 0.79x at 20,000, 1.08x at 30,000 and 1.44x at 50,000

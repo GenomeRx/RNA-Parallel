@@ -349,6 +349,18 @@ duplicateCorrelation_parallel <- function(object, design = NULL, ndups = 2L, spa
   # lm.fit, so clamping to 2 here only cost parallelism on tiny inputs.
   idx <- combat_row_chunks(ngenes, workers = workers, chunks = chunks, min_rows = 1L)
 
+  # Rebuilt against an environment holding only what the body reads. A closure is serialised
+  # WITH its defining environment, so on a socket backend this frame's live bindings and its
+  # unforced promises travel with every task, and the promises reach back through the vendor's
+  # frames into the entry point's raw inputs. Invisible on a forking backend, where the child
+  # inherits the pages, which is why it survived this long.
+  # Measured on a 4,000 x 24 EList: 5,961,556 B per task against 1,723,655 B. `object`,
+  # `eawp` and `w_raw` are two extra full copies of the expression data the body never reads,
+  # and on a DGEList input `object` is disjoint from M entirely, so it is pure dead weight.
+  .lean <- new.env(parent = parent.env(environment()))
+  .lean$dc <- dc; .lean$M <- M; .lean$design <- design; .lean$ndups <- ndups
+  .lean$spacing <- spacing; .lean$block <- block; .lean$trim <- trim
+  .lean$weights <- weights; .lean$rp_weights_rows <- rp_weights_rows
   fit_block <- function(ii) {
     conds <- list()
     keep <- function(cnd) conds[[length(conds) + 1L]] <<- cnd
@@ -360,6 +372,7 @@ duplicateCorrelation_parallel <- function(object, design = NULL, ndups = 2L, spa
       message = function(m) { keep(m); invokeRestart("muffleMessage") })
     list(value = value, conds = conds)
   }
+  environment(fit_block) <- .lean
 
   # One gene is one REML fit, so this earns a fork at far smaller sizes than the row-split
   # paths do, but not at every size. Counted in cells rather than genes because the per-gene
