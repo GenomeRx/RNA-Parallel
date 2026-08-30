@@ -537,7 +537,7 @@ calcNormFactors_parallel <- function(object, lib.size = NULL,
                                      doWeighting = TRUE, Acutoff = -1e10, p = 0.75, ...,
                                      workers = NULL, chunks = NULL,
                                      parallel_backend = getOption("combat.backend",
-                                                                  "mclapply"),
+                                                                  combat_default_backend()),
                                      backend = NULL, label = NULL) {
   # no run leaves workers behind, crashed or not; children that predate this call are
   # someone else's and are spared

@@ -528,9 +528,14 @@ combat_default_workers <- function(workers = NULL) {
 
 #' Performance cores, distinguished from total cores on a hybrid CPU
 #'
-#' Only Darwin had a real answer here (`sysctl hw.perflevel0.physicalcpu`); everything else fell
-#' through to `detectCores(logical = FALSE)`, which reports 16 on an Ultra 185H that has 6
-#' performance cores and 10 efficiency ones. That is not a rounding error, it is the difference
+#' There used to be two of these and they disagreed. This one read the SMT topology and
+#' answered 8 on an Apple M3; a second copy inside `combat_parallel_lapply` shelled out to
+#' `sysctl hw.perflevel0.physicalcpu` and answered 4, which is right. One routine now, asking
+#' each platform the best question it can answer, memoised once.
+#'
+#' Darwin reports performance cores outright, so it is asked first. Everything else falls back
+#' to the topology, because `detectCores(logical = FALSE)` reports 16 on an Ultra 185H that has
+#' 6 performance cores and 10 efficiency ones -- not a rounding error, but the difference
 #' between a sensible default and one that recruits ten slow workers.
 #'
 #' The topology answers it without a vendor table: on Intel hybrid parts only performance cores
@@ -545,11 +550,19 @@ combat_default_workers <- function(workers = NULL) {
 rp_perf_cores <- function() {
   p <- .combat_clusters$perfcores
   if (!is.null(p)) return(p)
-  phys <- suppressWarnings(parallel::detectCores(logical = FALSE))
-  logi <- suppressWarnings(parallel::detectCores(logical = TRUE))
-  if (is.na(phys) || phys < 1L) phys <- if (is.na(logi) || logi < 1L) 1L else logi
-  smt <- if (is.na(logi)) 0L else logi - phys
-  p <- if (smt > 0L && smt < phys) smt else phys   # hybrid: only P-cores carry SMT
+  # Darwin reports performance cores outright; nothing else here does.
+  p <- suppressWarnings(as.integer(
+    if (identical(Sys.info()[["sysname"]], "Darwin"))
+      tryCatch(system2("sysctl", c("-n", "hw.perflevel0.physicalcpu"),
+                       stdout = TRUE, stderr = FALSE), error = function(e) NA)
+    else NA))
+  if (length(p) != 1L || is.na(p) || p < 1L) {
+    phys <- suppressWarnings(parallel::detectCores(logical = FALSE))
+    logi <- suppressWarnings(parallel::detectCores(logical = TRUE))
+    if (is.na(phys) || phys < 1L) phys <- if (is.na(logi) || logi < 1L) 1L else logi
+    smt <- if (is.na(logi)) 0L else logi - phys
+    p <- if (smt > 0L && smt < phys) smt else phys   # hybrid: only P-cores carry SMT
+  }
   p <- max(1L, as.integer(p))
   .combat_clusters$perfcores <- p
   p
@@ -664,7 +677,14 @@ combat_cluster <- function(ncore, type = if (.Platform$OS.type == "windows") "PS
   # exactly as the handle is, and reaping first let a child kill workers its parent still had.
   combat_retired_reap()
   cl <- entry$cl
-  if (!is.null(cl) && length(cl) != ncore) {
+  # Only when the pool is too SMALL. Rebuilding on any width change is what made foreach
+  # collapse: ComBat-seq alternates between batch-level and row-level dispatches and so asks
+  # for different widths within one run, and each change tore the pool down and built another.
+  # Measured on PSOCK, 20 calls alternating 3/6 workers: 6299 ms against 22 ms at a fixed
+  # width, 315 ms per call against 1.1 ms. A wider pool serves a narrower request by handing
+  # back the first `ncore` nodes; the surplus sits idle, concurrency is unchanged, and chunk
+  # placement is decided by the tag rather than by which node ran what.
+  if (!is.null(cl) && length(cl) < ncore) {
     tracked <- combat_retire(entry)
     closed <- combat_cluster_teardown(cl)
     rm(list = key, envir = .combat_clusters)
@@ -746,13 +766,24 @@ combat_cluster <- function(ncore, type = if (.Platform$OS.type == "windows") "PS
   # FORK workers inherit them. Done on every call rather than only at creation: one pool is
   # cached per TYPE and shared by callers needing different packages, so a cluster built for
   # an edgeR dispatch would otherwise reach a limma closure with limma absent.
+  # Send only what this pool has not already loaded. A worker cannot unload a namespace, and
+  # every path that replaces the workers writes a fresh cache entry with no record, so the memo
+  # resets exactly when they do. Measured 2.78 ms per dispatch of pure socket round trips, paid
+  # up to 2 * n_batch + 3 times a run.
   if (type == "PSOCK" && length(packages)) {
-    for (pkg in packages) {
-      invisible(parallel::clusterCall(
-        cl, function(p) suppressMessages(requireNamespace(p, quietly = TRUE)), pkg))
+    entry <- .combat_clusters[[key]]
+    todo <- setdiff(packages, entry$packages_loaded)
+    if (length(todo)) {
+      for (pkg in todo) {
+        invisible(parallel::clusterCall(
+          cl, function(p) suppressMessages(requireNamespace(p, quietly = TRUE)), pkg))
+      }
+      entry$packages_loaded <- c(entry$packages_loaded, todo)
+      assign(key, entry, envir = .combat_clusters)
     }
   }
-  cl
+  # A pool wider than asked for serves the request from its first `ncore` nodes.
+  if (length(cl) > ncore) cl[seq_len(ncore)] else cl
 }
 
 #' Stop and forget every cluster this package cached
@@ -773,9 +804,11 @@ combat_cluster <- function(ncore, type = if (.Platform$OS.type == "windows") "PS
 combat_cluster_stop <- function() {
   # the cache holds plain flags beside the cluster handles; sweeping them would delete
   # registered_by_us before the foreach reset below reads it, and re-arm the one-time messages
+  # perfcores belongs here as much as allcores does. Left off, the `!is.list(entry)` sweep
+  # below deleted the memo on every stop and the next call paid another detectCores() pair.
   keys <- setdiff(ls(.combat_clusters),
                   c("warned_windows", "warned_ecores", "registered_by_us", "perf",
-                    "allcores", "bpparam", "retired"))
+                    "perfcores", "allcores", "bpparam", "retired"))
   combat_retired_reap()                 # for its effect; it counts entries, not clusters
   stopped <- 0L
   for (k in keys) {
@@ -1057,19 +1090,7 @@ combat_parallel_lapply <- function(idx, f, workers,
   # when it is really a chunking result.
   # Memoised: both branches spawn a process on macOS, about 10 ms each, and one ComBat-seq
   # run dispatches up to 2 * n_batch + 3 times. The core count does not change mid-session.
-  perf <- .combat_clusters$perf
-  if (is.null(perf)) {
-    perf <- suppressWarnings(as.integer(
-      if (identical(Sys.info()[["sysname"]], "Darwin"))
-        tryCatch(system2("sysctl", c("-n", "hw.perflevel0.physicalcpu"),
-                         stdout = TRUE, stderr = FALSE), error = function(e) NA)
-      else NA))
-    if (length(perf) != 1L || is.na(perf) || perf < 1L) {
-      perf <- suppressWarnings(parallel::detectCores(logical = FALSE))
-    }
-    if (is.na(perf) || perf < 1L) perf <- parallel::detectCores()
-    .combat_clusters$perf <- perf
-  }
+  perf <- rp_perf_cores()
 
   # Memoised for the same reason as perf: detectCores() spawns a process on macOS, measured
   # 13 ms, and this ran on every forking dispatch on every backend.
@@ -1083,11 +1104,19 @@ combat_parallel_lapply <- function(idx, f, workers,
   }
   ncore <- min(workers, length(idx), cores_cap)
 
-  if (ncore > perf && is.null(.combat_clusters$warned_ecores)) {
+  # Only where the dispatch does NOT fork. A forked worker on an efficiency core still adds
+  # throughput, because it shares the parent's pages rather than being handed a copy: the
+  # macOS run measures 5.37x at eight workers on a chip with four performance cores. Ungated,
+  # this fired on a stock M3 at the package's OWN default -- min(8, 8 - 2) = 6 against 4
+  # performance cores -- so the package warned that its default might be slower than a number
+  # it had declined to pick, and contradicted its own published measurement. Over sockets the
+  # warning is real, because there each added worker also costs a serialised copy.
+  if (!rp_forking(parallel_backend) && ncore > perf &&
+      is.null(.combat_clusters$warned_ecores)) {
     .combat_clusters$warned_ecores <- TRUE
     message("workers = ", workers, " exceeds the ", perf, " performance core(s) this machine ",
-            "reports. Past that point each added worker returns less throughput than the one ",
-            "before it, so this can be slower than workers = ", perf, ".")
+            "reports. Without fork() each added worker also costs a serialised copy, so past ",
+            "that point this can be slower than workers = ", perf, ".")
   }
 
   switch(parallel_backend,
@@ -1096,8 +1125,13 @@ combat_parallel_lapply <- function(idx, f, workers,
       if (.Platform$OS.type == "windows") {
     # a silent serial run looks identical to a parallel one until you time it
     if (is.null(.combat_clusters$warned_windows)) {
+      # Not foreach. Measured on Windows, foreach fell 1.18x, 0.94x, 0.57x, 0.28x at 2, 4, 8
+      # and 16 workers while future held 2.92x on the cohort, and combat_default_backend()
+      # picks future itself once a plan exists. Sending people to the slower one at the exact
+      # moment they discover the problem is the opposite of helping.
       message("mclapply cannot fork on Windows, so this ran serially. ",
-              "Use parallel_backend = \"foreach\" for parallelism here.")
+              "Set future::plan(future::multisession, workers = N) and this will use the ",
+              "future backend automatically.")
       .combat_clusters$warned_windows <- TRUE
     }
     rp_count_serial_after_all()   # it did not fork; the line must not claim it did
