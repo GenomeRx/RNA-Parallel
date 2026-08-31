@@ -118,34 +118,25 @@ c(ComBat_seq        = identical(ComBat_seq_parallel(counts, batch, group = NULL,
 #>              TRUE
 ```
 
-Four thousand cells is under every size gate, so those arms run serially and are still
-`identical()`. [run_example.R](inst/examples/run_example.R) runs the same comparison at a size
-where the speedup shows, in minutes, still with nothing to download.
+Four thousand cells sits under every size gate, so this runs serially and is still `identical()`.
+[run_example.R](inst/examples/run_example.R) runs the same check at a size where speedup shows.
 
 ```sh
 Rscript inst/examples/run_example.R
 ```
 
-Rendered reports carry it at cohort scale, same sections on all three platforms: cohort,
-argument parity, corrections, PCA, differential expression, worker sweep.
+Rendered reports carry it at cohort scale — same sections on all three platforms:
 [macOS](https://genomerx.github.io/RNA-Parallel/) ·
 [Linux](https://genomerx.github.io/RNA-Parallel/linux.html) ·
-[Windows](https://genomerx.github.io/RNA-Parallel/windows.html). Sources are
-[RNA_Parallel.Rmd](inst/examples/RNA_Parallel.Rmd),
-[RNA_Parallel_linux.Rmd](inst/examples/RNA_Parallel_linux.Rmd) and
-[RNA_Parallel_windows.Rmd](inst/examples/RNA_Parallel_windows.Rmd), rendered with
-[render_macos.sh](inst/examples/render_macos.sh),
-[render_linux.sh](inst/examples/render_linux.sh) and
-[render_windows.ps1](inst/examples/render_windows.ps1), each of which pins BLAS before R starts,
-because a BLAS reads its thread count when the library loads and setting it inside the session
-is too late.
-The Windows report adds a backend sweep the other two do not need, because without `fork()` the
-backend decides whether anything runs in parallel at all. The first run
-downloads HNSC, LUAD and LUSC to the per-user cache, or `RNAPARALLEL_TCGA_DIR` if set.
+[Windows](https://genomerx.github.io/RNA-Parallel/windows.html). Sources in
+[inst/examples/](inst/examples/), rendered with each platform's own script, which pins BLAS
+before R starts (a BLAS reads its thread count at load time, too late to set in-session). Windows
+also sweeps backends, since without `fork()` the backend decides whether anything runs parallel at
+all. First run downloads HNSC/LUAD/LUSC to the per-user cache, or `RNAPARALLEL_TCGA_DIR` if set.
 
-[tests/](tests/testthat) covers every argument path, chunk layout and backend, plus a dispatch
-count through the public entry point, because `identical()` alone cannot tell a working parallel
-layer from a dead one. Over 400 assertions.
+[tests/](tests/testthat) covers every argument path, chunk layout, backend, and dispatch count
+through the public entry point — `identical()` alone can't tell a working parallel layer from a
+dead one. 400+ assertions.
 
 ### Seeing what is running
 
@@ -171,48 +162,46 @@ The fix is to restart R.
 
 ## How it works
 
-`ComBat_seq_parallel()` creates a child of the original's environment, binds six names in it, and
-calls `sva::ComBat_seq` unchanged. Shares are of serial time on 10,000 genes by 500 samples.
+`ComBat_seq_parallel()` creates a child of the original's environment, binds six names, and calls
+`sva::ComBat_seq` unchanged. Shares below are of serial time on 10,000 genes by 500 samples.
 
-| ComBat-seq calls | share | split by | why that is exact |
+| ComBat-seq calls | share | split by | why exact |
 |---|---|---|---|
 | `match_quantiles` | 66.5% | gene rows | each output cell reads only its own gene |
 | `estimateGLMTagwiseDisp` | 14.0% | gene rows | valid at `prior.df = 0`; other values go to `edgeR` unsplit |
-| `estimateGLMCommonDisp` | 13.1% | batches | it sums over all genes, so a row split changes accumulation order; batches are independent and RNG-free |
-| `glmFit`, `glmFit.default` | remainder | gene rows | offset, dispersion, weights and start arrive explicitly and slice with the rows |
+| `estimateGLMCommonDisp` | 13.1% | batches | sums over all genes, so batches split independently, RNG-free |
+| `glmFit`, `glmFit.default` | remainder | gene rows | offset/dispersion/weights/start slice with the rows |
 | `monte_carlo_int_NB` | small | serial | draws depend on the previous batch's state |
 
-`calcNormFactors_parallel()` splits by sample column, `lmFit_parallel()` and
-`duplicateCorrelation_parallel()` by gene row. `removeBatchEffect_parallel()` splits nothing: it
-rebinds the one `lmFit` call inside the original to `lmFit_parallel()` and inherits its curve, which
-still pays, because the original does not finish inside ten minutes at 9,493 samples. Chunks are
-interleaved so a sorted matrix does not leave workers idle, each carries a tag, and a dead worker,
-duplicate chunk or short result halts the run.
+`calcNormFactors_parallel()` splits by sample column, `lmFit_parallel()`/`duplicateCorrelation_parallel()`
+by gene row. `removeBatchEffect_parallel()` splits nothing — it rebinds the one `lmFit` call
+inside the original and inherits its curve (still pays: the original doesn't finish in ten minutes
+at 9,493 samples). Chunks interleave so a sorted matrix doesn't idle a worker; a dead worker,
+duplicate chunk, or short result halts the run.
 
-**What stays serial keeps the output identical:** anything reducing across genes (`eBayes`,
-`squeezeVar`, `fitFDist`, `arrayWeights`, `normalizeBetweenArrays`, `normalizeQuantiles`) or
-scaling with gene count (`voom`'s `lowess` span, `p.adjust` and so `topTable` and `decideTests`).
-`contrasts.fit` takes 0.001 s, less than a fork. `lmFit(method = "robust")` and `ndups >= 2`
-reshape the row axis through `unwrapdups` and error rather than split, which is why `block` is
-required for `duplicateCorrelation_parallel`.
+**Stays serial → output stays identical:** anything reducing across genes (`eBayes`, `squeezeVar`,
+`fitFDist`, `arrayWeights`, `normalizeBetweenArrays`, `normalizeQuantiles`) or scaling with gene
+count (`voom`'s `lowess` span, `p.adjust`, `topTable`, `decideTests`). `contrasts.fit` takes
+0.001s, less than a fork. `lmFit(method = "robust")` and `ndups >= 2` reshape rows and error
+rather than split — why `block` is required for `duplicateCorrelation_parallel`.
 
-**Built, measured, deleted,** because a modest speedup does not buy different numbers.
+**Built, measured, deleted** — modest speedup doesn't buy different numbers:
 
 | companion | reached | what it moved |
 |---|---|---|
 | `estimateDisp` | 1.4x | 19,999 of 20,000 tagwise dispersions, once one library was over-sequenced |
-| `glmQLFit` | 1.6x | 22 of 18,270 TCGA genes, where `mglmLevenberg` records a non-convergent deviance that depends on which genes share the block, with no flag set |
+| `glmQLFit` | 1.6x | 22 of 18,270 TCGA genes, non-convergent deviance depending on block membership, no flag set |
 
-**Three ways a limma row split goes wrong,** each reproduced against limma 3.62.2, each returning
-a wrong answer quietly rather than failing.
+**Three limma row-split traps,** reproduced against limma 3.62.2, each returning a wrong answer
+quietly:
 
 | trap | wrong answer | guard |
 |---|---|---|
-| `asMatrixWeights` dispatches on the *block's* row count | a per-array weight vector reads as per-gene weights in any block whose height equals the sample count | weights expanded once against the whole matrix |
-| `NoProbeWts` is an AND-reduction selecting between two numerically different algorithms | an all-finite block takes the fast path while the whole matrix took the slow one | the branch is proven unable to flip before anything is split |
-| `stats::lm.fit` drops a one-column response to a vector | a one-gene block swaps `colMeans` for `mean` | at least two genes per chunk |
+| `asMatrixWeights` dispatches on *block's* row count | per-array weights read as per-gene when block height = sample count | weights expanded once against the whole matrix |
+| `NoProbeWts` is an AND-reduction between two algorithms | an all-finite block takes the fast path the whole matrix didn't | branch proven unable to flip before split |
+| `stats::lm.fit` drops a one-column response to a vector | one-gene block swaps `colMeans` for `mean` | at least two genes per chunk |
 
-One inner loop is pinned to the original body it came from and stands down on any upstream change:
+One inner loop is pinned to the original body and stands down on any upstream change:
 `sva::match_quantiles`, 66.5% of ComBat-seq's serial time. See [License](#license).
 
 ## Cross-platform
@@ -302,20 +291,19 @@ pass-through. On that input, call the original.
 | `chunks` | `workers` | only to cut peak memory per worker |
 | `parallel_backend` | `"mclapply"` | you cannot fork, or a cluster is already running |
 
-`workers` is not a safety ceiling. Six of them alongside a second forking R session have
-kernel-panicked a 24 GB machine, and nothing here can see that session.
+`workers` is not a safety ceiling — six workers alongside a second forking R session have
+kernel-panicked a 24 GB machine; nothing here can see that other session.
 
-**Backends** are `"mclapply"` (forks), `"future"`, `"BiocParallel"`, `"foreach"`, `"serial"`, or any
-`function(idx, f, workers)`, all returning identical results. Forking is the default because a
-forked worker reads the matrix copy-on-write, while socket backends re-serialise it per chunk and
-measured slower than not parallelising at all.
+**Backends:** `"mclapply"` (forks, default), `"future"`, `"BiocParallel"`, `"foreach"`, `"serial"`,
+or any `function(idx, f, workers)` — all return identical results. Forking wins by default because
+a forked worker reads the matrix copy-on-write; socket backends re-serialise per chunk and
+measured slower than not parallelising.
 
-**Windows** cannot fork, so the backend is the whole decision there. `mclapply` runs serially and
-says so once; `BiocParallel` substitutes a serial parameter. That leaves two that really do run
-workers, and they are not interchangeable: `"foreach"` measured 1.18x, 0.94x, 0.57x and 0.28x at 2,
-4, 8 and 16 workers, getting *worse* with every worker added, because the cached cluster is rebuilt
-whenever the requested width changes and ComBat-seq alternates widths on every dispatch. `"future"`
-holds one `multisession` pool across all of them and shows the ordinary shape.
+**Windows can't fork**, so backend choice is the whole decision. `mclapply` runs serially (says so
+once); `BiocParallel` substitutes a serial param. Of the two that actually parallelize, they're not
+interchangeable: `"foreach"` gets *worse* with more workers (1.18x→0.28x at 2→16w) because its
+cached cluster rebuilds on every width change and ComBat-seq alternates widths per dispatch.
+`"future"` holds one `multisession` pool across all of them and scales normally.
 
 **Set a plan and the package picks `"future"` for you:**
 
@@ -323,45 +311,33 @@ holds one `multisession` pool across all of them and shows the ordinary shape.
 library(future); plan(multisession, workers = 6)   # that is all
 ```
 
-The default backend is resolved per call, so an active plan selects `"future"` and no plan leaves
-`mclapply` and its one-time serial notice. This package will not set a plan for you — a caller's
-plan is theirs, and starting worker processes inside someone's session unasked is worse than being
-slow — which is also why the default is not simply `"future"`: without a plan that would mean a
-warning on every dispatch and no speedup at all.
+Backend resolves per call: an active plan selects `"future"`; no plan leaves `mclapply` (one-time
+serial notice). The package never sets a plan itself — a caller's plan is theirs, and starting
+workers inside someone's session unasked is worse than being slow.
 
-**Nesting** is blocked on every backend: a dispatch that finds itself already inside one of this
-package's workers runs serially. On fork that used to rest on `mc.allow.recursive = FALSE`, which
-covered only that branch — over PSOCK the same construction spawned workers + workers^2 processes.
-Both guards are in place now, and they answer differently for a loop that is *yours*: nothing
-marks your workers, so on a socket backend a companion called inside your own loop still
-dispatches, while on the default `mclapply` backend `mc.allow.recursive = FALSE` still degrades it
-to serial. Either way, spend the worker budget *inside* a loop body rather than across it.
-Inverting one 15-cohort screen measured 245 s to 81.6 s.
+**Nesting is blocked on every backend** — a dispatch already inside one of this package's workers
+runs serially (via `mc.allow.recursive = FALSE` on fork; an equivalent guard over PSOCK, which
+used to spawn workers² processes without it). Your own loop is unaffected either way — spend the
+worker budget *inside* a loop body, not across it. Inverting one 15-cohort screen measured 245s →
+81.6s.
 
-**Size gates** are why a small input shows no speedup. Nine options set the size below which a
-call runs serially: `combat.min.cells` (20,000), `combat.min.disp.cells` (30,000),
+**Size gates** are why small inputs show no speedup. Nine options set the cell/gene count below
+which a call runs serially: `combat.min.cells` (20,000), `combat.min.disp.cells` (30,000),
 `combat.min.glm.cells` (100,000), `combat.min.ls.cells` (6e6), `combat.min.norm.cells` (2e5),
-`combat.min.order.cells` (4e6), `combat.min.dupcor.cells` (5,000),
-`combat.min.batch.cells` (20,000) and `combat.min.wt.genes` (2,000). All but the last are
-counted in matrix cells; `combat.min.wt.genes` is counted in GENES, because limma's weighted
-branch is an interpreted per-gene loop whose cost barely moves with array count, so genes are
-what amortise the fork.
+`combat.min.order.cells` (4e6), `combat.min.dupcor.cells` (5,000), `combat.min.batch.cells`
+(20,000), `combat.min.wt.genes` (2,000, counted in genes not cells — limma's weighted branch is a
+per-gene loop that barely moves with array size).
 
-Those are *fork* break-evens, and two of them move without fork, in opposite directions because
-the underlying work is not alike. `lmFit` is cheap enough per cell that a serialised chunk is
-never repaid — measured 0.14x at 21.6M cells and 0.24x at 60M, improving with size and never
-reaching parity — so `combat.min.ls.cells` **closes** on Windows rather than merely rising, which
-also covers `removeBatchEffect_parallel()` since the original rebinds one `lmFit` call. The TMM
-column loop does pay once it is big enough — 1.05x at 1.8M cells against 1.58x at 21.6M — so
-`combat.min.norm.cells` **rises** to 2e6 instead, an order of magnitude above the fork value.
-Set either explicitly to override. Output is `identical()` either way: a gate decides who
-computes, never what is computed.
-`options(combat.fork = FALSE)` forces serial everywhere, `combat_cluster_stop()` releases cached
+Two gates move without fork, in opposite directions: `lmFit` never reaches parity on Windows
+(0.14x at 21.6M cells, 0.24x at 60M) so `combat.min.ls.cells` **closes** there (covers
+`removeBatchEffect_parallel()` too, since it rebinds one `lmFit` call). TMM pays once big enough
+(1.05x at 1.8M cells → 1.58x at 21.6M) so `combat.min.norm.cells` **rises** to 2e6. Override either
+explicitly — output is `identical()` regardless; a gate decides who computes, never what.
+`options(combat.fork = FALSE)` forces serial everywhere; `combat_cluster_stop()` releases cached
 clusters.
 
-**`calcNormFactors_parallel()`** wraps `normLibSizes` on current edgeR and `calcNormFactors` on
-older ones. `normLibSizes` **errors** on negative counts where the old name returned NaN-warned
-factors.
+**`calcNormFactors_parallel()`** wraps `normLibSizes` on current edgeR, `calcNormFactors` on older
+ones. `normLibSizes` **errors** on negative counts where the old name returned NaN-warned factors.
 
 ## License
 
