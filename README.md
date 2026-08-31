@@ -15,7 +15,9 @@ Rendered analysis: [macOS](https://genomerx.github.io/RNA-Parallel/) ·
 
 TCGA, 18,270 genes by 1,500 tumours. Every arm `identical()` to the original on all three platforms.
 
-| companion | runs | macOS<br>M3, 4P+4E | Linux<br>2x Xeon, 16 cores | Windows<br>Ultra 9 185H, 6P+10E |
+macOS: M3, 4P+4E. Linux: 2x Xeon, 16 cores. Windows: Ultra 9 185H, 6P+10E.
+
+| companion | runs | macOS | Linux | Windows |
 |---|---|---:|---:|---:|
 | `ComBat_seq_parallel()` | `sva::ComBat_seq` | 5.43x @ 8w | **9.34x @ 16w** | 3.57x @ 6w |
 | `calcNormFactors_parallel()` | `edgeR::normLibSizes` | **6.78x @ 8w** | 4.12x @ 8w | 1.74x @ 2w |
@@ -23,30 +25,24 @@ TCGA, 18,270 genes by 1,500 tumours. Every arm `identical()` to the original on 
 | `duplicateCorrelation_parallel()` | `limma::duplicateCorrelation` | 3.79x @ 6w | **7.22x @ 16w** | 2.07x @ 4w |
 | `removeBatchEffect_parallel()` | `limma::removeBatchEffect` | **2.97x @ 6w** | 1.39x @ 8w | 0.90x @ 2w |
 
-Originals are timed on both sides of the companion arms and averaged; short stages are the best
-of three. Bold marks the fastest platform. Machine specs and what separates them are in
-[Cross-platform](#cross-platform).
+Originals are timed on both sides and averaged (best of three for short stages). Bold = fastest
+platform per row. Full specs and the "why" in [Cross-platform](#cross-platform).
 
-**Windows is the odd column and the reason is architectural, not incidental.** It has no
-`fork()`, so a worker is a whole process that receives a copy rather than sharing the parent's
-pages, and only 6 of its 16 cores are performance cores. Both facts pull the useful worker count
-down, and the ComBat-seq curve shows it directly: 2.12x, 3.34x, **3.57x**, 3.54x at 2, 4, 6 and 8
-workers, peaking exactly on the performance-core count and turning over after.
+**Windows has no `fork()`.** A worker is a whole copied process, not a shared-memory fork, and
+only 6 of its 16 cores are performance cores — both cap the useful worker count. ComBat-seq shows
+it directly: 2.12x, 3.34x, **3.57x**, 3.54x at 2/4/6/8 workers, peaking at the P-core count.
 
-The `lmFit` and `removeBatchEffect` rows are not speedups and should not be read as any. Both
-gates close on a platform that copies, so what those two ratios measure is the original call plus
-the wrapper around it, scattering either side of 1.00x rather than climbing: 1.10x and 0.90x. The
-honest Windows contribution for those two is parity.
+**`lmFit` and `removeBatchEffect` on Windows are not speedups (1.10x, 0.90x).** Their size gates
+close on this platform, so the companion just runs the original plus wrapper overhead — call that
+parity, not a result.
 
-Read the seconds as well as the ratios. Nothing about a ratio says which machine finishes first:
-the dual Xeon posts the highest number on four rows and still loses ComBat-seq on the clock to a
-laptop chip, 325.9 s against the M3's 298.6 s, because it starts from a 3,043.8 s original where
-the M3 starts from 1,619.8 s. Windows is last on both counts here, 720.1 s against 298.6 s.
+Ratios don't predict wall clock: the dual Xeon wins 4 of 5 rows but still loses ComBat-seq on time
+to the M3 (325.9s vs 298.6s) because it starts from a slower original (3,043.8s vs 1,619.8s).
+Windows is last on both counts, 720.1s vs 298.6s.
 
-**Nothing is reimplemented.** The original function is the one that runs. It is called with its
-hot paths rebound in a child of its own environment, so every other symbol still resolves to
-original code. A companion is worth keeping only if it returns exactly what it replaces, so the
-suite asserts `identical()` rather than a tolerance.
+**Nothing is reimplemented.** The original function runs, called with hot paths rebound in a child
+of its own environment — every other symbol still resolves to original code. `identical()` is
+asserted, not a tolerance.
 
 ## Install
 
@@ -236,37 +232,32 @@ macOS, Linux and Windows; fork and socket dispatch; threaded and single-threaded
 | Backend | `mclapply` | `mclapply` | `future` (`multisession`) |
 | Workers swept | 2, 4, 6, 8 | 2, 4, 8, 16 | 2, 4, 6, 8 |
 
-Absolute wall clock at cohort scale, every companion. Original is the serial upstream function; best is the
-fastest companion arm on that machine, with its worker count. Bold marks the fastest platform.
+Absolute wall clock at cohort scale. Original is the serial upstream call; best is the fastest
+companion arm, with its worker count. Bold = fastest platform per stage.
 
-| stage | macOS original | macOS best | Linux original | Linux best | Windows original | Windows best |
-|---|---:|---:|---:|---:|---:|---:|
-| ComBat-seq | 1,619.8 s | **298.6 s** (8w) | 3,043.8 s | 325.9 s (16w) | 2,573.3 s | 720.1 s (6w) |
-| duplicateCorrelation | 663.7 s | 175.0 s (6w) | 469.1 s | **64.9 s** (16w) | 784.8 s | 379.3 s (4w) |
-| calcNormFactors (TMM) | 10.3 s | **1.5 s** (8w) | 19.5 s | 4.7 s (8w) | 26.5 s | 15.2 s (2w) |
-| lmFit | 4.4 s | **1.5 s** (8w) | 11.4 s | 3.4 s (16w) | 10.1 s | 9.2 s (4w) |
-| removeBatchEffect | 4.5 s | **1.5 s** (6w) | 2.5 s | 1.8 s (8w) | 4.4 s | 4.9 s (2w) |
+| stage | macOS | Linux | Windows |
+|---|---:|---:|---:|
+| ComBat-seq | 1,619.8s → **298.6s** (8w) | 3,043.8s → 325.9s (16w) | 2,573.3s → 720.1s (6w) |
+| duplicateCorrelation | 663.7s → 175.0s (6w) | 469.1s → **64.9s** (16w) | 784.8s → 379.3s (4w) |
+| calcNormFactors (TMM) | 10.3s → **1.5s** (8w) | 19.5s → 4.7s (8w) | 26.5s → 15.2s (2w) |
+| lmFit | 4.4s → **1.5s** (8w) | 11.4s → 3.4s (16w) | 10.1s → 9.2s (4w) |
+| removeBatchEffect | 4.5s → **1.5s** (6w) | 2.5s → 1.8s (8w) | 4.4s → 4.9s (2w) |
 
 Speedup is a ratio and rewards a slower core: Linux scales further, 9.34x against 5.43x, and
-still finishes behind at 325.9 s against 298.6 s. Read the seconds. On Linux, pin
-`OPENBLAS_NUM_THREADS` before R starts or every forked worker opens its own thread pool, though it
-changes little here: unpinning moves DGEMM throughput 3.6x, from 61 to 216 GFLOPS, and `lmFit` by
-0.3%, because limma solves a small QR per gene.
+still finishes behind at 325.9s vs 298.6s. On Linux, pin `OPENBLAS_NUM_THREADS` before R starts —
+otherwise every forked worker opens its own thread pool (unpinning moves DGEMM 3.6x, 61→216
+GFLOPS, though `lmFit` barely changes since limma solves a small QR per gene).
 
-Windows reads lowest on ratio and last on the clock. Its original baseline sits between the other
-two, 2,573.3 s against the M3's 1,619.8 s and the Xeon's 3,043.8 s, so it is not the
-short-baseline story the previous box told; it is simply slower to finish, 720.1 s against 298.6 s
-and 325.9 s. What it cannot do is scale as far, and that is architectural rather than incidental:
-no `fork()`, so a worker is a whole process that receives a copy instead of sharing the parent's
-pages, and only 6 of its 16 cores are performance cores. Both push the useful worker count down,
-and the ComBat-seq curve shows it directly -- 2.12x, 3.34x, **3.57x**, 3.54x at 2, 4, 6 and 8
-workers, peaking on the performance-core count and turning over after.
+Windows reads lowest on ratio and last on the clock — but its original baseline (2,573.3s) sits
+between the M3 (1,619.8s) and Xeon (3,043.8s), so this isn't a short-baseline story, it's just
+slower to finish (720.1s vs 298.6s/325.9s). What caps it is architectural: no `fork()` means a
+worker is a full copied process, and only 6 of 16 cores are performance cores. Both cap the useful
+worker count — ComBat-seq peaks at 3.57x at 6 workers, exactly the P-core count, then turns over.
 
-`lmFit` and `removeBatchEffect` measure 1.10x and 0.90x here, and neither is a speedup. Both size
-gates close where the payload is copied, so the companion runs the original whole and the ratio is
-that call plus the wrapper: it lands either side of 1.00x depending on which arm the noise favours,
-rather than climbing with workers. Left to split, `lmFit` measured 0.14x on 21.6M cells and never
-reached parity, which is why the gate exists.
+`lmFit` and `removeBatchEffect` measure 1.10x/0.90x on Windows — not speedups. Both size gates
+close where the payload gets copied, so the companion just runs the original plus wrapper
+overhead, landing either side of 1.00x on noise rather than climbing with workers. (Left to split,
+`lmFit` measured 0.14x at 21.6M cells and never reached parity — that's why the gate exists.)
 
 ## When a companion is worth reaching for
 
@@ -283,23 +274,17 @@ The ratio is companion against original, so below 1.00x the companion is the slo
 | `lmFit_parallel()`, no probe weights | 1.00x | 6M cells | splits only above the gate |
 | `removeBatchEffect_parallel()` | 0.92x at 20,000 x 50 | 6M cells | 1.91x at 20,000 x 500 |
 
-Read it as three groups. **`duplicateCorrelation` and `calcNormFactors` are worth reaching for
-unconditionally** — one gene is one REML fit, and TMM's `rank` hoist pays with no workers at
-all, so both are ahead even on inputs too small to dispatch. **`ComBat-seq` and the weighted
-`lmFit` branch have a floor**, below which the fork costs more than the work it saves.
-**`lmFit` without probe weights, and `removeBatchEffect`, are parity until the input is large**:
-limma fits every gene in one vectorised `lm.fit`, which is milliseconds, and
-`removeBatchEffect` is that one `lmFit` call plus a BLAS product, so it inherits the same
-answer.
+Read it as three groups: **`duplicateCorrelation`/`calcNormFactors` pay unconditionally** (one
+gene = one REML fit; TMM's `rank` hoist wins with zero workers). **`ComBat-seq` and weighted
+`lmFit` have a floor** below which fork overhead beats the savings. **`lmFit` without probe
+weights, and `removeBatchEffect`, are parity until the input is large** — limma vectorises every
+gene into one `lm.fit` (milliseconds), and `removeBatchEffect` is just that call plus a BLAS
+product.
 
-The cost of choosing wrong is bounded and small. Under its gate a companion is one plain original
-call plus about 0.3 to 0.6 ms of entry overhead. That is nothing on a single call and real in a
-loop over thousands of small units, which is the one case where reaching for the original directly
-is worth doing deliberately. It is also the case the size gates cannot help with, because they
-decide per call.
+Choosing wrong costs little: under-gate is one original call plus ~0.3-0.6ms overhead — real only
+in a loop over thousands of small units, since gates decide per-call and can't see the loop.
 
-**To find out which happened, ask.** `options(combat.timing = TRUE)` prints one line per call
-whose engine column reports what actually *ran*, not what was requested:
+**To check what actually ran:** `options(combat.timing = TRUE)` prints the engine per call:
 
 ```
   ComBat-seq 18,270 x 1,500          mclapply x6         308.0s
