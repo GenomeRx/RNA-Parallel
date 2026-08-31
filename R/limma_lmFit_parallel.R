@@ -11,7 +11,7 @@
 #' Split one limma row-fitter across gene blocks
 #'
 #' The shared body of both rebinds. `block_fn` gets one block's matrix and that block's
-#' slice of the once-expanded weights. `serial_fn` is the untouched whole-matrix vendor
+#' slice of the once-expanded weights. `serial_fn` is the untouched whole-matrix original
 #' call, taken whenever a split cannot be proved exact or cannot pay for itself.
 #'
 #' Only four fields vary by gene. Everything else either comes from the design alone or is
@@ -24,25 +24,38 @@ rp_row_blocks <- function(M, weights, env, workers, chunks, parallel_backend, wh
   M <- as.matrix(M)
   w <- rp_weights_matrix(weights, dim(M), env)
 
-  # A block landing on the other side of NoProbeWts returns a different component SET, not
-  # merely different numbers, so there would be nothing to reassemble. lm.series and
-  # gls.series punch weights into M by different rules, so the guard is told which.
-  if (!rp_branch_stable(M, w, punch)) return(serial_fn())
-
-  # Which branch the full matrix takes is already settled by the guard above:
-  # rp_branch_stable returns from its first line exactly when NoProbeWts is FALSE, and
-  # otherwise only when the finiteness half holds. The two branches cost nothing alike, so
-  # they cannot share one size gate. Speed only; both are exact either way.
+  # SIZE GATE FIRST. `fast` reads only is.null(w) and attr(w, "arrayweights"), neither of
+  # which rp_branch_stable touches, so it is the same value in either order; and both guards
+  # return the same expression, serial_fn(). What changes is that a call destined for the
+  # original no longer pays a full-matrix scan to get there. It was paying enough to lose:
+  # measured on array-weighted input under the gate, the companion was SLOWER than the
+  # function it wraps: 20,000 x 24 original 10.8 ms against 14.8 ms, 60,000 x 48 original
+  # 89.3 ms against 138.4 ms. On a platform where the gate is shut this scan ran on every
+  # call and the split never followed it.
   fast <- is.null(w) || !is.null(attr(w, "arrayweights"))
-  # Both branches go through rp_ls_min_cells(), which closes them on a platform without fork().
-  # Passing the branch's own fork-side default keeps macOS and Linux exactly as they were.
-  min_cells <- rp_ls_min_cells(if (fast) 6e6 else getOption("combat.min.cells", 2e4))
+  # Each branch consults its OWN option, and both close where the payload would be copied.
+  # Routing both through one option let a raised combat.min.ls.cells silently switch off the
+  # weighted branch's split as well; see rp_ls_min_cells().
+  min_cells <- if (fast) rp_ls_min_cells("combat.min.ls.cells", 6e6, parallel_backend)
+               else      rp_ls_min_cells("combat.min.cells",    2e4, parallel_backend)
 
-  # Under the gate, take the vendor call WHOLE. combat_parallel_lapply honours the gate by
+  # Under the gate, take the original call WHOLE. combat_parallel_lapply honours the gate by
   # walking the blocks serially instead, and on the fast branch that is four lm.fit calls
   # where one would do: measured 0.70x, a companion slower than the function it wraps. An
   # unusable option value falls through to the dispatch, which refuses it there.
   if (isTRUE(length(M) < suppressWarnings(as.numeric(min_cells)))) return(serial_fn())
+
+  # The weighted branch is an interpreted per-gene loop, so it is genes that amortise the fork,
+  # not cells. A cell gate let a 1,000-gene matrix through at 48 arrays and refused the same
+  # matrix at 8, when the split behaves the same way at both. See rp_wt_min_genes().
+  if (!fast && isTRUE(nrow(M) < suppressWarnings(as.numeric(rp_wt_min_genes())))) {
+    return(serial_fn())
+  }
+
+  # A block landing on the other side of NoProbeWts returns a different component SET, not
+  # merely different numbers, so there would be nothing to reassemble. lm.series and
+  # gls.series punch weights into M by different rules, so the guard is told which.
+  if (!rp_branch_stable(M, w, punch)) return(serial_fn())
 
   # min_rows = 2 is exactness, not tuning: lm.fit drops a one-column response to a vector.
   idx <- combat_row_chunks(nrow(M), workers, chunks, min_rows = 2L)
@@ -55,10 +68,25 @@ rp_row_blocks <- function(M, weights, env, workers, chunks, parallel_backend, wh
   # Checked once the blocks are known, so it reads the leading rows and not the whole matrix.
   if (!rp_arrayweights_uniform(w, vapply(idx, `[[`, integer(1), 1L))) return(serial_fn())
 
+  # A dispatched closure is SERIALISED on a socket backend, and a closure carries its whole
+  # defining environment whether the body reads it or not. This frame reaches `M` a second
+  # time and, through block_fn, the entry point's own `object`, so the dispatch presented
+  # 664.29 MiB of globals for a 55 MiB matrix and `future` refused it outright:
+  #   "The total size of the 12 globals exported ... is 664.29 MiB. This exceeds the maximum"
+  # Rebuilding against an environment holding only the four objects the body reads leaves the
+  # matrix and its weights to travel and nothing else. On a forking backend this is invisible
+  # either way, since the child inherits the pages, so the cost was only ever paid where there
+  # is no fork(), which is where the adaptive default sends a Windows caller. The same fix
+  # is at edger_norm_parallel.R for the TMM column loop. Nothing about the arithmetic changes.
+  lean <- new.env(parent = rp_home())
+  lean$M <- M; lean$w <- w; lean$block_fn <- block_fn
+  lean$rp_weights_rows <- rp_weights_rows
+  per_block <- function(ii) block_fn(M[ii, , drop = FALSE], rp_weights_rows(w, ii))
+  environment(per_block) <- lean
+
   parts <- combat_parallel_check(
     combat_parallel_lapply(
-      idx,
-      function(ii) block_fn(M[ii, , drop = FALSE], rp_weights_rows(w, ii)),
+      idx, per_block,
       workers, parallel_backend, cells = length(M), min_cells = min_cells),
     what, idx)
 
@@ -105,7 +133,7 @@ rp_row_blocks <- function(M, weights, env, workers, chunks, parallel_backend, wh
 #' different component sets: the fast path returns `lm.fit`'s whole object including `qr`
 #' and `assign`, the slow path a bare seven-element list without them. One NA cell in a 400
 #' gene matrix put the whole matrix on the slow path and every block on the fast one, and
-#' 114 of 400 sigma differed. Splitting is refused, in favour of one plain vendor call,
+#' 114 of 400 sigma differed. Splitting is refused, in favour of one plain original call,
 #' unless every block provably lands on the same side as the full matrix.
 #'
 #' `stats::lm.fit` demotes a one-column response with `if (is.matrix(y) && ny == 1L)
@@ -141,6 +169,23 @@ rp_row_blocks <- function(M, weights, env, workers, chunks, parallel_backend, wh
 #' `method = "robust"` goes to `mrlm`, and `ndups >= 2` makes `unwrapdups` reshape rows so
 #' that a gene no longer occupies one row. Neither is split, and both stop with an error
 #' rather than returning a serial result that looks parallel.
+#'
+#' @section When this is worth reaching for:
+#' It depends entirely on which branch your call takes, and the two are not close.
+#'
+#' With voom or probe weights limma runs an R loop over genes, which forks well but has a
+#' floor. Measured on an M3 at the default worker count, companion against original, every arm
+#' `identical()`: 0.59x at 1,000 genes by 24 arrays, 0.87x at 2,000 x 24, 1.29x at 4,000 x 24,
+#' 1.76x at 8,000 x 24, and 2.79x at 60,000 x 48. The crossover tracks gene count rather than
+#' cells, and sits near four thousand genes.
+#'
+#' Without probe weights limma fits every gene in one vectorised `lm.fit`, which costs
+#' milliseconds, so the companion declines to split until the matrix is very large and is
+#' parity until then. That is not a missing measurement, it is the gate doing its job.
+#'
+#' Under either gate the companion is one plain original call plus about half a millisecond.
+#' Nothing on a single call; worth avoiding in a loop over thousands of small fits, which is
+#' the one case a per-call size gate cannot help with.
 #'
 #' @param object Anything `limma::lmFit` accepts: matrix, `EList` from
 #'   [limma::voom()], `MAList`, `ExpressionSet`, `PLMset`, `marrayNorm`, numeric data frame.
@@ -246,10 +291,18 @@ lmFit_parallel <- function(object, design = NULL, ndups = NULL, spacing = NULL,
 
   env$lm.series <- function(M, design = NULL, ndups = 1, spacing = 1, weights = NULL) {
     refuse_ndups(ndups)
+    # Leaned for the same reason rp_row_blocks leans its own dispatch closure: this frame's
+    # parent is the entry point's, which holds `object`, so a block closure defined here drags
+    # a second full copy of the input onto every socket worker.
+    lean <- new.env(parent = rp_home())
+    lean$vendor_lm <- vendor_lm; lean$design <- design
+    lean$ndups <- ndups; lean$spacing <- spacing
+    blk <- function(Mi, wi) vendor_lm(Mi, design = design, ndups = ndups, spacing = spacing,
+                                      weights = wi)
+    environment(blk) <- lean
     rp_row_blocks(
       M, weights, be$env, workers, chunks, parallel_backend, "lmFit_parallel/lm.series",
-      function(Mi, wi) vendor_lm(Mi, design = design, ndups = ndups, spacing = spacing,
-                                 weights = wi),
+      blk,
       function() vendor_lm(M, design = design, ndups = ndups, spacing = spacing,
                            weights = weights))
   }
@@ -257,17 +310,28 @@ lmFit_parallel <- function(object, design = NULL, ndups = NULL, spacing = NULL,
   env$gls.series <- function(M, design = NULL, ndups = 2, spacing = 1, block = NULL,
                              correlation = NULL, weights = NULL, ...) {
     refuse_ndups(ndups)
-    # Resolved on the FULL matrix, with the raw weights, which is where the vendor resolves
+    # Resolved on the FULL matrix, with the raw weights, which is where the original resolves
     # it. Left to the blocks it would be a trimmed mean over each block's genes alone.
     if (is.null(correlation)) {
       dupcor <- get("duplicateCorrelation", envir = be$env, inherits = TRUE)
       correlation <- dupcor(M, design = design, ndups = ndups, spacing = spacing,
                             block = block, weights = weights, ...)$consensus.correlation
     }
+    # Same lean rebuild as lm.series. `...` cannot live in a detached environment, so the
+    # dots are captured as a list and spliced back in the same position they occupied, which
+    # leaves argument matching unchanged.
+    dots <- list(...)
+    lean <- new.env(parent = rp_home())
+    lean$vendor_gls <- vendor_gls; lean$design <- design; lean$ndups <- ndups
+    lean$spacing <- spacing; lean$block <- block; lean$correlation <- correlation
+    lean$dots <- dots
+    blk <- function(Mi, wi) do.call(vendor_gls,
+      c(list(Mi, design = design, ndups = ndups, spacing = spacing, block = block,
+             correlation = correlation, weights = wi), dots))
+    environment(blk) <- lean
     rp_row_blocks(
       M, weights, be$env, workers, chunks, parallel_backend, "lmFit_parallel/gls.series",
-      function(Mi, wi) vendor_gls(Mi, design = design, ndups = ndups, spacing = spacing,
-                                  block = block, correlation = correlation, weights = wi, ...),
+      blk,
       function() vendor_gls(M, design = design, ndups = ndups, spacing = spacing,
                             block = block, correlation = correlation, weights = weights, ...),
       punch = "gls")

@@ -24,7 +24,7 @@ SOFTWARE.
 
 ComBat-seq itself is by Yuqing Zhang, Giovanni Parmigiani and W. Evan Johnson,
 distributed in Bioconductor's `sva` under Artistic-2.0. The original function is
-called rather than forked. One file reproduces vendor source so the companion can
+called rather than forked. One file reproduces upstream source so the companion can
 detect an upstream change and stand down: `R/helper_seq_parallel.R` holds the
 `sva::match_quantiles` body and a row-vectorised transcription of it, derived from
-Artistic-2.0 code. Nothing else here reproduces vendor code.
+Artistic-2.0 code. Nothing else here reproduces upstream code.

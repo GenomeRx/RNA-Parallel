@@ -16,7 +16,7 @@ sim <- function(G = 200L, S = 12L, seed = 1L) {
 }
 
 ## resolved here rather than taken from helper-counts.R, so this file does not depend on
-## another file's load order for the vendor it compares against
+## another file's load order for the original it compares against
 vendor_norm <- function(object, ...) {
   ns <- asNamespace("edgeR")
   nm <- if (exists("normLibSizes.default", envir = ns, inherits = FALSE)) "normLibSizes"
@@ -79,7 +79,7 @@ test_that("combat.timing.min hides steps faster than the threshold", {
   expect_silent(calcNormFactors_parallel(d$counts, workers = 2L))
 })
 
-test_that("quieting swallows the vendor's cat() but never a warning or an error", {
+test_that("quieting swallows the original's cat() but never a warning or an error", {
   skip_if_no_limma()
   skip_if_not_installed("sva")
   set.seed(4)
@@ -169,7 +169,7 @@ test_that("every backend produces a timing line and the same answer", {
   expect_match(paste(msgs, collapse = ""), "custom")
 })
 
-test_that("a pinned vendor excerpt standing down is reported, not silent", {
+test_that("a pinned original excerpt standing down is reported, not silent", {
   skip_if_not_installed("sva")
   withr::local_options(list(combat.timing = TRUE, combat.quiet = TRUE,
                             combat.min.cells = 0, combat.min.glm.cells = 0,

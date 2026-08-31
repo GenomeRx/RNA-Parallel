@@ -8,41 +8,41 @@
 ## no second copy of the algorithm, so any difference at all is a defect.
 
 test_that("default path is identical to a serial run", {
-  vendor <- backend_fn()
+  original <- backend_fn()
   d <- make_counts(1, G = 400, n_per_batch = c(8, 7, 6))
-  ref <- quietly(vendor(d$counts, d$batch, group = NULL))
+  ref <- quietly(original(d$counts, d$batch, group = NULL))
   par <- quietly(ComBat_seq_parallel(d$counts, d$batch, group = NULL, workers = 2L))
   expect_identical(par, ref)
 })
 
 test_that("identical with a group, which changes the design and the dispersion path", {
-  vendor <- backend_fn()
+  original <- backend_fn()
   d <- make_counts(2, G = 400, n_per_batch = c(9, 8), with_group = TRUE)
-  ref <- quietly(vendor(d$counts, d$batch, group = d$group))
+  ref <- quietly(original(d$counts, d$batch, group = d$group))
   par <- quietly(ComBat_seq_parallel(d$counts, d$batch, group = d$group, workers = 2L))
   expect_identical(par, ref)
 })
 
 test_that("identical on the argument paths", {
-  vendor <- backend_fn()
+  original <- backend_fn()
   d <- make_counts(3, G = 300, n_per_batch = c(8, 8), with_group = TRUE)
 
   # full_mod = FALSE
   expect_identical(
     quietly(ComBat_seq_parallel(d$counts, d$batch, group = d$group, full_mod = FALSE, workers = 2L)),
-    quietly(vendor(d$counts, d$batch, group = d$group, full_mod = FALSE)))
+    quietly(original(d$counts, d$batch, group = d$group, full_mod = FALSE)))
 
-  # shrink. seed before EACH arm: the vendor's monte_carlo_int_NB calls sample(),
+  # shrink. seed before EACH arm: the original's monte_carlo_int_NB calls sample(),
   # so unseeded back-to-back runs draw different gene subsets and differ for a
   # reason that is not a bug. An earlier comparison reported a fake max|diff| of
   # 1096 from exactly this.
-  set.seed(99); ref <- quietly(vendor(d$counts, d$batch, group = d$group,
+  set.seed(99); ref <- quietly(original(d$counts, d$batch, group = d$group,
                                       shrink = TRUE, shrink.disp = TRUE))
   set.seed(99); par <- quietly(ComBat_seq_parallel(d$counts, d$batch, group = d$group,
                                              shrink = TRUE, shrink.disp = TRUE, workers = 2L))
   expect_identical(par, ref)
 
-  set.seed(7); ref2 <- quietly(vendor(d$counts, d$batch, group = d$group,
+  set.seed(7); ref2 <- quietly(original(d$counts, d$batch, group = d$group,
                                       shrink = TRUE, gene.subset.n = 50))
   set.seed(7); par2 <- quietly(ComBat_seq_parallel(d$counts, d$batch, group = d$group,
                                               shrink = TRUE, gene.subset.n = 50, workers = 2L))
@@ -51,7 +51,7 @@ test_that("identical on the argument paths", {
 
 test_that("covar_mod is identical, upstream's own example", {
   # The example from the ComBat-seq README, which is how this actually gets called.
-  vendor <- backend_fn()
+  original <- backend_fn()
   set.seed(42)
   cov1 <- rep(c(0, 1), 4)
   cov2 <- c(0, 0, 1, 1, 0, 0, 1, 1)
@@ -66,14 +66,14 @@ test_that("covar_mod is identical, upstream's own example", {
     expect_identical(
       quietly(ComBat_seq_parallel(cts, batch = batch, group = NULL,
                                   covar_mod = cm, workers = 2L)),
-      quietly(vendor(cts, batch = batch, group = NULL, covar_mod = cm)))
+      quietly(original(cts, batch = batch, group = NULL, covar_mod = cm)))
   }
 })
 
 test_that("a confounded covar_mod is rejected the same way by both", {
   # cov1 alternates exactly like a 2-level group, so group + cov1 is collinear and
   # ComBat-seq refuses. Correct behaviour, and the companion must refuse identically.
-  vendor <- backend_fn()
+  original <- backend_fn()
   set.seed(43)
   cov1 <- rep(c(0, 1), 4)
   covar_mat <- cbind(cov1, cov2 = c(0, 0, 1, 1, 0, 0, 1, 1))
@@ -81,7 +81,7 @@ test_that("a confounded covar_mod is rejected the same way by both", {
   grp <- factor(rep(c("a", "b"), 4))
   cts <- matrix(rnbinom(300 * 8, mu = 60, size = 4), nrow = 300)
 
-  ref <- tryCatch(quietly(vendor(cts, batch, group = grp, covar_mod = covar_mat)),
+  ref <- tryCatch(quietly(original(cts, batch, group = grp, covar_mod = covar_mat)),
                   error = function(e) conditionMessage(e))
   par <- tryCatch(quietly(ComBat_seq_parallel(cts, batch, group = grp,
                                               covar_mod = covar_mat, workers = 2L)),
@@ -91,9 +91,9 @@ test_that("a confounded covar_mod is rejected the same way by both", {
 })
 
 test_that("the serial escape hatch gives the same answer", {
-  vendor <- backend_fn()
+  original <- backend_fn()
   d <- make_counts(4, G = 250, n_per_batch = c(6, 6))
-  ref <- quietly(vendor(d$counts, d$batch, group = NULL))
+  ref <- quietly(original(d$counts, d$batch, group = NULL))
   withr_fork <- getOption("combat.fork")
   options(combat.fork = FALSE)
   on.exit(options(combat.fork = withr_fork), add = TRUE)
@@ -101,12 +101,12 @@ test_that("the serial escape hatch gives the same answer", {
 })
 
 test_that("the input matrix is not modified by either arm", {
-  vendor <- backend_fn()
+  original <- backend_fn()
   d <- make_counts(5, G = 200, n_per_batch = c(6, 6))
   # + 0L forces a real copy. Aliasing the same SEXP would make a C-level in-place write
   # change both sides, so the comparison would pass while the property it checks is false.
   before <- d$counts + 0L
-  invisible(quietly(vendor(d$counts, d$batch, group = NULL)))
+  invisible(quietly(original(d$counts, d$batch, group = NULL)))
   invisible(quietly(ComBat_seq_parallel(d$counts, d$batch, group = NULL, workers = 2L)))
   expect_identical(d$counts, before)
 })
@@ -120,16 +120,16 @@ test_that("batch given as character and as integer both work", {
   expect_identical(a, b)
 })
 
-test_that("an unused batch level breaks the vendor, and breaks us the same way", {
+test_that("an unused batch level breaks the original, and breaks us the same way", {
   # Worth knowing before it bites a real cohort: ComBat_seq counts samples per
   # FACTOR LEVEL, so a level left over from subsetting looks like a batch with no
-  # samples and the vendor stops with "doesn't support 1 sample per batch yet".
+  # samples and the original stops with "doesn't support 1 sample per batch yet".
   # Nothing in that message points at the unused level. droplevels() first.
-  vendor <- backend_fn()
+  original <- backend_fn()
   d <- make_counts(7, G = 200, n_per_batch = c(6, 6))
   padded <- factor(as.character(d$batch), levels = c(levels(d$batch), "b_unused"))
 
-  ref <- tryCatch(quietly(vendor(d$counts, padded, group = NULL)),
+  ref <- tryCatch(quietly(original(d$counts, padded, group = NULL)),
                   error = function(e) conditionMessage(e))
   par <- tryCatch(quietly(ComBat_seq_parallel(d$counts, padded, group = NULL, workers = 2L)),
                   error = function(e) conditionMessage(e))
@@ -138,15 +138,15 @@ test_that("an unused batch level breaks the vendor, and breaks us the same way",
   # and dropping the level makes both work and agree
   dropped <- droplevels(padded)
   expect_identical(quietly(ComBat_seq_parallel(d$counts, dropped, group = NULL, workers = 2L)),
-                   quietly(vendor(d$counts, dropped, group = NULL)))
+                   quietly(original(d$counts, dropped, group = NULL)))
 })
 ## The anti-regression suite. An earlier version of this code transcribed
 ## ComBat-seq by hand and drifted from it twice in ways synthetic data could not
 ## expose. These tests fail if anyone turns the companion back into a copy.
 
 test_that("every ComBat_seq argument exists on the companion with the same default", {
-  vendor <- backend_fn()
-  vf <- formals(vendor)
+  original <- backend_fn()
+  vf <- formals(original)
   pf <- formals(ComBat_seq_parallel)
 
   expect_true(all(names(vf) %in% names(pf)))
@@ -161,10 +161,10 @@ test_that("the companion adds only parallel controls, nothing else", {
                    c("workers", "chunks", "parallel_backend", "backend", "label"))
 })
 
-test_that("argument order matches the vendor for the shared arguments", {
-  vendor <- backend_fn()
-  shared <- intersect(names(formals(ComBat_seq_parallel)), names(formals(vendor)))
-  expect_identical(shared, names(formals(vendor)))
+test_that("argument order matches the original for the shared arguments", {
+  original <- backend_fn()
+  shared <- intersect(names(formals(ComBat_seq_parallel)), names(formals(original)))
+  expect_identical(shared, names(formals(original)))
 })
 
 test_that("the companion does not reimplement the algorithm", {
@@ -176,7 +176,7 @@ test_that("the companion does not reimplement the algorithm", {
                     "monte_carlo_int_NB", "DGEList", "mapDisp")
   for (sym in vendor_calls) {
     expect_false(grepl(paste0(sym, "("), src, fixed = TRUE),
-                 info = paste("companion body CALLS vendor internal", sym))
+                 info = paste("companion body CALLS original internal", sym))
   }
   # and the rebinding mechanism must still be the mechanism
   expect_true(grepl("environment(f) <- env", src, fixed = TRUE))
@@ -196,11 +196,11 @@ test_that("no ::: appears anywhere in the package sources", {
   expect_false(any(grepl(":::", src, fixed = TRUE)))
 })
 
-test_that("the function actually run is the vendor's, byte for byte", {
-  vendor <- backend_fn()
+test_that("the function actually run is the original's, byte for byte", {
+  original <- backend_fn()
   be <- rnaparallel:::combat_backend()
-  expect_identical(body(be$fn), body(vendor))
-  expect_identical(formals(be$fn), formals(vendor))
+  expect_identical(body(be$fn), body(original))
+  expect_identical(formals(be$fn), formals(original))
 })
 
 test_that("the export surface is exactly the entry points and the shared controls", {
@@ -230,7 +230,7 @@ test_that("the default backend resolves with the helper from its own environment
 test_that("a sourced upstream copy works, helpers in a plain environment", {
   skip_if_not_installed("sva")
   up <- new.env(parent = globalenv())
-  # borrow the real vendor pieces but present them the way source() would
+  # borrow the real original pieces but present them the way source() would
   assign("match_quantiles", get("match_quantiles", envir = asNamespace("sva")), envir = up)
   fake <- sva::ComBat_seq
   environment(fake) <- up
@@ -344,9 +344,9 @@ test_that("any prior.df other than 0 is handed to edgeR whole, not split", {
 })
 
 test_that("the end to end result is unchanged now dispersion is parallel too", {
-  vendor <- backend_fn()
+  original <- backend_fn()
   d <- make_counts(34, G = 900L, n_per_batch = c(14, 12, 13, 11))
-  ref <- quietly(vendor(d$counts, d$batch, group = NULL))
+  ref <- quietly(original(d$counts, d$batch, group = NULL))
 
   for (w in c(1L, 2L, 4L)) {
     got <- quietly(ComBat_seq_parallel(d$counts, d$batch, group = NULL, workers = w))
@@ -453,7 +453,7 @@ test_that("a one-group design is refused the row split rather than trusted to it
     cbind(1, rep(0:1, each = 3), stats::rnorm(6))))
 })
 
-## The one copy of vendor code this package holds is the row-vectorised match_quantiles.
+## The one copy of original code this package holds is the row-vectorised match_quantiles.
 ## The gate that guards it had no coverage, so a permanently shut gate would leave every
 ## suite green while silently running the slow path forever.
 
@@ -473,7 +473,7 @@ test_that("the match_quantiles gate opens on the real backend, even under hostil
     rnaparallel:::match_quantiles_rows)
 })
 
-test_that("the match_quantiles gate closes on a genuinely edited vendor body", {
+test_that("the match_quantiles gate closes on a genuinely edited original body", {
   skip_if_not_installed("sva")
   set.seed(9)
   cs <- matrix(rnbinom(50 * 4, mu = 50, size = 2), 50, 4)
@@ -484,7 +484,7 @@ test_that("the match_quantiles gate closes on a genuinely edited vendor body", {
   expect_identical(rnaparallel:::combat_mq_dispatch(f, cs, om, op), f)
 })
 
-test_that("the row-vectorised transcription matches the vendor cell loop bit for bit", {
+test_that("the row-vectorised transcription matches the original cell loop bit for bit", {
   skip_if_not_installed("sva")
   # adversarial: zeros, ones, huge counts, and cells landing in the outlier branch
   set.seed(41)
@@ -498,7 +498,7 @@ test_that("the row-vectorised transcription matches the vendor cell loop bit for
                    sva:::match_quantiles(cs, om, op, nm, np))
 })
 
-test_that("an NA count reproduces the vendor's own error, not a wrapped one", {
+test_that("an NA count reproduces the original's own error, not a wrapped one", {
   skip_if_not_installed("sva")
   set.seed(9)
   cs <- matrix(rnbinom(40 * 4, mu = 50, size = 2), 40, 4); cs[3, 2] <- NA
@@ -513,9 +513,9 @@ test_that("an NA count reproduces the vendor's own error, not a wrapped one", {
   expect_identical(par_err, vendor_err)
 })
 
-test_that("data.frame counts go to the vendor whole instead of crashing the gate", {
+test_that("data.frame counts go to the original whole instead of crashing the gate", {
   skip_if_not_installed("sva")
-  # is.finite has no data.frame method; the vendor accepts data.frames end to end
+  # is.finite has no data.frame method; the original accepts data.frames end to end
   set.seed(6)
   y <- matrix(rnbinom(200 * 8, mu = 60, size = 5), 200, 8,
               dimnames = list(paste0("g", 1:200), paste0("s", 1:8)))
@@ -526,7 +526,7 @@ test_that("data.frame counts go to the vendor whole instead of crashing the gate
     ref)
 })
 
-test_that("the tagwise batch dispatch survives the vendor's own gene filter", {
+test_that("the tagwise batch dispatch survives the original's own gene filter", {
   skip_if_not_installed("sva")
   # ComBat-seq drops genes all-zero within a batch before the tagwise lapply, so a shape
   # check against the unfiltered row count failed every batch and the dominant stage was
@@ -535,7 +535,7 @@ test_that("the tagwise batch dispatch survives the vendor's own gene filter", {
   y <- matrix(rnbinom(300 * 12, mu = 40, size = 4), 300, 12,
               dimnames = list(paste0("g", 1:300), paste0("s", 1:12)))
   batch <- rep(1:2, each = 6)
-  y[5, batch == 1] <- 0L                      # filtered by the vendor
+  y[5, batch == 1] <- 0L                      # filtered by the original
   calls <- 0L
   spy <- function(idx, f, w) { calls <<- calls + 1L; lapply(idx, f) }
   out <- suppressMessages(ComBat_seq_parallel(y, batch = batch, group = NULL,
@@ -548,14 +548,14 @@ test_that("the tagwise batch dispatch survives the vendor's own gene filter", {
 
 test_that("group= is identical across many batches without confounding", {
   skip_if_not_installed("sva")
-  vendor <- backend_fn()
+  original <- backend_fn()
 
   # The pooled pan-cancer arm passes several hundred batches WITH group= set to cancer type,
   # and that combination had no test. Building the fixture by recycling batch and group
   # independently is what fails: sva refuses with "At least one covariate is confounded with
   # batch" whenever some batch does not see more than one group level. Laying the group cycle
   # INSIDE each batch guarantees every batch carries every group, so the design keeps full
-  # rank and the vendor accepts it.
+  # rank and the original accepts it.
   set.seed(11)
   B <- 12L; G <- 3L; per <- 6L                       # per batch: 6 samples, 2 of each group
   N <- B * per
@@ -567,12 +567,12 @@ test_that("group= is identical across many batches without confounding", {
                 dimnames = list(paste0("g", 1:400), paste0("s", seq_len(N))))
   expect_identical(
     quietly(ComBat_seq_parallel(cts, batch = batch, group = group, workers = 2L)),
-    quietly(vendor(cts, batch = batch, group = group)))
+    quietly(original(cts, batch = batch, group = group)))
 })
 
 test_that("group= with a covariate matrix is identical too", {
   skip_if_not_installed("sva")
-  vendor <- backend_fn()
+  original <- backend_fn()
   set.seed(12)
   B <- 8L; G <- 2L; per <- 6L
   N <- B * per
@@ -584,5 +584,5 @@ test_that("group= with a covariate matrix is identical too", {
   expect_identical(
     quietly(ComBat_seq_parallel(cts, batch = batch, group = group,
                                 covar_mod = covar, workers = 2L)),
-    quietly(vendor(cts, batch = batch, group = group, covar_mod = covar)))
+    quietly(original(cts, batch = batch, group = group, covar_mod = covar)))
 })
