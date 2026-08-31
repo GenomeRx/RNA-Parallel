@@ -29,11 +29,11 @@ Originals are timed on both sides and averaged (best of three for short stages).
 platform per row. Full specs and the "why" in [Cross-platform](#cross-platform).
 
 **Windows has no `fork()`.** A worker is a whole copied process, not a shared-memory fork, and
-only 6 of its 16 cores are performance cores — both cap the useful worker count. ComBat-seq shows
+only 6 of its 16 cores are performance cores. Both cap the useful worker count. ComBat-seq shows
 it directly: 2.12x, 3.34x, **3.57x**, 3.54x at 2/4/6/8 workers, peaking at the P-core count.
 
 **`lmFit` and `removeBatchEffect` on Windows are not speedups (1.10x, 0.90x).** Their size gates
-close on this platform, so the companion just runs the original plus wrapper overhead — call that
+close on this platform, so the companion just runs the original plus wrapper overhead. Call that
 parity, not a result.
 
 Ratios don't predict wall clock: the dual Xeon wins 4 of 5 rows but still loses ComBat-seq on time
@@ -41,7 +41,7 @@ to the M3 (325.9s vs 298.6s) because it starts from a slower original (3,043.8s 
 Windows is last on both counts, 720.1s vs 298.6s.
 
 **Nothing is reimplemented.** The original function runs, called with hot paths rebound in a child
-of its own environment — every other symbol still resolves to original code. `identical()` is
+of its own environment. Every other symbol still resolves to original code. `identical()` is
 asserted, not a tolerance.
 
 ## Install
@@ -125,7 +125,7 @@ Four thousand cells sits under every size gate, so this runs serially and is sti
 Rscript inst/examples/run_example.R
 ```
 
-Rendered reports carry it at cohort scale — same sections on all three platforms:
+Rendered reports carry it at cohort scale, same sections on all three platforms:
 [macOS](https://genomerx.github.io/RNA-Parallel/) ·
 [Linux](https://genomerx.github.io/RNA-Parallel/linux.html) ·
 [Windows](https://genomerx.github.io/RNA-Parallel/windows.html). Sources in
@@ -135,7 +135,7 @@ also sweeps backends, since without `fork()` the backend decides whether anythin
 all. First run downloads HNSC/LUAD/LUSC to the per-user cache, or `RNAPARALLEL_TCGA_DIR` if set.
 
 [tests/](tests/testthat) covers every argument path, chunk layout, backend, and dispatch count
-through the public entry point — `identical()` alone can't tell a working parallel layer from a
+through the public entry point. `identical()` alone can't tell a working parallel layer from a
 dead one. 400+ assertions.
 
 ### Seeing what is running
@@ -174,7 +174,7 @@ The fix is to restart R.
 | `monte_carlo_int_NB` | small | serial | draws depend on the previous batch's state |
 
 `calcNormFactors_parallel()` splits by sample column, `lmFit_parallel()`/`duplicateCorrelation_parallel()`
-by gene row. `removeBatchEffect_parallel()` splits nothing — it rebinds the one `lmFit` call
+by gene row. `removeBatchEffect_parallel()` splits nothing: it rebinds the one `lmFit` call
 inside the original and inherits its curve (still pays: the original doesn't finish in ten minutes
 at 9,493 samples). Chunks interleave so a sorted matrix doesn't idle a worker; a dead worker,
 duplicate chunk, or short result halts the run.
@@ -183,9 +183,9 @@ duplicate chunk, or short result halts the run.
 `fitFDist`, `arrayWeights`, `normalizeBetweenArrays`, `normalizeQuantiles`) or scaling with gene
 count (`voom`'s `lowess` span, `p.adjust`, `topTable`, `decideTests`). `contrasts.fit` takes
 0.001s, less than a fork. `lmFit(method = "robust")` and `ndups >= 2` reshape rows and error
-rather than split — why `block` is required for `duplicateCorrelation_parallel`.
+rather than split, which is why `block` is required for `duplicateCorrelation_parallel`.
 
-**Built, measured, deleted** — modest speedup doesn't buy different numbers:
+**Built, measured, deleted:** modest speedup doesn't buy different numbers.
 
 | companion | reached | what it moved |
 |---|---|---|
@@ -233,20 +233,20 @@ companion arm, with its worker count. Bold = fastest platform per stage.
 | removeBatchEffect | 4.5s → **1.5s** (6w) | 2.5s → 1.8s (8w) | 4.4s → 4.9s (2w) |
 
 Speedup is a ratio and rewards a slower core: Linux scales further, 9.34x against 5.43x, and
-still finishes behind at 325.9s vs 298.6s. On Linux, pin `OPENBLAS_NUM_THREADS` before R starts —
+still finishes behind at 325.9s vs 298.6s. On Linux, pin `OPENBLAS_NUM_THREADS` before R starts,
 otherwise every forked worker opens its own thread pool (unpinning moves DGEMM 3.6x, 61→216
 GFLOPS, though `lmFit` barely changes since limma solves a small QR per gene).
 
-Windows reads lowest on ratio and last on the clock — but its original baseline (2,573.3s) sits
+Windows reads lowest on ratio and last on the clock, but its original baseline (2,573.3s) sits
 between the M3 (1,619.8s) and Xeon (3,043.8s), so this isn't a short-baseline story, it's just
 slower to finish (720.1s vs 298.6s/325.9s). What caps it is architectural: no `fork()` means a
 worker is a full copied process, and only 6 of 16 cores are performance cores. Both cap the useful
-worker count — ComBat-seq peaks at 3.57x at 6 workers, exactly the P-core count, then turns over.
+worker count. ComBat-seq peaks at 3.57x at 6 workers, exactly the P-core count, then turns over.
 
-`lmFit` and `removeBatchEffect` measure 1.10x/0.90x on Windows — not speedups. Both size gates
+`lmFit` and `removeBatchEffect` measure 1.10x/0.90x on Windows. Neither is a speedup. Both size gates
 close where the payload gets copied, so the companion just runs the original plus wrapper
 overhead, landing either side of 1.00x on noise rather than climbing with workers. (Left to split,
-`lmFit` measured 0.14x at 21.6M cells and never reached parity — that's why the gate exists.)
+`lmFit` measured 0.14x at 21.6M cells and never reached parity, which is why the gate exists.)
 
 ## When a companion is worth reaching for
 
@@ -266,11 +266,11 @@ The ratio is companion against original, so below 1.00x the companion is the slo
 Read it as three groups: **`duplicateCorrelation`/`calcNormFactors` pay unconditionally** (one
 gene = one REML fit; TMM's `rank` hoist wins with zero workers). **`ComBat-seq` and weighted
 `lmFit` have a floor** below which fork overhead beats the savings. **`lmFit` without probe
-weights, and `removeBatchEffect`, are parity until the input is large** — limma vectorises every
+weights, and `removeBatchEffect`, are parity until the input is large:** limma vectorises every
 gene into one `lm.fit` (milliseconds), and `removeBatchEffect` is just that call plus a BLAS
 product.
 
-Choosing wrong costs little: under-gate is one original call plus ~0.3-0.6ms overhead — real only
+Choosing wrong costs little: under-gate is one original call plus ~0.3-0.6ms overhead, real only
 in a loop over thousands of small units, since gates decide per-call and can't see the loop.
 
 **To check what actually ran:** `options(combat.timing = TRUE)` prints the engine per call:
@@ -291,11 +291,11 @@ pass-through. On that input, call the original.
 | `chunks` | `workers` | only to cut peak memory per worker |
 | `parallel_backend` | `"mclapply"` | you cannot fork, or a cluster is already running |
 
-`workers` is not a safety ceiling — six workers alongside a second forking R session have
+`workers` is not a safety ceiling. Six workers alongside a second forking R session have
 kernel-panicked a 24 GB machine; nothing here can see that other session.
 
 **Backends:** `"mclapply"` (forks, default), `"future"`, `"BiocParallel"`, `"foreach"`, `"serial"`,
-or any `function(idx, f, workers)` — all return identical results. Forking wins by default because
+or any `function(idx, f, workers)`, all return identical results. Forking wins by default because
 a forked worker reads the matrix copy-on-write; socket backends re-serialise per chunk and
 measured slower than not parallelising.
 
@@ -312,12 +312,12 @@ library(future); plan(multisession, workers = 6)   # that is all
 ```
 
 Backend resolves per call: an active plan selects `"future"`; no plan leaves `mclapply` (one-time
-serial notice). The package never sets a plan itself — a caller's plan is theirs, and starting
+serial notice). The package never sets a plan itself. A caller's plan is theirs, and starting
 workers inside someone's session unasked is worse than being slow.
 
-**Nesting is blocked on every backend** — a dispatch already inside one of this package's workers
+**Nesting is blocked on every backend.** A dispatch already inside one of this package's workers
 runs serially (via `mc.allow.recursive = FALSE` on fork; an equivalent guard over PSOCK, which
-used to spawn workers² processes without it). Your own loop is unaffected either way — spend the
+used to spawn workers² processes without it). Your own loop is unaffected either way. Spend the
 worker budget *inside* a loop body, not across it. Inverting one 15-cohort screen measured 245s →
 81.6s.
 
@@ -325,14 +325,14 @@ worker budget *inside* a loop body, not across it. Inverting one 15-cohort scree
 which a call runs serially: `combat.min.cells` (20,000), `combat.min.disp.cells` (30,000),
 `combat.min.glm.cells` (100,000), `combat.min.ls.cells` (6e6), `combat.min.norm.cells` (2e5),
 `combat.min.order.cells` (4e6), `combat.min.dupcor.cells` (5,000), `combat.min.batch.cells`
-(20,000), `combat.min.wt.genes` (2,000, counted in genes not cells — limma's weighted branch is a
+(20,000), `combat.min.wt.genes` (2,000, counted in genes not cells: limma's weighted branch is a
 per-gene loop that barely moves with array size).
 
 Two gates move without fork, in opposite directions: `lmFit` never reaches parity on Windows
 (0.14x at 21.6M cells, 0.24x at 60M) so `combat.min.ls.cells` **closes** there (covers
 `removeBatchEffect_parallel()` too, since it rebinds one `lmFit` call). TMM pays once big enough
 (1.05x at 1.8M cells → 1.58x at 21.6M) so `combat.min.norm.cells` **rises** to 2e6. Override either
-explicitly — output is `identical()` regardless; a gate decides who computes, never what.
+explicitly. Output is `identical()` regardless: a gate decides who computes, never what.
 `options(combat.fork = FALSE)` forces serial everywhere; `combat_cluster_stop()` releases cached
 clusters.
 
