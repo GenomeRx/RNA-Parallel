@@ -163,7 +163,7 @@ test_that("each least-squares branch reads its own size gate", {
 
 test_that("the break-even gates follow the backend's copy behaviour, not the OS", {
   # These thresholds were tuned where a worker INHERITS the matrix. Keyed to the OS, a macOS
-  # caller on foreach got the inherited gate and lmFit measured 0.24x against the vendor.
+  # caller on foreach got the inherited gate and lmFit measured 0.24x against the original.
   # The question is the COPY, not fork(): foreach builds a FORK cluster on Unix and is still
   # slow, because doParallel's cluster form serialises every task. So foreach is asked rather
   # than assumed -- doParallelMC drives mclapply and copies nothing, doParallelSNOW does not.

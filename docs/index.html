@@ -1709,8 +1709,8 @@ the counts; <code>calcNormFactors_parallel</code>,
 <code>lmFit_parallel</code>, and
 <code>duplicateCorrelation_parallel</code> run the differential
 expression that follows. None of them reimplements a method from its
-description: the vendor is called unchanged on blocks of genes or
-samples, with at most a symbol rebound in a child of the vendor’s own
+description: the original is called unchanged on blocks of genes or
+samples, with at most a symbol rebound in a child of the original’s own
 environment.</p>
 <p>The question is narrow on purpose: <strong>does each companion return
 exactly what the original returns, and how much time does it
@@ -4784,7 +4784,7 @@ left alone is as much a part of the result as the list of what was not.
 <code>voom</code> measured 0.99x, because its <code>lowess</code> trend
 takes its span as a fraction of the gene count, so a block of half the
 genes fits a different curve and only the arithmetic after the trend
-splits. <code>contrasts.fit</code> is exactly splittable and the vendor
+splits. <code>contrasts.fit</code> is exactly splittable and the original
 returns before a fork could finish starting. <code>eBayes</code>,
 <code>fitFDist</code> and <code>topTable</code> pool across every gene
 by construction. None of them ships as a <code>workers</code> argument

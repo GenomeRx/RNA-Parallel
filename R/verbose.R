@@ -32,7 +32,7 @@ rp_opt_secs <- function(name, default = 0) {
 }
 
 
-# ---- silencing the vendor ----------------------------------------------------
+# ---- silencing the original ----------------------------------------------------
 
 # sva::ComBat_seq announces itself with cat(), not message(): "Found 154 batches", "Estimating
 # dispersions", "Fitting the GLM model" and five more, once per call. suppressMessages() cannot
@@ -96,11 +96,11 @@ rp_count_serial_after_all <- function() {
   invisible(NULL)
 }
 
-#' Record that a pinned vendor excerpt stood down for this call
+#' Record that a pinned original excerpt stood down for this call
 #'
-#' `match_quantiles` is the one piece of vendor text this package still holds, and its gate is a
+#' `match_quantiles` is the one piece of original text this package still holds, and its gate is a
 #' byte-exact body match against sva. An sva release that reformats that body -- never mind
-#' rewrites it -- silently hands every slice back to the vendor's own cell loop. The numbers stay
+#' rewrites it -- silently hands every slice back to the original's own cell loop. The numbers stay
 #' correct and the run gets 1.4-1.7x slower forever, which is the failure nobody reports because
 #' nobody can see it. So say it in the same line that already reports what ran.
 #' @noRd
@@ -132,13 +132,13 @@ rp_label <- function(what, x) {
 #' Returns a handle for `rp_step_end()`, or NULL when neither option is on, which is the
 #' default and costs one `getOption` per call. Registering the teardown with `on.exit()` in the
 #' caller is what makes this exception-safe: the sink unwinds and the elapsed line still prints
-#' when the vendor throws, so a failed run reports where it failed rather than vanishing.
+#' when the original throws, so a failed run reports where it failed rather than vanishing.
 #' @noRd
 rp_step_begin <- function(label, what, x, backend, workers) {
   timing <- rp_opt_flag("combat.timing")
   quiet  <- rp_opt_flag("combat.quiet")
   if (!timing && !quiet) return(NULL)
-  # NOT reentrant, on purpose. calcNormFactors_parallel on a DGEList reaches the vendor's
+  # NOT reentrant, on purpose. calcNormFactors_parallel on a DGEList reaches the original's
   # DGEList method, which calls the companion again on the counts matrix, so one user-facing
   # call is two nested calls here and printed itself twice. Only the outermost reports, and
   # only it resets the counters, so the inner dispatches are still attributed to it.

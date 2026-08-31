@@ -7,13 +7,13 @@ work they throw away.
   its defining environment, and every dispatched job in the package was built in a frame holding
   far more than its body reads. Under `plan(multisession)` on a 54.9 MiB matrix,
   `lmFit_parallel()` exported 664.29 MiB of globals and `future` refused it outright;
-  `calcNormFactors_parallel()` exported 595.97 MiB. Both were hard errors where the vendor
+  `calcNormFactors_parallel()` exported 595.97 MiB. Both were hard errors where the original
   returns a value, on the backend the new adaptive default selects. Every job is now built
   against an environment holding only what it reads: measured payload per task, lmFit
   13,209,456 B to 809,288 B, TMM 16,624,160 B to 1,987,841 B, `duplicateCorrelation` 5,961,556 B
   to 853,219 B. Two unforced promises were part of it — `combat_parallel_lapply()` never forced
   the function it dispatches, so each task carried the caller's frame and, through its own
-  unforced promises, the vendor's frames and the entry point's raw inputs.
+  unforced promises, the original's frames and the entry point's raw inputs.
 
 - **The size gates were keyed to the operating system when they are about the payload.** They are
   break-evens for a worker that INHERITS the matrix, and Windows is a sufficient condition for
@@ -44,7 +44,7 @@ work they throw away.
   `sva::match_quantiles` on 600 randomised cases. Interleaved chunking uses a strided sequence
   rather than `split()`, and a single chunk no longer copies every bound field twice.
 
-- **Two more size gates, for the two regimes that were still slower than the vendor.** limma's
+- **Two more size gates, for the two regimes that were still slower than the original.** limma's
   weighted branch is an interpreted per-gene loop whose cost barely moves with array count, so
   genes amortise the fork and cells were the wrong unit: at a fixed 1,000 genes the split behaved
   the same at 8, 24 and 48 arrays while the cell count crossed the gate that decided it. New
@@ -52,7 +52,7 @@ work they throw away.
   above. ComBat-seq's two across-batch dispatches carried no floor at all, on the argument that a
   whole-matrix estimate per batch is always worth a fork; true at cohort scale and false at 300
   genes, where they measured 0.69x. New `combat.min.batch.cells` (20,000) takes that to 1.20x —
-  faster than the vendor while dispatching nothing, because the vectorised quantile match is a
+  faster than the original while dispatching nothing, because the vectorised quantile match is a
   serial win.
 
 - **A lean environment must be parented at the package, not at the global environment.** A
@@ -60,21 +60,21 @@ work they throw away.
   environment's parent decides how the body's remaining calls resolve. Parented at `globalenv()`,
   a user binding named `vapply` reached them: measured, it moved `calcNormFactors_parallel`
   8.59e-06 off `edgeR::normLibSizes` with no error and no warning, on the serial backend, on every
-  platform, while leaving the vendor untouched. Six sites, now parented where those calls resolved
+  platform, while leaving the original untouched. Six sites, now parented where those calls resolved
   before the closures were leaned.
 
 - The quantile-match gate refused non-finite inputs but not a negative `old_mu`, an `old_phi`
-  shorter than the matrix, or a mismatched `dim`. The vendor errors on all three; the vectorised
+  shorter than the matrix, or a mismatched `dim`. The original errors on all three; the vectorised
   form returned a plausible half-matched matrix. Unreachable from ComBat-seq, whose fitted values
   are non-negative, but the gate's contract is its own. Its finiteness tests are now reductions
   rather than full-matrix logicals, and `combat_row_order` inverts a permutation by scatter
   instead of sorting it.
 
 - **New: each companion's help page says when it is worth reaching for.** Two of the five lose to
-  their vendor below a floor and nothing said so. `duplicateCorrelation` and `calcNormFactors` pay
+  their original below a floor and nothing said so. `duplicateCorrelation` and `calcNormFactors` pay
   unconditionally; ComBat-seq has a floor near a thousand genes; the weighted `lmFit` branch one
   near four thousand; the unweighted branch and `removeBatchEffect` are parity until the matrix is
-  large. Under a gate a companion is one vendor call plus 0.3 to 0.6 ms.
+  large. Under a gate a companion is one original call plus 0.3 to 0.6 ms.
 
 - **The package stopped warning about its own default.** `min(8, detectCores() - 2)` is 6 on an
   M3 with 4 performance cores, so every fresh session opened by saying that might be slower than
@@ -92,7 +92,7 @@ work they throw away.
 Windows is a supported platform, and the dispatch layer no longer nests.
 
 - **Nested dispatch is blocked on every backend, not just fork.** `ComBat_seq_parallel()`
-  dispatches the tagwise loop across batches and ships the vendor closure, whose environment
+  dispatches the tagwise loop across batches and ships the original closure, whose environment
   still carries the rebound `estimateGLMTagwiseDisp`; inside the worker that symbol dispatched
   again over gene rows. The guard against this was `mc.allow.recursive = FALSE`, an argument to
   `parallel::mclapply`, so it covered the fork branch alone. Windows runs `mclapply` serially and
@@ -115,7 +115,7 @@ Windows is a supported platform, and the dispatch layer no longer nests.
 - **The default worker count is capped at PERFORMANCE cores where there is no fork().** On a hybrid
   CPU those are not the core count: an Ultra 185H reports 16 physical cores, 6 of which are
   performance cores and 10 efficiency. Performance cores are read from the topology rather than a
-  vendor table — only they carry SMT, so logical minus physical gives 6 — degrading to the physical
+  original table — only they carry SMT, so logical minus physical gives 6 — degrading to the physical
   count on uniform machines. The cap is deliberately not applied where fork() exists: macOS
   measures 5.37x at eight workers on a chip with four performance cores, because a forked worker on
   an efficiency core still adds throughput, while a socket worker also costs a serialised copy. On
@@ -134,7 +134,7 @@ Windows is a supported platform, and the dispatch layer no longer nests.
   over PSOCK with the gate forced open, 1,200 samples: 0.14x at 21.6M cells and 0.24x at 60M,
   improving with size and never approaching parity, and worse with every worker added. On the
   TCGA cohort it measured 0.50x, and `removeBatchEffect_parallel()` inherits it because the
-  vendor rebinds a single `lmFit` call -- so two companions were slower than the functions they
+  original rebinds a single `lmFit` call -- so two companions were slower than the functions they
   wrap. No threshold rescues that, so on a platform without fork the fast branch now stays
   whole: both measure at parity instead of 0.50x and 0.38x. An explicit `combat.min.ls.cells`
   still reaches the split, and output is `identical()` either way -- this decides who computes,
@@ -162,7 +162,7 @@ Diagnostic fix; the companions are unchanged from 0.4.8.
 # rnaparallel 0.4.8
 
 - **New: `removeBatchEffect_parallel()`.** Rebinds the single `lmFit` call inside
-  `limma::removeBatchEffect` and runs the vendor unchanged. 1.70x / 2.83x / 3.37x at 2 / 4 / 8
+  `limma::removeBatchEffect` and runs the original unchanged. 1.70x / 2.83x / 3.37x at 2 / 4 / 8
   workers on TCGA, `identical()` throughout.
 - A backend that falls back to serial is no longer reported as parallel in the timing line.
   `mclapply` on Windows and a `future` plan resolving in one process were both counted as forks.
@@ -179,7 +179,7 @@ Diagnostic fix; the companions are unchanged from 0.4.8.
   lazy-load database, which surfaces inside forked workers as what looks like a data fault. This
   reports it; the fix is to restart R.
 - **New: progress reporting.** `options(combat.timing = TRUE)` prints one elapsed line per call,
-  `combat.quiet` silences the vendor's own output, `combat.timing.min` hides fast steps, and every
+  `combat.quiet` silences the original's own output, `combat.timing.min` hides fast steps, and every
   companion takes `label`. The engine column reports what *ran*: a call under a size gate says
   `serial`, because a companion returning `identical()` output at serial pace otherwise looks
   exactly like one that forked.
@@ -215,10 +215,10 @@ Diagnostic fix; the companions are unchanged from 0.4.8.
 # rnaparallel 0.4.2
 
 - `data.frame` counts, which `sva::ComBat_seq` accepts, crashed the quantile-match gate. A
-  non-matrix input now goes to the vendor whole.
+  non-matrix input now goes to the original whole.
 - On sparse input the per-batch tagwise dispatch checked results against the unfiltered row count,
   so the dominant stage was computed in parallel, discarded, and recomputed serially with no
-  signal. It now reads the vendor's own filtered matrix.
+  signal. It now reads the original's own filtered matrix.
 - Garbage `combat.fork` and `combat.min.*` values refuse loudly instead of silently changing
   behaviour.
 
@@ -227,9 +227,9 @@ Diagnostic fix; the companions are unchanged from 0.4.8.
 - **Correctness: `ComBat_seq_parallel()` returned output that depended on `chunks`** when the
   design was batch-only and some fits did not converge. edgeR's one-group kernel is not a pure
   function of the gene it fits in that case. Both `glmFit` and the tagwise dispersion now detect
-  that layout and call the vendor whole.
+  that layout and call the original whole.
 - Fork thresholds retuned against measured crossovers, several of which had made the companion
-  slower than the vendor on small inputs. `glmFit` gained its own `combat.min.glm.cells`.
+  slower than the original on small inputs. `glmFit` gained its own `combat.min.glm.cells`.
 - Dispatch overhead cut: no `BiocParallel` param rebuild and no core-count process per call.
 
 # rnaparallel 0.3.0

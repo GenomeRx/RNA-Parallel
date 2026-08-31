@@ -4,7 +4,7 @@
 ## helper_seq_parallel.R plays for ComBat-seq, and reuses its dispatch layer unchanged:
 ## combat_row_chunks, combat_parallel_lapply, combat_parallel_check, combat_row_order.
 ##
-## Nothing here reimplements limma. The vendor function is called unchanged on each block.
+## Nothing here reimplements limma. The original function is called unchanged on each block.
 ## What this file does is resolve, once and on the full matrix, the arguments a block would
 ## otherwise reinterpret, and refuse to split when a block would take a different branch
 ## than the whole matrix would.
@@ -75,13 +75,13 @@ rp_weights_rows <- function(w, ii) {
 #' Decide whether a row split can reproduce the branch the whole matrix takes
 #'
 #' Returns TRUE when every block provably lands on the same side of `NoProbeWts` as the
-#' full matrix, reading the vendor's own guard expression rather than approximating it.
+#' full matrix, reading the original's own guard expression rather than approximating it.
 #' Non-positive weights become NA and are punched into M first, so the finiteness test is
 #' taken on the matrix limma will actually branch on.
 #'
-#' The `gls` punch is deliberately a superset of the vendor's: gls.series punches on
+#' The `gls` punch is deliberately a superset of the original's: gls.series punches on
 #' `w < 1e-15` after mapping NA to 0, and this punches non-finite weights as well. A `+Inf`
-#' weight therefore reports the split unsafe where the vendor would have tolerated it, which
+#' weight therefore reports the split unsafe where the original would have tolerated it, which
 #' costs a serial run on an input nobody has. The alternative is a guard that is right by
 #' coincidence.
 #'
@@ -158,7 +158,7 @@ rp_invariant <- function(parts, fields, what) {
     if (!identical(names(parts[[k]]), nm1)) {
       stop(what, ": block 1 returned (", paste(nm1, collapse = ", "), ") and block ", k,
            " returned (", paste(names(parts[[k]]), collapse = ", "), "). Different component ",
-           "sets mean the blocks took different branches inside the vendor. Refusing to ",
+           "sets mean the blocks took different branches inside the original. Refusing to ",
            "assemble one result out of two algorithms.", call. = FALSE)
     }
   }

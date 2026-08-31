@@ -145,7 +145,7 @@ combat_backend <- function(fn = NULL) {
 #' @param interleave Round-robin the rows across chunks. `FALSE` gives the old
 #'   contiguous blocks, which is only useful for reproducing the imbalance.
 #' @param min_rows Smallest number of rows any chunk may hold. The chunk count is
-#'   clamped to `ntag %/% min_rows` so no chunk falls below it. Callers whose vendor
+#'   clamped to `ntag %/% min_rows` so no chunk falls below it. Callers whose original
 #'   function branches on block shape pass 2; the default 1 reproduces the old clamp.
 #' @return A list of integer vectors covering `seq_len(ntag)` exactly once.
 #' @noRd
@@ -199,7 +199,7 @@ combat_row_order <- function(idx) {
 #' environment holding just what its body reads, and that environment's PARENT decides how the
 #' body's remaining calls resolve -- `vapply`, `unname`, `do.call`, `[`. Parented at
 #' `globalenv()` they resolved through the user's workspace first, so a user binding named
-#' `vapply` changed the companion's numbers while leaving the vendor untouched: measured, a
+#' `vapply` changed the companion's numbers while leaving the original untouched: measured, a
 #' shadowed `vapply` moved `calcNormFactors_parallel` 8.59e-06 off `edgeR::normLibSizes` with
 #' no error and no warning, on the serial backend, on every platform.
 #'
@@ -237,7 +237,7 @@ rp_home <- function() environment(rp_copy_free)
 #' unregistered `foreach` gets this package's own cluster and is therefore the copying form.
 #'
 #' `serial` answers FALSE deliberately. Nothing dispatches there, so the gate decides between
-#' one whole vendor call and the vendor walked over blocks in one process, and the whole call
+#' one whole original call and the original walked over blocks in one process, and the whole call
 #' is the faster of the two: the fast `lm.series` branch measured 0.70x split that way.
 #' @param parallel_backend The resolved backend, a name or a function.
 #' @return TRUE when a worker reads the payload without a serialised copy.
@@ -274,8 +274,8 @@ rp_copy_free <- function(parallel_backend) {
 #' Windows over PSOCK with the gate forced open, 1,200 samples, the split never approaches
 #' parity and gets worse with every worker added:
 #'
-#'   18,000 genes  (21.6M cells, vendor 0.5 s)  0.14x at 2 workers, 0.08x at 4
-#'   50,000 genes  (60.0M cells, vendor 1.4 s)  0.24x at 2 workers, 0.10x at 4
+#'   18,000 genes  (21.6M cells, original 0.5 s)  0.14x at 2 workers, 0.08x at 4
+#'   50,000 genes  (60.0M cells, original 1.4 s)  0.24x at 2 workers, 0.10x at 4
 #'
 #' On the TCGA cohort the same split measured 0.50x. There is no threshold that rescues that,
 #' so without fork the gate CLOSES rather than rising and the fast branch stays whole.
@@ -307,7 +307,7 @@ rp_ls_min_cells <- function(option, fork_default, parallel_backend) {
 #' moves 8,000 to 48,000, straddling the 2e4 cell gate that used to decide it.
 #'
 #' Measured on this M3 at the default worker count, gate forced open, median of 9, companion
-#' against vendor, every arm `identical()`, at 8 / 24 / 48 arrays:
+#' against original, every arm `identical()`, at 8 / 24 / 48 arrays:
 #'
 #'   500 genes    0.71x  0.57x  0.75x
 #'   1,000        1.16x  1.26x  1.25x
@@ -336,8 +336,8 @@ rp_wt_min_genes <- function() {
 #' has to earn a serialised copy per chunk as well. Measured on Windows with the gate forced
 #' open:
 #'
-#'   1.8M cells  (vendor 1.2 s)   1.05x at 2 workers, 0.89x at 4, 0.64x at 6
-#'   21.6M cells (vendor 15.8 s)  1.58x at 2 workers, 1.53x at 4, 1.36x at 6
+#'   1.8M cells  (original 1.2 s)   1.05x at 2 workers, 0.89x at 4, 0.64x at 6
+#'   21.6M cells (original 15.8 s)  1.58x at 2 workers, 1.53x at 4, 1.36x at 6
 #'
 #' Unlike the least-squares split this one does pay at scale, so the gate rises instead of
 #' closing: break-even sits around two million cells, an order of magnitude above the fork
@@ -373,7 +373,8 @@ rp_order_min_cells <- function(parallel_backend) {
 #' the right answer at the speed of the function it wraps.
 #'
 #' `future` is the only backend that runs real workers there without the caller registering a
-#' cluster first, and it measured 2.92x on the cohort against `foreach`'s 0.28x. But it needs a
+#' cluster first, and on the Windows machine that comparison was made on it measured 2.92x on the
+#' cohort against `foreach`'s 0.28x. But it needs a
 #' plan, and this package will not set one: a caller's plan is theirs, and silently starting
 #' sixteen processes inside someone's session is worse than being slow. Defaulting to `future`
 #' unconditionally would therefore hand most Windows users a warning on every dispatch and no
@@ -633,7 +634,7 @@ combat_default_workers <- function(workers = NULL) {
 #' 6 performance cores and 10 efficiency ones -- not a rounding error, but the difference
 #' between a sensible default and one that recruits ten slow workers.
 #'
-#' The topology answers it without a vendor table: on Intel hybrid parts only performance cores
+#' The topology answers it without an original table: on Intel hybrid parts only performance cores
 #' carry SMT, so the number of logical processors ABOVE the physical count is the number of cores
 #' with a second thread. 22 logical against 16 physical gives 6, which is right. The formula
 #' degrades correctly everywhere else: on a uniformly hyperthreaded machine every core has a
@@ -960,7 +961,7 @@ combat_cluster_stop <- function() {
 #'   \item{`BiocParallel`}{`BiocParallel::bplapply` with `MulticoreParam`. No new
 #'     dependency in practice, since \pkg{sva} depends on it.}
 #'   \item{`foreach`}{`foreach::%dopar%` over a cached cluster from `doParallel`,
-#'     FORK on Unix and PSOCK on Windows. Slower than the vendor on the limma and
+#'     FORK on Unix and PSOCK on Windows. Slower than the original on the limma and
 #'     edgeR paths, measured 0.24x to 0.41x against `limma::lmFit` at four workers,
 #'     because `doParallel` serialises each task's closure and the closure captures
 #'     the matrix. Correct, and worth choosing only where a fork is unavailable.}
@@ -1008,7 +1009,7 @@ combat_parallel_lapply <- function(idx, f, workers,
   # `f` is evaluated on every path this function has, but not until a worker touches it, and
   # until then it is a promise. serialize() writes a promise together with its PRENV, so each
   # dispatched task carried the caller's evaluation frame, that frame's own unforced promises,
-  # and through them the vendor's frames and the entry point's raw inputs. Measured on the
+  # and through them the original's frames and the entry point's raw inputs. Measured on the
   # upperquartile dispatch: 14,387,651 B per task before, 2,026,039 B after. `idx` needs no
   # such treatment; the tagging below forces it before any branch.
   force(f)
@@ -1138,7 +1139,7 @@ combat_parallel_lapply <- function(idx, f, workers,
   }
 
   # A dispatch already running inside one of this package's workers must not open a second
-  # pool. ComBat-seq dispatches the tagwise loop ACROSS BATCHES and ships the vendor closure,
+  # pool. ComBat-seq dispatches the tagwise loop ACROSS BATCHES and ships the original closure,
   # whose environment still carries the rebound `estimateGLMTagwiseDisp`; inside the worker
   # that symbol dispatches AGAIN over gene rows. The result is workers + workers^2 processes:
   # measured 2 outer and 4 inner for `workers = 2L` on Windows, which extrapolates to 272 at
@@ -1235,7 +1236,7 @@ combat_parallel_lapply <- function(idx, f, workers,
     # a silent serial run looks identical to a parallel one until you time it
     if (is.null(.combat_clusters$warned_windows)) {
       # Not foreach. Measured on Windows, foreach fell 1.18x, 0.94x, 0.57x, 0.28x at 2, 4, 8
-      # and 16 workers while future held 2.92x on the cohort, and combat_default_backend()
+      # and 16 workers while future held 2.92x on the cohort of the day, and combat_default_backend()
       # picks future itself once a plan exists. Sending people to the slower one at the exact
       # moment they discover the problem is the opposite of helping.
       message("mclapply cannot fork on Windows, so this ran serially. ",
@@ -1324,7 +1325,7 @@ combat_parallel_lapply <- function(idx, f, workers,
 
       # A caller's own `doRNG` registration rewrites the MASTER's .Random.seed on every
       # %dopar%. ComBat-seq's own sample() lives in monte_carlo_int_NB on the serial side, so
-      # a leaked stream is a different answer from the vendor under shrink = TRUE. Nothing
+      # a leaked stream is a different answer from the original under shrink = TRUE. Nothing
       # here consumes the stream, so restoring it costs nothing and makes the claim above
       # -- that dispatch never moves the caller through the random stream -- actually true.
       if (exists(".Random.seed", envir = globalenv(), inherits = FALSE)) {
@@ -1549,7 +1550,7 @@ glmFit_rows_parallel <- function(y, design, dispersion, offset, weights = NULL,
 
   # Rebuilt against an environment holding only what the body reads. A closure is serialised
   # WITH its defining environment, so on a socket backend this frame's live bindings and its
-  # unforced promises travel with every task, and the promises reach back through the vendor's
+  # unforced promises travel with every task, and the promises reach back through the original's
   # frames into the entry point's raw inputs. Invisible on a forking backend, where the child
   # inherits the pages, which is why it survived this long.
   # Measured on 1,200 x 60: the two glmFit dispatches went 5,560,242 B to 1,201,690 B and
@@ -1637,7 +1638,7 @@ glmFit_rows_parallel <- function(y, design, dispersion, offset, weights = NULL,
 # Derived from sva (Zhang, Parmigiani and Johnson), Artistic-2.0.
 #
 # The sva 3.54.0 `match_quantiles` body, deparsed at width.cutoff = 500. The only place
-# this package holds vendor code, so it is pinned:
+# this package holds original code, so it is pinned:
 # `match_quantiles_rows` below is a transcription of exactly this text and runs only while the
 # backend still deparses to it.
 .match_quantiles_pinned <- c(
@@ -1667,17 +1668,17 @@ glmFit_rows_parallel <- function(y, design, dispersion, offset, weights = NULL,
 #' The same three branches in the same order, taken over every cell at once instead of one
 #' cell at a time. `pnbinom` and `qnbinom` are vectorised C and each cell reads only its own
 #' arguments, so one call over the selected cells computes exactly what the cell loop computes.
-#' The `1 +` on the `qnbinom` branch is part of the vendor body and is easy to drop when
+#' The `1 +` on the `qnbinom` branch is part of the original body and is easy to drop when
 #' transcribing from a description of it rather than from the body itself.
 #'
 #' `old_phi` and `new_phi` are per GENE, so the row each selected cell belongs to has to be
 #' recovered from its linear index to look the dispersion up. That is the only arithmetic here
 #' the cell loop does not do, and it indexes rather than computes.
 #'
-#' The logical `NA` start matters: the vendor's result type is whatever its assignments promote
+#' The logical `NA` start matters: the original's result type is whatever its assignments promote
 #' that matrix to, integer while every cell keeps its count and double once one cell takes the
 #' `qnbinom` branch. `out[] <- counts_sub` promotes identically and, unlike `out <- counts_sub`,
-#' keeps the vendor's absent dimnames rather than carrying the input's.
+#' keeps the original's absent dimnames rather than carrying the input's.
 #'
 #' This replaced a per-row loop, which is why the type and dimnames notes above are stated
 #' rather than assumed: measured 0.508 s to 0.370 s on an 18,270 x 28 slice, and `identical()`
@@ -1709,28 +1710,28 @@ match_quantiles_rows <- function(counts_sub, old_mu, old_phi, new_mu, new_phi) {
 #'
 #' The body gate is the price of holding a copy at all. A transcription cannot follow an
 #' upstream edit, so the backend's deparsed body must still equal `.match_quantiles_pinned`
-#' byte for byte; one changed character and the slice goes back to the vendor.
+#' byte for byte; one changed character and the slice goes back to the original.
 #'
-#' The NA gate exists because the vendor ERRORS on a missing count: `if (counts_sub[a, b] <=
+#' The NA gate exists because the original ERRORS on a missing count: `if (counts_sub[a, b] <=
 #' 1)` is `if (NA)`. `which()` drops NA instead, so the row form would return an NA cell and
 #' no error at all. `old_mu` and `old_phi` reach that same condition through `tmp_p`, so they
-#' are checked too. Falling back preserves the vendor's own error message.
+#' are checked too. Falling back preserves the original's own error message.
 #' @noRd
 combat_mq_dispatch <- function(mq, counts_sub, old_mu, old_phi) {
-  # NULL means call the vendor WHOLE: these inputs reach the vendor's own `if (NA)` error or
+  # NULL means call the original WHOLE: these inputs reach the original's own `if (NA)` error or
   # a degenerate shape, and running it unsliced preserves that behaviour byte for byte,
   # error message included. `old_phi <= 0` is included because `size = 1/old_phi` turns
   # non-positive dispersions into NaN probabilities the row form would silently keep.
-  # is.finite has no data.frame method, and the vendor accepts data.frame counts, so a
-  # non-matrix goes to the vendor whole before anything here can touch it.
+  # is.finite has no data.frame method, and the original accepts data.frame counts, so a
+  # non-matrix goes to the original whole before anything here can touch it.
   #
   # Three conditions below are not reachable from ComBat-seq, whose `mu_hat` is a matrix of
   # fitted values and whose `phi` always has one entry per gene. They are here because this is
   # the gate's contract, not ComBat-seq's: a NEGATIVE finite `old_mu`, an `old_phi` shorter
   # than the matrix, or an `old_mu` whose dim differs all make `pnbinom` return NaN or read the
-  # wrong cell, and the vendor ERRORS on that (`if (abs(NaN - 1) < 1e-04)` is `if (NA)`) while
+  # wrong cell, and the original ERRORS on that (`if (abs(NaN - 1) < 1e-04)` is `if (NA)`) while
   # the vectorised form's `which()` drops the NA and returns a plausible half-matched matrix
-  # with no signal. The whole point of falling back is to preserve the vendor's own behaviour,
+  # with no signal. The whole point of falling back is to preserve the original's own behaviour,
   # so the gate has to be complete rather than complete-for-today's-only-caller.
   #
   # The finiteness tests are reductions rather than `all(is.finite(x))`, which allocates a
@@ -1751,7 +1752,7 @@ combat_mq_dispatch <- function(mq, counts_sub, old_mu, old_phi) {
   op <- options(scipen = 0L); on.exit(options(op), add = TRUE)
   if (!identical(deparse(body(mq), width.cutoff = 500L), .match_quantiles_pinned)) {
     # the gate did its job, and that is exactly why it has to be visible: correct numbers at
-    # vendor speed is indistinguishable from correct numbers at our speed
+    # original speed is indistinguishable from correct numbers at our speed
     rp_note_fallback("match_quantiles")
     return(mq)
   }
@@ -1770,7 +1771,7 @@ combat_mq_dispatch <- function(mq, counts_sub, old_mu, old_phi) {
 #' depends on its own gene and nothing else. No cross-row term exists to lose.
 #'
 #' Each slice is matched by `match_quantiles_rows()`, a row-vectorised transcription of the
-#' sva 3.54.0 body and the one copy of vendor code this package holds. Drift is gated, not
+#' sva 3.54.0 body and the one copy of original code this package holds. Drift is gated, not
 #' assumed away: `combat_mq_dispatch()` compares the backend's body against the pinned text
 #' byte for byte and hands the slice back to the backend's own function the moment they
 #' differ, or the moment an input carries an NA.
@@ -1802,7 +1803,7 @@ match_quantiles_parallel <- function(mq, counts_sub, old_mu, old_phi, new_mu, ne
   # shipping its whole frame, so the cost this was aimed at was not being paid to begin with.
   # Rebuilt against an environment holding only what the body reads. A closure is serialised
   # WITH its defining environment, so on a socket backend this frame's live bindings and its
-  # unforced promises travel with every task, and the promises reach back through the vendor's
+  # unforced promises travel with every task, and the promises reach back through the original's
   # frames into the entry point's raw inputs. Invisible on a forking backend, where the child
   # inherits the pages, which is why it survived this long.
   # Measured on 1,200 x 60 counts: 8,603,855 B shipped per task against 662,975 B after.
@@ -1928,7 +1929,7 @@ estimateGLMTagwiseDisp_rows_parallel <- function(y, design = NULL, dispersion = 
 
   # Rebuilt against an environment holding only what the body reads. A closure is serialised
   # WITH its defining environment, so on a socket backend this frame's live bindings and its
-  # unforced promises travel with every task, and the promises reach back through the vendor's
+  # unforced promises travel with every task, and the promises reach back through the original's
   # frames into the entry point's raw inputs. Invisible on a forking backend, where the child
   # inherits the pages, which is why it survived this long.
   .lean <- new.env(parent = parent.env(environment()))

@@ -56,7 +56,7 @@ The batch-corrected matrix \code{limma::removeBatchEffect} returns, \code{identi
 \description{
 Runs \code{limma::removeBatchEffect} itself. The one expensive call inside it, \code{lmFit}, is rebound
 to \code{\link[=lmFit_parallel]{lmFit_parallel()}} in a child of limma's environment; every other symbol in the body still
-resolves to limma's own code, and the returned matrix is \code{identical()} to the vendor's.
+resolves to limma's own code, and the returned matrix is \code{identical()} to the original's.
 }
 \section{Why this one is worth having}{
 
@@ -76,14 +76,14 @@ the whole product costs a fraction of the fit it follows.
 
 \section{When this is worth reaching for}{
 
-On large matrices, and not before. This companion IS the \code{lmFit} call inside the vendor, so
+On large matrices, and not before. This companion IS the \code{lmFit} call inside the original, so
 it inherits that function's answer exactly: below the least-squares gate there is nothing to
-split and the companion is the vendor plus about a millisecond. Measured on an M3 at the
-default worker count, companion against vendor, every arm \code{identical()}: 1.00x at 2,000
+split and the companion is the original plus about a millisecond. Measured on an M3 at the
+default worker count, companion against original, every arm \code{identical()}: 1.00x at 2,000
 genes by 20 samples, 0.92x at 20,000 x 50, 0.98x at 20,000 x 200, then 1.91x at 20,000 x 500
 once the matrix is large enough for the split to run at all.
 
-A wide batch design is what makes it worth having: the vendor's cost grows worse than
+A wide batch design is what makes it worth having: the original's cost grows worse than
 linearly in samples, measured 8.5 s at 948 samples and 154 batches against 44.2 s at 3,000
 samples and 250 batches.
 }

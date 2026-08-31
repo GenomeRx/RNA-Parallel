@@ -23,7 +23,7 @@ fixture <- function(G = 200L, S = 12L, seed = 5L) {
 
 ## A backend that runs the work and then corrupts one chunk. If the entry point actually
 ## dispatches through it, the corruption reaches the result. A silent forwarder returns the
-## vendor's answer untouched and this test fails, which is the whole point.
+## original's answer untouched and this test fails, which is the whole point.
 poison_chunk <- function(field) {
   function(idx, f, workers) {
     r <- lapply(idx, f)
@@ -75,7 +75,7 @@ test_that("calcNormFactors_parallel actually dispatches", {
   expect_identical(spy$count(), 2L)
 
   # The DGEList path rebinds a DIFFERENT symbol -- the generic edgeR's DGEList method calls --
-  # so it needs its own dispatch count. Point that rebind at the wrong name and the vendor
+  # so it needs its own dispatch count. Point that rebind at the wrong name and the original
   # runs fully serially, returns identical() output, and every equivalence assertion in this
   # suite stays green: measured 2 dispatches on a matrix and 0 on a DGEList.
   spy2 <- counting()
@@ -137,7 +137,7 @@ test_that("an unreachable option value cannot silently disable the split", {
   skip_if_no_limma()
   d <- fixture()
   ref <- limma::lmFit(d$v, d$design)
-  # Above the gate the split runs; below it the vendor is called whole. Both are identical(),
+  # Above the gate the split runs; below it the original is called whole. Both are identical(),
   # which is exactly why the gate needs its own assertion rather than being inferred.
   # voom weights carry no arrayweights attribute, so this input takes the slow branch and
   # is gated by combat.min.cells rather than combat.min.ls.cells. Setting the wrong one of

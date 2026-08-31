@@ -61,7 +61,7 @@ test_that("calcNormFactors_parallel uses modern edgeR without renaming its API",
   expect_silent(got <- calcNormFactors_parallel(d$counts, workers = 1L))
   expect_identical(got, edgeR::normLibSizes(d$counts))
 
-  # The line above cannot tell 0.4.5 from 0.4.4: on edgeR 4.4.2 the two vendor names return
+  # The line above cannot tell 0.4.5 from 0.4.4: on edgeR 4.4.2 the two original names return
   # identical objects on valid input, so it passes against pre-rename code too. Assert which
   # object was actually resolved, which is the thing the rename changed.
   be <- rnaparallel:::calcnorm_backend()
@@ -100,12 +100,12 @@ test_that("the DGEList rebind is gated for reachability like every other rebind"
 
   d <- sim()
   # the drift that used to pass: qualify the inner call and the rebind becomes a no-op, so a
-  # DGEList runs the vendor serially and still returns identical() output. Measured 2
+  # DGEList runs the original serially and still returns identical() output. Measured 2
   # dispatches before, 0 after, with no error raised and the equivalence test still green.
   orig <- get(nm, envir = ns, inherits = FALSE)
   drifted <- orig
   txt <- paste(deparse(body(orig)), collapse = "\n")
-  skip_if(!grepl(paste0("\\b", generic, "\\("), txt), "vendor body is not shaped as expected")
+  skip_if(!grepl(paste0("\\b", generic, "\\("), txt), "original body is not shaped as expected")
   body(drifted) <- parse(text = sub(paste0("(?<![.:\\w])", generic, "\\("),
                                     paste0("edgeR::", generic, "("), txt, perl = TRUE))[[1L]]
 
@@ -124,7 +124,7 @@ test_that("the class guard follows the S4 inheritance chain edgeR dispatches on"
 
   # class() on an S4 object gives only the concrete name, so a RangedSummarizedExperiment --
   # what tximeta and summarizeOverlaps hand back -- walked past a class()-only guard and
-  # reached the vendor's as.matrix, which is the funnelling the refusal exists to prevent
+  # reached the original's as.matrix, which is the funnelling the refusal exists to prevent
   skip_if_not_installed("GenomicRanges")
   rse <- SummarizedExperiment::SummarizedExperiment(
     assays = list(counts = d$counts),
@@ -163,7 +163,7 @@ test_that("lmFit_parallel is identical across chunk layouts", {
 test_that("lmFit_parallel keeps the list(NULL, NULL) dimnames shape rbind would drop", {
   skip_if_no_limma()
   # An unnamed matrix with an unnamed design. gls.series has no coef.names fallback, so the
-  # vendor returns dimnames list(NULL, NULL) while rbind alone collapses that to NULL.
+  # original returns dimnames list(NULL, NULL) while rbind alone collapses that to NULL.
   set.seed(1)
   M <- matrix(stats::rnorm(80), 20, 4)
   des <- cbind(rep(1, 4), c(0, 0, 1, 1)); colnames(des) <- NULL
@@ -222,7 +222,7 @@ test_that("duplicateCorrelation_parallel refuses the ndups path", {
                "block")
 })
 
-test_that("duplicateCorrelation_parallel preserves zero-row vendor outcomes", {
+test_that("duplicateCorrelation_parallel preserves zero-row original outcomes", {
   skip_if_no_limma()
   outcome <- function(f) tryCatch(suppressWarnings(f()), error = conditionMessage)
 
@@ -302,11 +302,11 @@ test_that("the duplicateCorrelation memo engages and stays identical, weighted o
                    limma::duplicateCorrelation(Mna, des, block = blk))
 })
 
-test_that("the memo rebinds the vendor's own mixedModel2Fit, not a copy of it", {
+test_that("the memo rebinds the original's own mixedModel2Fit, not a copy of it", {
   skip_if_no_limma()
   # This is the invariant that replaced roughly a hundred lines of body-text pinning: the
   # package holds no statmod source, so the object in the rebind environment must BE the
-  # vendor's, differing only in where its La.svd resolves.
+  # original's, differing only in where its La.svd resolves.
   memo <- rnaparallel:::rp_dupcor_memo(limma::duplicateCorrelation,
                                        environment(limma::duplicateCorrelation))
   fast <- environment(memo)$mixedModel2Fit

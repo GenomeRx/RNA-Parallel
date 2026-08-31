@@ -20,9 +20,9 @@ test_that("an unknown backend is refused, not silently ignored", {
 })
 
 test_that("every installed backend gives a bit-identical result", {
-  vendor <- backend_fn()
+  original <- backend_fn()
   d <- make_counts(21, G = 300, n_per_batch = c(7, 6))
-  ref <- quietly(vendor(d$counts, d$batch, group = NULL))
+  ref <- quietly(original(d$counts, d$batch, group = NULL))
 
   needs <- c(mclapply = "parallel", future = "future.apply",
              BiocParallel = "BiocParallel", foreach = "doParallel", serial = "base")
@@ -95,9 +95,9 @@ test_that("a custom executor function is accepted and gives identical results", 
   # The extension point. Anything with an lapply shape plugs in, which is how the
   # many frameworks were verified this way without the package
   # growing a branch per framework.
-  vendor <- backend_fn()
+  original <- backend_fn()
   d <- make_counts(24, G = 250, n_per_batch = c(6, 6))
-  ref <- quietly(vendor(d$counts, d$batch, group = NULL))
+  ref <- quietly(original(d$counts, d$batch, group = NULL))
 
   # preschedule=TRUE, which the named mclapply backend does not use
   presched <- function(idx, f, workers)
@@ -145,7 +145,7 @@ test_that("combat.fork = FALSE overrides a custom executor too", {
 })
 
 test_that("a dispatch inside a worker does not open a second pool", {
-  # ComBat-seq dispatches the tagwise loop across BATCHES and ships the vendor closure, whose
+  # ComBat-seq dispatches the tagwise loop across BATCHES and ships the original closure, whose
   # environment still carries the rebound estimateGLMTagwiseDisp; inside the worker that symbol
   # dispatched AGAIN over gene rows. Measured on Windows before the guard: workers = 2L gave 2
   # outer and 4 nested processes, which is workers + workers^2, or 272 at the 16-worker arm.
@@ -311,7 +311,7 @@ matrix_backends <- function() {
 
 test_that("every backend agrees on every argument path, RNG paths included", {
   skip_on_os("windows")   # matrix_backends()'s "presched" entry calls mclapply directly
-  vendor <- backend_fn()
+  original <- backend_fn()
   d <- make_counts(30, G = 200, n_per_batch = c(7, 7, 6), with_group = TRUE)
   n <- ncol(d$counts)
   covar <- cbind(cov1 = rep_len(c(0, 1), n), cov2 = rep_len(c(0, 0, 1, 1), n))
@@ -331,7 +331,7 @@ test_that("every backend agrees on every argument path, RNG paths included", {
   bes <- matrix_backends()
   for (p in paths) {
     if (p$seed) set.seed(4242)
-    ref <- quietly(do.call(vendor, c(list(counts = d$counts, batch = d$batch), p$a)))
+    ref <- quietly(do.call(original, c(list(counts = d$counts, batch = d$batch), p$a)))
     for (bn in names(bes)) {
       if (p$seed) set.seed(4242)
       got <- quietly(do.call(ComBat_seq_parallel, c(
@@ -368,9 +368,9 @@ test_that("no backend fails silently when a chunk errors", {
 test_that("an active future plan does not disturb the other backends", {
   # A caller's session may set a plan globally; a fork backend must not be affected by it.
   skip_if_not_installed("future.apply")
-  vendor <- backend_fn()
+  original <- backend_fn()
   d <- make_counts(31, G = 180, n_per_batch = c(6, 6))
-  ref <- quietly(vendor(d$counts, d$batch, group = NULL))
+  ref <- quietly(original(d$counts, d$batch, group = NULL))
 
   old <- future::plan(future::multisession, workers = 2)
   on.exit(future::plan(old), add = TRUE)
@@ -673,7 +673,7 @@ test_that("a caller's doRNG registration cannot move the master random stream", 
   idx <- rnaparallel:::combat_row_chunks(12L, chunks = 4L)
   set.seed(7); expected <- sample(1e6L, 2L)
   # ComBat-seq's own sample() is on the serial side, so a stream the dispatch moved is a
-  # different answer from the vendor under shrink = TRUE rather than a slower one
+  # different answer from the original under shrink = TRUE rather than a slower one
   set.seed(7)
   rnaparallel:::combat_parallel_lapply(idx, function(i) sum(i), workers = 2L,
                                        parallel_backend = "foreach",
@@ -722,9 +722,9 @@ test_that("the mclapply backend works with one core", {
 
 test_that("the foreach backend still agrees after the caching change", {
   skip_if_not_installed("doParallel")
-  vendor <- backend_fn()
+  original <- backend_fn()
   d <- make_counts(40, G = 200, n_per_batch = c(6, 6))
-  ref <- quietly(vendor(d$counts, d$batch, group = NULL))
+  ref <- quietly(original(d$counts, d$batch, group = NULL))
   got <- quietly(ComBat_seq_parallel(d$counts, d$batch, group = NULL,
                                      workers = 2L, parallel_backend = "foreach"))
   expect_identical(got, ref)
@@ -803,15 +803,15 @@ test_that("worker and chunk layouts do not change the answer", {
   }
 })
 
-test_that("a single batch fails the same way the vendor fails", {
+test_that("a single batch fails the same way the original fails", {
   # Not a companion defect. sva's ComBat_seq builds model.matrix(~ -1 + batch), which
-  # cannot take a one-level factor, so the vendor errors here too. Being a drop-in
+  # cannot take a one-level factor, so the original errors here too. Being a drop-in
   # means reproducing the failure, not papering over it.
-  vendor <- backend_fn()
+  original <- backend_fn()
   d <- make_counts(12, G = 60, n_per_batch = c(6, 6), adversarial = FALSE)
   one_batch <- rep("only", ncol(d$counts))
 
-  ref <- tryCatch(quietly(vendor(d$counts, one_batch, group = NULL)),
+  ref <- tryCatch(quietly(original(d$counts, one_batch, group = NULL)),
                   error = function(e) conditionMessage(e))
   par <- tryCatch(quietly(ComBat_seq_parallel(d$counts, one_batch, group = NULL, workers = 2L)),
                   error = function(e) conditionMessage(e))
