@@ -23,8 +23,11 @@
 ##   combat.min.order.cells  4e6   the rank and quantile stages inside normalisation
 ##   combat.min.dupcor.cells 5000  duplicateCorrelation's per-gene REML split
 ##   combat.min.glm.cells    1e5   glmFit's row split, which the shared 2e4 gate forked too eagerly
+##   combat.min.batch.cells  2e4   ComBat-seq's two across-batch dispatches
+##   combat.min.wt.genes     2000  limma's weighted per-gene loop, counted in GENES not cells
 withr::local_options(combat.min.cells = 0, combat.min.disp.cells = 0,
                      combat.min.ls.cells = 0, combat.min.norm.cells = 0,
                      combat.min.order.cells = 0,
                      combat.min.dupcor.cells = 0, combat.min.glm.cells = 0,
+                     combat.min.batch.cells = 0, combat.min.wt.genes = 0,
                      .local_envir = testthat::teardown_env())

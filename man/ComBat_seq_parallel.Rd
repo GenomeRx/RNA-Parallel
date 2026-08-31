@@ -15,7 +15,7 @@ ComBat_seq_parallel(
   gene.subset.n = NULL,
   workers = NULL,
   chunks = NULL,
-  parallel_backend = getOption("combat.backend", "mclapply"),
+  parallel_backend = getOption("combat.backend", combat_default_backend()),
   backend = NULL,
   label = NULL
 )
@@ -64,7 +64,7 @@ what you want. Passing \code{chunks = workers} explicitly is redundant. Raise it
 function form plugs in any framework this package does not name, including
 \code{parallel::parLapply} over a FORK or PSOCK cluster, \code{pbapply::pblapply},
 \code{furrr::future_map}, \verb{doFuture::\%dofuture\%}, or any \code{BiocParallel} BPPARAM.
-Defaults to \code{getOption("combat.backend", "mclapply")}.}
+Defaults to \code{getOption("combat.backend", combat_default_backend())}.}
 
 \item{backend}{Optional ComBat-seq function to wrap. Defaults to
 \code{sva::ComBat_seq}, falling back to a visible top-level \code{ComBat_seq}.}
@@ -147,6 +147,19 @@ estimation is cheaper and does not break even below 30,000, measuring
 \code{getOption("combat.min.disp.cells", 30000)}, and the GLM fit its own
 \code{getOption("combat.min.glm.cells", 1e5)}. One shared threshold made the
 dispersion split a net loss on small matrices with many batches.
+}
+
+\section{When this is worth reaching for}{
+
+Almost always, and it is the companion with the most to win: the original is measured in
+minutes on a real cohort. It does have a floor. Measured on an M3 at the default worker
+count, companion against original, every arm \code{identical()}: 0.69x at 300 genes by 20 samples,
+0.89x at 500 x 20, 1.19x at 1,000 x 20, 1.45x at 2,000 x 20, and 4.63x at 6,000 x 120.
+Below about a thousand genes call \code{sva::ComBat_seq} directly.
+
+The row-split gates already decline on an input that small; what still dispatches there is
+the per-batch work, which carries no size gate because one whole-matrix estimate per batch
+is worth a fork at any realistic scale and is not worth one at three hundred genes.
 }
 
 \examples{

@@ -33,8 +33,8 @@ knitr::opts_chunk$set(cache.path = "RNA_Parallel_cache/")
 `rnaparallel` runs the original function itself and parallelises its hot paths.
 `ComBat_seq_parallel` corrects the counts; `calcNormFactors_parallel`, `lmFit_parallel`,
 and `duplicateCorrelation_parallel` run the differential expression that
-follows. None of them reimplements a method from its description: the vendor is called unchanged on blocks of genes or
-samples, with at most a symbol rebound in a child of the vendor's own environment.
+follows. None of them reimplements a method from its description: the original is called unchanged on blocks of genes or
+samples, with at most a symbol rebound in a child of the original's own environment.
 
 The question is narrow on purpose: **does each companion return exactly what the original
 returns, and how much time does it save.** Not close, not correlated at 0.999. Identical, or it
@@ -77,6 +77,23 @@ library(rnaparallel)
 library(SummarizedExperiment)
 library(ggplot2)
 
+# Refuse a stale install before anything expensive runs. `git pull` updates this file and the
+# package SOURCE; it does not reinstall the package, and nothing downstream would notice. The
+# report stamps its own sessionInfo and keys every timing cache on packageVersion("rnaparallel"),
+# so rendering against a previous install produces a report labelled with the wrong version that
+# measured the wrong code, silently, after an hour. Skipped when the working tree is not to hand,
+# which is the case for a reader rendering from an installed copy of the package.
+.desc <- file.path("..", "..", "DESCRIPTION")
+if (file.exists(.desc)) {
+  .want <- as.character(read.dcf(.desc, fields = "Version")[[1L]])
+  .have <- as.character(packageVersion("rnaparallel"))
+  if (!identical(.want, .have)) {
+    stop("this working tree is rnaparallel ", .want, " but the installed package is ", .have,
+         ". A pull does not reinstall. From the repository root: R CMD INSTALL . ",
+         "(or devtools::install()), restart R, and render again.", call. = FALSE)
+  }
+}
+
 edgeR_norm <- if (exists("normLibSizes.default", envir = asNamespace("edgeR"), inherits = FALSE)) {
   edgeR::normLibSizes
 } else {
@@ -104,11 +121,53 @@ pal_stage <- c("ComBat_seq" = "#8172B3",
 
 # workers is run as asked: 8 means 8 forked processes, bounded only by detectCores(). Added
 # workers return less throughput each, so whether 8 beats 4 is what the sweep measures rather
-# than assumes. Not a core-type effect: forks migrate across the performance and efficiency
-# clusters, so no worker is stranded on a slow one.
+# than assumes.
+#
+# MACOS SWEEP. 2, 4, 6, 8. Every platform's sweep brackets its PERFORMANCE core count, which is
+# not always its core count. This is an Apple M3: 8 physical cores, 4 performance and 4
+# efficiency, and 8 logical, since none of them carries a second thread. Unlike the socket
+# backends the other platforms fall back to, a forked worker on an efficiency core still adds
+# throughput, because it shares the parent's pages instead of receiving a copy. Forks also
+# migrate across the two clusters, so no worker is stranded on a slow one, and the 8-worker arm
+# is measured rather than assumed to be worse.
+#
+# The Linux run used 4, 8, 16, 32 on a dual Xeon whose 16 cores all carry SMT, and the Windows
+# run used 2, 4, 6, 8 on an Ultra 9 185H with 6 performance cores. Same rule, three answers.
 # TCGA is corrected at every count; the last arm is the one the figures below use.
 tcga_workers <- c(2L, 4L, 6L, 8L)
 n_workers    <- max(tcga_workers)
+
+# BACKEND. mclapply, which is the package default wherever fork() exists. A forked worker reads
+# the matrix copy-on-write, so a large voom object costs nothing to distribute; the socket
+# backends must re-serialise it per chunk and measured slower than not parallelising at all.
+# Set as an option rather than left implicit so every companion call inherits the same one and
+# the machine table below reports what actually ran.
+options(combat.backend = "mclapply")
+options(future.globals.maxSize = 8 * 1024^3)
+
+# Accelerate is the system BLAS here and manages its own thread pool, so there is no
+# OPENBLAS_NUM_THREADS to pin as there is on Linux. A user-installed OpenBLAS or MKL build is
+# multi-threaded and would open a pool inside every forked worker on top of the fork, so the
+# thread count is reported either way rather than assumed.
+# sessionInfo()$BLAS is NULL on an R built against its own internal BLAS, and basename(NULL)
+# does not return character(0), it errors: "a character vector argument expected". That is in
+# this chunk, so such a machine would stop in the render's first seconds. All three reports
+# carry the same guard.
+blas_raw    <- sessionInfo()$BLAS
+blas_name   <- if (is.null(blas_raw) || !nzchar(blas_raw)) "R internal (reference)" else basename(blas_raw)
+blas_thread <- Sys.getenv("OPENBLAS_NUM_THREADS", Sys.getenv("VECLIB_MAXIMUM_THREADS", ""))
+blas_pinned <- identical(blas_thread, "1")
+if (grepl("openblas|mkl", blas_name, ignore.case = TRUE) && !blas_pinned)
+  warning("A multi-threaded BLAS (", blas_name, ") is loaded and its thread count is not 1. ",
+          "The worker sweep will oversubscribe this machine and speedups will be deflated.")
+
+# Reported, not assumed. Every note in this file is about a platform that has fork(), so a run
+# on one that does not would be describing something that is not happening.
+on_macos <- identical(Sys.info()[["sysname"]], "Darwin")
+if (!on_macos)
+  warning("This is the macOS report and this is not macOS. Section A describes fork() and the ",
+          "performance/efficiency split of an Apple M3. Render RNA_Parallel_linux.Rmd or ",
+          "RNA_Parallel_windows.Rmd instead.")
 
 ```
 
@@ -412,6 +471,29 @@ sim_timings <- do.call(rbind, lapply(sort(unique(c(1L, tcga_workers))), function
   data.frame(workers = w, seconds = r$secs, same = r$same)
 }))
 unlink(sim_file)
+
+# Hand SIGCHLD back to `parallel`. processx, which callr runs on, calls sigaction(SIGCHLD, ...)
+# on every process it starts and restores SIG_DFL on teardown rather than the handler it
+# displaced; `parallel` installs its own once, latched, and never reinstalls. So from the first
+# callr call onward `parallel` can no longer observe its forked workers exiting, and every
+# dispatch leaves one unreaped zombie per worker for the rest of the session. They hold a
+# process-table slot each and nothing else (no memory, no CPU), but slots are the binding
+# limit here, not memory: measured 493 zombies from a single eight-worker correction at this
+# plate count, against a 4,000 per-user ceiling. This call clears parallel's latch so the next
+# mcfork reinstalls the handler, and it returns immediately because nothing is stuck yet.
+#
+# Deliberately NOT inside a companion: with shutdown = TRUE it acts on every child past every
+# cleanup mark, so it would kill a caller's own concurrent workers, which is exactly what
+# combat_reap()'s spare snapshot exists to prevent. The report is the layer that mixes the two
+# packages, so the report is where this belongs. Unix only; parallel::cleanup is in the fork
+# half of the package and does not exist on Windows, where mclapply is serial and there are no
+# forked children to lose in the first place.
+if (.Platform$OS.type != "windows") {
+  ok <- tryCatch({ parallel:::cleanup(kill = TRUE, detach = TRUE, shutdown = TRUE); TRUE },
+                 error = function(e) FALSE)
+  if (!ok) warning("could not hand SIGCHLD back to parallel after the callr sweep; forked ",
+                   "workers will accumulate as zombies for the rest of this render")
+}
 
 sim_timings$implementation <- ifelse(sim_timings$workers == 1L, "sva::ComBat_seq",
                                      sprintf("ComBat_seq_parallel, %d workers", sim_timings$workers))
@@ -1259,18 +1341,39 @@ parallel arms run warm. The C.1 sweep is the isolated fresh-session measurement.
 Speed depends on the machine, so the machine is reported rather than left to be inferred.
 
 ```{r machine}
+# The same thirteen rows as the Linux and Windows reports, read from this platform's own
+# sources. Keeping the schema identical is what makes the three tables comparable side by
+# side; only where each value comes from changes.
 sysctl <- function(k) tryCatch(system2("sysctl", c("-n", k), stdout = TRUE, stderr = FALSE),
                                error = function(e) NA_character_)
-mac <- identical(Sys.info()[["sysname"]], "Darwin")
+sysctl_num <- function(k) suppressWarnings(as.numeric(sysctl(k)))
+
+n_log  <- parallel::detectCores()
+n_phys <- suppressWarnings(parallel::detectCores(logical = FALSE))
+if (is.na(n_phys) || n_phys < 1L) n_phys <- n_log
+# Apple silicon reports its performance cores directly, which no other platform here does.
+n_perf <- sysctl_num("hw.perflevel0.physicalcpu")
+if (is.na(n_perf) || n_perf < 1) n_perf <- n_phys
+mem_gb <- sysctl_num("hw.memsize") / 2^30
 
 data.frame(
-  quantity = c("CPU", "performance cores", "logical cores", "memory", "OS", "worker counts"),
+  quantity = c("CPU", "performance cores", "physical cores", "logical CPUs",
+               "threads per core", "NUMA nodes", "memory", "OS",
+               "BLAS", "BLAS pinned to 1 thread", "fork available", "backend",
+               "worker counts"),
   value = as.character(c(
-    if (mac) sysctl("machdep.cpu.brand_string") else NA_character_,
-    if (mac) sysctl("hw.perflevel0.physicalcpu") else NA_character_,
-    parallel::detectCores(),
-    if (mac) sprintf("%.0f GB", as.numeric(sysctl("hw.memsize")) / 2^30) else NA_character_,
+    if (on_macos) sysctl("machdep.cpu.brand_string") else NA_character_,
+    n_perf,
+    n_phys,
+    n_log,
+    sprintf("%.0f", n_log / n_phys),
+    1L,
+    if (is.na(mem_gb)) NA_character_ else sprintf("%.0f GB", mem_gb),
     paste(Sys.info()[["sysname"]], Sys.info()[["release"]]),
+    blas_name,
+    blas_pinned,
+    !identical(.Platform$OS.type, "windows"),
+    getOption("combat.backend"),
     paste(tcga_workers, collapse = ", "))))
 ```
 
@@ -1465,7 +1568,7 @@ ggplot(limma_speed, aes(factor(workers), speedup, fill = stage)) +
 Not everything in limma is worth forking, and the list of what was left alone is as much a part
 of the result as the list of what was not. `voom` measured 0.99x, because its `lowess` trend takes
 its span as a fraction of the gene count, so a block of half the genes fits a different curve and
-only the arithmetic after the trend splits. `contrasts.fit` is exactly splittable and the vendor
+only the arithmetic after the trend splits. `contrasts.fit` is exactly splittable and the original
 returns before a fork could finish starting. `eBayes`, `fitFDist` and `topTable` pool across every gene by construction.
 None of them ships as a `workers` argument that does nothing.
 

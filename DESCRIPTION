@@ -10,20 +10,13 @@ Authors@R: c(
            comment = "author of ComBat-seq, accelerated but not modified by this package"),
     person("Giovanni", "Parmigiani", role = "ctb", comment = "author of ComBat-seq"),
     person("W. Evan", "Johnson", role = "ctb", comment = "author of ComBat-seq"))
-Description: Parallel companions for RNA-seq tools. A companion never
-    reimplements the method: it calls the original function with its hot paths
-    rebound to row-parallel versions in a child of that function's own
-    environment, so every other symbol still resolves to the original code and
-    the result is identical() to a serial run rather than merely close to it.
-    ComBat-seq is the first. Its per-gene quantile matching, edgeR GLM fits and
-    tagwise dispersion estimation are split by gene row, and the common
-    dispersion is dispatched across batches. Works against Bioconductor sva or a
-    sourced copy of the upstream zhangyuqing/ComBat-seq repository, whichever is
-    loaded, and dispatches its parallelism through mclapply, future,
-    BiocParallel, foreach or serial. Companions for limma lmFit and
-    duplicateCorrelation, and for edgeR normLibSizes, follow the same
-    construction. The established calcNormFactors_parallel name remains the
-    public compatibility API.
+Description: Parallel companions for RNA-seq tools. Each calls the original
+    function unmodified, with hot paths rebound to row-parallel versions in a
+    child of that function's own environment, so the result is identical()
+    to a serial run rather than merely close to it. Covers ComBat-seq
+    (against Bioconductor sva or a sourced upstream copy), limma lmFit and
+    duplicateCorrelation, and edgeR normLibSizes. Dispatches through
+    mclapply, future, BiocParallel, foreach or serial.
 License: MIT + file LICENSE
 Encoding: UTF-8
 Depends: R (>= 4.1)

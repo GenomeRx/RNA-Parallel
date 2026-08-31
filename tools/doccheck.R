@@ -121,7 +121,18 @@ news <- readLines(file.path(root, "NEWS.md"), warn = FALSE)[1]
 chk(grepl(ver, news, fixed = TRUE),
     "NEWS.md does not open with the DESCRIPTION version", sprintf("DESCRIPTION %s, NEWS '%s'", ver, news))
 
-## 8. gated symbols ---------------------------------------------------------------------
+## 8. the README's version badge --------------------------------------------------------
+## A badge is the first thing a reader sees and the first thing to go stale, because nothing
+## about it breaks when it is wrong. It is the version people will quote back, so it is checked
+## against DESCRIPTION exactly as NEWS.md is.
+badge <- regmatches(rdt, regexpr("badge/version-[0-9][0-9.]*-", rdt))
+chk(length(badge) == 1L && identical(gsub("^badge/version-|-$", "", badge), ver),
+    "the README version badge does not match DESCRIPTION",
+    sprintf("badge %s, DESCRIPTION %s",
+            if (length(badge)) sQuote(gsub("^badge/version-|-$", "", badge)) else "<none found>",
+            ver))
+
+## 9. gated symbols ---------------------------------------------------------------------
 ## A reachability gate is the one guard against a rebind that silently stops reaching, so a doc
 ## that names the wrong set is worse than one that names none. This drifted already: the gate
 ## was cut from five symbols to three, and NEWS went on claiming five for two releases, because

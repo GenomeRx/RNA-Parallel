@@ -55,7 +55,7 @@ test_that("removeBatchEffect_parallel actually dispatches", {
   skip_no_limma()
   withr::local_options(list(combat.min.ls.cells = 0))
   d <- rbe_fixture()
-  # identical() alone cannot tell a working parallel layer from a dead one: the vendor called
+  # identical() alone cannot tell a working parallel layer from a dead one: the original called
   # unchanged returns exactly the same matrix at serial pace
   n <- 0L
   spy <- function(idx, f, w) { n <<- n + 1L; lapply(idx, f) }
@@ -77,11 +77,11 @@ test_that("removeBatchEffect_parallel refuses what lmFit_parallel refuses", {
 test_that("the lmFit rebind inside removeBatchEffect is gated for reachability", {
   skip_no_limma()
   d <- rbe_fixture()
-  # a limma that wrote limma::lmFit(...) would make the rebind a no-op: correct output, vendor
+  # a limma that wrote limma::lmFit(...) would make the rebind a no-op: correct output, original
   # speed, invisible to every equivalence assertion in this file
   drifted <- limma::removeBatchEffect
   txt <- paste(deparse(body(drifted)), collapse = "\n")
-  skip_if(!grepl("lmFit(", txt, fixed = TRUE), "vendor body is not shaped as expected")
+  skip_if(!grepl("lmFit(", txt, fixed = TRUE), "original body is not shaped as expected")
   body(drifted) <- parse(text = sub("lmFit(", "limma::lmFit(", txt, fixed = TRUE))[[1L]]
   expect_error(removeBatchEffect_parallel(d$y, batch = d$batch, workers = 2L,
                                           backend = drifted),

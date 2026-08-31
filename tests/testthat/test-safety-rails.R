@@ -142,3 +142,66 @@ test_that("the dupcor tail gate refuses a limma whose post-loop run stops decomp
   # and one that does not
   expect_true(dec(inject(quote(rho <- rho * 1)), 2L, 4L))
 })
+
+
+test_that("each least-squares branch reads its own size gate", {
+  # The Windows merge routed both lmFit branches through one function whose first act was to
+  # return combat.min.ls.cells when it was set, so raising the weightless gate silently raised
+  # the voom/weighted one from 2e4 to the same value and switched off a split measured at
+  # 2.52x-3.39x. The whole suite is blind to it by construction: setup-parallel.R sets every
+  # combat.min.* to 0, and 0 is returned from the first line for both branches.
+  ls_gate <- rnaparallel:::rp_ls_min_cells
+  withr::with_options(list(combat.min.ls.cells = 6e7, combat.min.cells = NULL), {
+    expect_identical(ls_gate("combat.min.ls.cells", 6e6, "mclapply"), 6e7)
+    expect_identical(ls_gate("combat.min.cells", 2e4, "mclapply"), 2e4)   # NOT 6e7
+  })
+  withr::with_options(list(combat.min.ls.cells = NULL, combat.min.cells = 5e5), {
+    expect_identical(ls_gate("combat.min.cells", 2e4, "mclapply"), 5e5)
+    expect_identical(ls_gate("combat.min.ls.cells", 6e6, "mclapply"), 6e6)
+  })
+})
+
+test_that("the break-even gates follow the backend's copy behaviour, not the OS", {
+  # These thresholds were tuned where a worker INHERITS the matrix. Keyed to the OS, a macOS
+  # caller on foreach got the inherited gate and lmFit measured 0.24x against the original.
+  # The question is the COPY, not fork(): foreach builds a FORK cluster on Unix and is still
+  # slow, because doParallel's cluster form serialises every task. So foreach is asked rather
+  # than assumed: doParallelMC drives mclapply and copies nothing, doParallelSNOW does not.
+  fk <- rnaparallel:::rp_copy_free
+  skip_on_os("windows")
+  withr::with_options(list(combat.fork = TRUE), {
+    expect_true(fk("mclapply"))
+    expect_true(fk("BiocParallel"))
+    expect_false(fk("serial"))
+    expect_true(fk(function(idx, f, workers) lapply(idx, f)))  # custom keeps the inherited answer
+  })
+  # foreach depends on what is registered, which is the whole point
+  skip_if_not_installed("doParallel")
+  withr::with_options(list(combat.fork = TRUE), {
+    foreach::registerDoSEQ()
+    expect_false(fk("foreach"))              # unregistered: it gets this package's own cluster
+    doParallel::registerDoParallel(cores = 2)
+    expect_true(fk("foreach"))               # doParallelMC drives mclapply, nothing is copied
+    cl <- parallel::makeCluster(2, type = "PSOCK")
+    doParallel::registerDoParallel(cl)
+    expect_false(fk("foreach"))              # doParallelSNOW serialises every task
+    parallel::stopCluster(cl)
+    foreach::registerDoSEQ()
+  })
+  # the escape hatch turns every dispatch serial, so no gate should read as forking
+  withr::with_options(list(combat.fork = FALSE), {
+    expect_false(fk("mclapply"))
+    expect_false(fk(function(idx, f, workers) lapply(idx, f)))
+  })
+
+  withr::with_options(list(combat.min.ls.cells = NULL, combat.min.norm.cells = NULL,
+                           combat.min.order.cells = NULL), {
+    expect_identical(rnaparallel:::rp_ls_min_cells("combat.min.ls.cells", 6e6, "mclapply"), 6e6)
+    foreach::registerDoSEQ()
+    expect_identical(rnaparallel:::rp_ls_min_cells("combat.min.ls.cells", 6e6, "foreach"), Inf)
+    expect_identical(rnaparallel:::rp_norm_min_cells("mclapply"), 2e5)
+    expect_identical(rnaparallel:::rp_norm_min_cells("foreach"), 2e6)
+    expect_identical(rnaparallel:::rp_order_min_cells("mclapply"), 4e6)
+    expect_identical(rnaparallel:::rp_order_min_cells("foreach"), 4e7)
+  })
+})

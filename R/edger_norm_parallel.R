@@ -7,17 +7,17 @@
 ## Nothing here reimplements edgeR. The current default normalisation method is called once on
 ## the whole matrix, with four internals rebound in a child of edgeR's own namespace. Two
 ## separate wins come out of that. Inside `.calcFactorTMM`, `rank` is computed once per
-## vector instead of twice. Inside the vendor's per-column loops, the columns are dispatched
+## vector instead of twice. Inside the original's per-column loops, the columns are dispatched
 ## across workers.
 
 
-# ---- why the vendor is called once, not once per block -----------------------
+# ---- why the original is called once, not once per block -----------------------
 #
 # The parallel axis is SAMPLE COLUMNS, never gene rows: every method here ranks, medians or
 # takes a quantile across genes, so a row block is not a smaller version of the problem.
 #
-# Five quantities are pooled across columns and would change if the vendor were called on a
-# column block instead. Calling the vendor once on the full matrix is what hoists all five,
+# Five quantities are pooled across columns and would change if the original were called on a
+# column block instead. Calling the original once on the full matrix is what hoists all five,
 # because edgeR itself computes them, on every column, exactly once:
 #
 #   1. lib.size <- colSums(x)
@@ -42,7 +42,7 @@
 #'
 #' edgeR renamed `calcNormFactors` to `normLibSizes` and kept the old name as an alias. One
 #' predicate, used by the backend resolver, the tests, the examples and the report, so the
-#' suite can never compare the companion's output against a different vendor function than
+#' suite can never compare the companion's output against a different original function than
 #' the companion ran. Resolution is on the `.default` METHOD, because that is the object
 #' `calcnorm_backend()` rebinds; a release shipping the generic without the method would
 #' otherwise select a name that cannot be got.
@@ -62,10 +62,10 @@ rp_edger_generic <- function(fn = NULL) {
 
 #' Resolve an edgeR normalisation backend and the internals it calls
 #'
-#' Everything is taken from one environment, the backend's own, so the vendor function and
+#' Everything is taken from one environment, the backend's own, so the original function and
 #' the four internals it dispatches to can never be drawn from two different copies of
 #' edgeR. `rank`, `quantile` and `apply` are resolved through that same environment rather
-#' than named directly, so a rebind always shadows exactly the function the vendor would
+#' than named directly, so a rebind always shadows exactly the function the original would
 #' otherwise have reached.
 #'
 #' @param fn An edgeR default normalisation method. Defaults to `normLibSizes.default`
@@ -158,7 +158,7 @@ calcnorm_backend <- function(fn = NULL) {
   }
   # The DGEList method is rebound the same way and needs the same gate. Without it, an edgeR
   # that writes the inner call as `edgeR::normLibSizes(...)` turns the rebind into a no-op:
-  # every DGEList call runs the vendor serially, returns identical() output and raises
+  # every DGEList call runs the original serially, returns identical() output and raises
   # nothing, which the DGEList equivalence test cannot see. Measured on a patched namespace:
   # 2 dispatches before, 0 after, identical() TRUE both times.
   dge <- get0(paste0(generic, ".DGEList"), envir = ns, inherits = FALSE)
@@ -205,10 +205,16 @@ calcnorm_backend <- function(fn = NULL) {
 #' produced. Measured on 20000 x 200: 1.28s to 0.81s, identical() TRUE, max abs diff 0. No
 #' workers involved, so `workers = 1` gets this too.
 #'
-#' @param rank0 The `rank` the vendor would otherwise have reached.
+#' @param rank0 The `rank` the original would otherwise have reached.
 #' @return A closure standing in for `rank`.
 #' @noRd
 rp_rank_once <- function(rank0) {
+  # Read only inside the returned closure, so without this it stays a promise whose PRENV is
+  # calcNormFactors_parallel's frame, holding `object` and all four shims. The TMM shim's lean
+  # environment has to carry `vfun`, and `vfun`'s environment holds this closure, so the one
+  # door that lean environment exists to shut was reopened by the object it must carry.
+  # Measured: the rank shim serialised to 12,265,358 B against 11,348 B for its own frame.
+  force(rank0)
   last <- NULL
   ranked <- NULL
   function(x, na.last = TRUE,
@@ -274,22 +280,22 @@ rp_norm_cols <- function(ncols, cells, f, workers, chunks, parallel_backend, min
 # 46 ms loop and made upperquartile slower than not doing any of this.
 #
 # The contents ARE compared once, when the batch is built, which is what ties the frame to
-# the arguments the vendor is passing down. After that the three checks above carry it.
+# the arguments the original is passing down. After that the three checks above carry it.
 
 
-#' Batch the vendor's per-column TMM loop
+#' Batch the original's per-column TMM loop
 #'
-#' The vendor writes `for (i in 1:nsamples) f[i] <- .calcFactorTMM(obs = x[, i], ...)`. The
+#' The original writes `for (i in 1:nsamples) f[i] <- .calcFactorTMM(obs = x[, i], ...)`. The
 #' loop is the only thing standing between this and a column split, and it cannot be
-#' rebound. So the first call computes every column at once, in parallel, using the vendor's
+#' rebound. So the first call computes every column at once, in parallel, using the original's
 #' own `.calcFactorTMM`, and the loop's remaining calls are served from that.
 #'
-#' `x`, `lib.size` and `refColumn` are read from the vendor's own frame rather than rebuilt,
+#' `x`, `lib.size` and `refColumn` are read from the original's own frame rather than rebuilt,
 #' which is the point: they are the pooled quantities, already computed once on the full
 #' matrix by the code that owns them.
 #'
-#' @param vfun The vendor internal, with `rank` already hoisted.
-#' @param loopvar Name of the vendor's loop index, from `calcnorm_backend()`.
+#' @param vfun The original internal, with `rank` already hoisted.
+#' @param loopvar Name of the original's loop index, from `calcnorm_backend()`.
 #' @param what Label used in error messages.
 #' @noRd
 rp_factor_shim <- function(vfun, loopvar, workers, chunks, parallel_backend, what) {
@@ -327,7 +333,7 @@ rp_factor_shim <- function(vfun, loopvar, workers, chunks, parallel_backend, wha
       # actually reads leaves the counts and library sizes to travel and nothing else. On a
       # forking backend this is invisible either way (the child inherits the pages), so the
       # cost was only ever paid where there is no fork(). Nothing about the arithmetic changes.
-      lean <- new.env(parent = globalenv())
+      lean <- new.env(parent = rp_home())
       lean$fx <- fx; lean$ref <- ref; lean$flib <- flib
       lean$libsize.ref <- libsize.ref; lean$vfun <- vfun
       lean$logratioTrim <- logratioTrim; lean$sumTrim <- sumTrim
@@ -342,7 +348,7 @@ rp_factor_shim <- function(vfun, loopvar, workers, chunks, parallel_backend, wha
       environment(per_chunk) <- lean
       vals <<- rp_norm_cols(ncol(fx), length(fx), per_chunk,
                             workers, chunks, parallel_backend,
-                            rp_norm_min_cells(), what)
+                            rp_norm_min_cells(parallel_backend), what)
     }
 
     if (!is.numeric(i) || length(i) != 1L || is.na(i) || i != trunc(i) ||
@@ -355,7 +361,7 @@ rp_factor_shim <- function(vfun, loopvar, workers, chunks, parallel_backend, wha
   }
 }
 
-#' Batch the vendor's per-column quantile loop
+#' Batch the original's per-column quantile loop
 #'
 #' `.calcFactorQuantile` writes
 #' `for (j in seq_len(ncol(data))) f[j] <- quantile(data[, j], probs = p)`. Same treatment
@@ -364,14 +370,14 @@ rp_factor_shim <- function(vfun, loopvar, workers, chunks, parallel_backend, wha
 #' This path runs for `method = "upperquartile"` and for the f75 that picks TMM's reference
 #' column, so batching it also parallelises a pooled stage.
 #'
-#' @param q0 The `quantile` the vendor would otherwise have reached.
-#' @param loopvar Name of the vendor's loop index, from `calcnorm_backend()`.
+#' @param q0 The `quantile` the original would otherwise have reached.
+#' @param loopvar Name of the original's loop index, from `calcnorm_backend()`.
 #' @noRd
 rp_quantile_shim <- function(q0, loopvar, workers, chunks, parallel_backend) {
   what <- "calcNormFactors_parallel quantile columns"
   seen <- NULL; fdata <- NULL; vals <- NULL
   function(x, probs, ...) {
-    # a multi-element `p` makes the vendor assign a longer value into f[j], which warns and
+    # a multi-element `p` makes the original assign a longer value into f[j], which warns and
     # keeps only the first element. Batching that through vapply(numeric(1)) would error
     # where edgeR warns, so it goes straight through instead.
     if (...length() || !is.numeric(probs) || length(probs) != 1L) {
@@ -393,12 +399,18 @@ rp_quantile_shim <- function(q0, loopvar, workers, chunks, parallel_backend) {
              "is running.", call. = FALSE)
       }
       seen <<- fr; fdata <<- got$data
-      # unname because the vendor assigns into f[j], which drops the "75%" name anyway
-      vals <<- rp_norm_cols(ncol(fdata), length(fdata),
-                            function(jj) vapply(jj, function(k)
-                              unname(q0(fdata[, k], probs = probs)), numeric(1)),
+      # unname because the original assigns into f[j], which drops the "75%" name anyway
+      # Leaned for the same reason the TMM loop above is: this frame holds `fr`, the ORIGINAL's
+      # own call frame, and `got`, a second copy of the matrix, neither of which the body
+      # reads. On a socket backend all of it would be serialised per chunk.
+      lean <- new.env(parent = rp_home())
+      lean$q0 <- q0; lean$fdata <- fdata; lean$probs <- probs
+      per_chunk <- function(jj) vapply(jj, function(k)
+        unname(q0(fdata[, k], probs = probs)), numeric(1))
+      environment(per_chunk) <- lean
+      vals <<- rp_norm_cols(ncol(fdata), length(fdata), per_chunk,
                             workers, chunks, parallel_backend,
-                            getOption("combat.min.order.cells", 4e6), what)
+                            rp_order_min_cells(parallel_backend), what)
     }
 
     if (!is.numeric(j) || length(j) != 1L || is.na(j) || j != trunc(j) ||
@@ -416,20 +428,26 @@ rp_quantile_shim <- function(q0, loopvar, workers, chunks, parallel_backend) {
 #' Rebinding the `apply` and nothing else leaves `gm` where it belongs, computed once by
 #' edgeR across every sample. That is the trap on this path: `gm` is a cross-SAMPLE
 #' reduction sitting exactly where the column axis cuts, and rebuilding it per block moved
-#' RLE by 0.043. `FUN` closes over the vendor's frame, so each block is still reading the
+#' RLE by 0.043. `FUN` closes over the original's frame, so each block is still reading the
 #' pooled `gm`.
 #'
-#' @param apply0 The `apply` the vendor would otherwise have reached.
+#' @param apply0 The `apply` the original would otherwise have reached.
 #' @noRd
 rp_apply_shim <- function(apply0, workers, chunks, parallel_backend) {
   function(X, MARGIN, FUN, ..., simplify = TRUE) {
     if (!identical(MARGIN, 2) || !is.matrix(X) || ...length() || !isTRUE(simplify)) {
       return(apply0(X, MARGIN, FUN, ..., simplify = simplify))
     }
-    rp_norm_cols(ncol(X), length(X),
-                 function(jj) apply0(X[, jj, drop = FALSE], 2, FUN),
+    # FUN is carried over UNCHANGED and deliberately: it closes over the original's frame, which
+    # is where the pooled `gm` lives, and that is the one thing each block must still read.
+    # Only X and apply0 are leaned.
+    lean <- new.env(parent = rp_home())
+    lean$apply0 <- apply0; lean$X <- X; lean$FUN <- FUN
+    per_chunk <- function(jj) apply0(X[, jj, drop = FALSE], 2, FUN)
+    environment(per_chunk) <- lean
+    rp_norm_cols(ncol(X), length(X), per_chunk,
                  workers, chunks, parallel_backend,
-                 getOption("combat.min.order.cells", 4e6),
+                 rp_order_min_cells(parallel_backend),
                  "calcNormFactors_parallel RLE columns")
   }
 }
@@ -452,13 +470,13 @@ rp_apply_shim <- function(apply0, workers, chunks, parallel_backend) {
 #' `.calcFactorTMM` builds its trim mask from `rank(logR)` and `rank(absE)` twice each,
 #' which is four sorts where two would do. `rank` is rebound to compute each vector once,
 #' which is bit-identical and needs no workers at all: measured 1.28s to 0.81s on
-#' 20000 x 200, `identical()` TRUE, max abs diff 0. On top of that the vendor's per-column
+#' 20000 x 200, `identical()` TRUE, max abs diff 0. On top of that the original's per-column
 #' loops are dispatched across workers, taking the same call to 0.29s at four workers.
 #'
 #' @section Why the axis is columns:
 #' Every method here ranks, medians or takes a quantile across genes, so a gene-row block is
 #' not a smaller version of the problem. The per-sample factor is independent only once the
-#' pooled quantities are fixed, which is why the vendor is called once on the full matrix
+#' pooled quantities are fixed, which is why the original is called once on the full matrix
 #' rather than once per block. Splitting the matrix would also have to rebuild
 #' `lib.size <- colSums(x)`, and `colSums` over fractional doubles is not block-associative
 #' on arm64, where `sizeof.longdouble` is 8: about 1.8e-14 relative, on the quantity every
@@ -472,6 +490,13 @@ rp_apply_shim <- function(apply0, workers, chunks, parallel_backend) {
 #' one order statistic per column and cost roughly a fifteenth as much, so they wait for
 #' `getOption("combat.min.order.cells", 4e6)`: measured 0.93x at 4e6 and 1.24x at 1e7. The
 #' `rank` hoist is not gated, because it never costs anything, and neither is `workers = 1`.
+#'
+#' @section When this is worth reaching for:
+#' Unconditionally. The `rank` hoist needs no workers at all, so this companion is ahead even
+#' on an input too small to dispatch. Measured on an M3 at the default worker count, companion
+#' against original, every arm `identical()`: 1.44x at 2,000 genes by 20 samples with every
+#' dispatch gated, then 2.12x at 5,000 x 50, 3.90x at 20,000 x 50, 6.07x at 20,000 x 200 and
+#' 6.26x at 20,000 x 500.
 #'
 #' @param object Count matrix, genes in rows and samples in columns, or a `DGEList`.
 #' @param lib.size Library sizes. Defaults to `colSums(object)`, computed by edgeR on the
@@ -525,7 +550,7 @@ calcNormFactors_parallel <- function(object, lib.size = NULL,
                                      doWeighting = TRUE, Acutoff = -1e10, p = 0.75, ...,
                                      workers = NULL, chunks = NULL,
                                      parallel_backend = getOption("combat.backend",
-                                                                  "mclapply"),
+                                                                  combat_default_backend()),
                                      backend = NULL, label = NULL) {
   # no run leaves workers behind, crashed or not; children that predate this call are
   # someone else's and are spared

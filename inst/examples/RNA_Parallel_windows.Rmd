@@ -33,8 +33,8 @@ knitr::opts_chunk$set(cache.path = "RNA_Parallel_cache/")
 `rnaparallel` runs the original function itself and parallelises its hot paths.
 `ComBat_seq_parallel` corrects the counts; `calcNormFactors_parallel`, `lmFit_parallel`,
 and `duplicateCorrelation_parallel` run the differential expression that
-follows. None of them reimplements a method from its description: the vendor is called unchanged on blocks of genes or
-samples, with at most a symbol rebound in a child of the vendor's own environment.
+follows. None of them reimplements a method from its description: the original is called unchanged on blocks of genes or
+samples, with at most a symbol rebound in a child of the original's own environment.
 
 The question is narrow on purpose: **does each companion return exactly what the original
 returns, and how much time does it save.** Not close, not correlated at 0.999. Identical, or it
@@ -80,6 +80,23 @@ library(limma)
 library(rnaparallel)
 library(SummarizedExperiment)
 library(ggplot2)
+
+# Refuse a stale install before anything expensive runs. `git pull` updates this file and the
+# package SOURCE; it does not reinstall the package, and nothing downstream would notice. The
+# report stamps its own sessionInfo and keys every timing cache on packageVersion("rnaparallel"),
+# so rendering against a previous install produces a report labelled with the wrong version that
+# measured the wrong code, silently, after an hour. Skipped when the working tree is not to hand,
+# which is the case for a reader rendering from an installed copy of the package.
+.desc <- file.path("..", "..", "DESCRIPTION")
+if (file.exists(.desc)) {
+  .want <- as.character(read.dcf(.desc, fields = "Version")[[1L]])
+  .have <- as.character(packageVersion("rnaparallel"))
+  if (!identical(.want, .have)) {
+    stop("this working tree is rnaparallel ", .want, " but the installed package is ", .have,
+         ". A pull does not reinstall. From the repository root: R CMD INSTALL . ",
+         "(or devtools::install()), restart R, and render again.", call. = FALSE)
+  }
+}
 
 edgeR_norm <- if (exists("normLibSizes.default", envir = asNamespace("edgeR"), inherits = FALSE)) {
   edgeR::normLibSizes
@@ -544,6 +561,29 @@ sim_timings <- do.call(rbind, lapply(seq_len(nrow(sim_grid)), function(i) {
              stringsAsFactors = FALSE)
 }))
 unlink(sim_file)
+
+# Hand SIGCHLD back to `parallel`. processx, which callr runs on, calls sigaction(SIGCHLD, ...)
+# on every process it starts and restores SIG_DFL on teardown rather than the handler it
+# displaced; `parallel` installs its own once, latched, and never reinstalls. So from the first
+# callr call onward `parallel` can no longer observe its forked workers exiting, and every
+# dispatch leaves one unreaped zombie per worker for the rest of the session. They hold a
+# process-table slot each and nothing else (no memory, no CPU), but slots are the binding
+# limit here, not memory: measured 493 zombies from a single eight-worker correction at this
+# plate count, against a 4,000 per-user ceiling. This call clears parallel's latch so the next
+# mcfork reinstalls the handler, and it returns immediately because nothing is stuck yet.
+#
+# Deliberately NOT inside a companion: with shutdown = TRUE it acts on every child past every
+# cleanup mark, so it would kill a caller's own concurrent workers, which is exactly what
+# combat_reap()'s spare snapshot exists to prevent. The report is the layer that mixes the two
+# packages, so the report is where this belongs. Unix only; parallel::cleanup is in the fork
+# half of the package and does not exist on Windows, where mclapply is serial and there are no
+# forked children to lose in the first place.
+if (.Platform$OS.type != "windows") {
+  ok <- tryCatch({ parallel:::cleanup(kill = TRUE, detach = TRUE, shutdown = TRUE); TRUE },
+                 error = function(e) FALSE)
+  if (!ok) warning("could not hand SIGCHLD back to parallel after the callr sweep; forked ",
+                   "workers will accumulate as zombies for the rest of this render")
+}
 
 sim_timings$implementation <- ifelse(
   sim_timings$backend == "serial", "sva::ComBat_seq",
@@ -1444,14 +1484,40 @@ if (is.na(n_phys)) n_phys <- suppressWarnings(parallel::detectCores(logical = FA
 if (is.na(n_phys) || n_phys < 1L) n_phys <- n_log
 mem_gb <- win_num("Win32_ComputerSystem", "TotalPhysicalMemory") / 2^30
 
+# The same thirteen rows as the macOS and Linux reports, read from this platform's own
+# sources. Keeping the schema identical is what makes the three tables comparable side by
+# side; only where each value comes from changes.
+#
+# performance cores are read from the topology rather than an original table, the same way the
+# package's own default does it: on this family only P-cores carry SMT, so the number of
+# logical processors above the physical count is the number of cores with a second thread.
+# 22 logical against 16 physical gives 6, which is right, and the guard degrades to the
+# physical count on a uniformly threaded or unthreaded machine.
+smt <- n_log - n_phys
+n_perf <- if (!is.na(smt) && smt > 0 && smt < n_phys) smt else n_phys
+
+# Windows exposes no single NUMA-node count that is present on every edition, so this asks
+# the OS and falls back to one rather than erroring or printing NA. A laptop is one node; the
+# row exists so the three tables line up, and it is the Linux report that has more than one.
+win_numa <- function() {
+  n <- tryCatch(suppressWarnings(as.numeric(win_cim("Win32_ComputerSystem",
+                                                    "NumberOfProcessors"))),
+                error = function(e) NA_real_)
+  if (is.na(n) || n < 1) 1L else as.integer(n)
+}
+
 data.frame(
-  quantity = c("CPU", "physical cores", "logical CPUs", "threads per core", "memory", "OS",
-               "BLAS", "BLAS pinned to 1 thread", "fork available", "backend", "worker counts"),
+  quantity = c("CPU", "performance cores", "physical cores", "logical CPUs",
+               "threads per core", "NUMA nodes", "memory", "OS",
+               "BLAS", "BLAS pinned to 1 thread", "fork available", "backend",
+               "worker counts"),
   value = as.character(c(
     win_cim("Win32_Processor", "Name"),
+    n_perf,
     n_phys,
     n_log,
     sprintf("%.0f", n_log / n_phys),
+    win_numa(),
     if (is.na(mem_gb)) NA_character_ else sprintf("%.0f GB", mem_gb),
     paste(Sys.info()[["sysname"]], Sys.info()[["release"]]),
     blas_name,
@@ -1661,7 +1727,7 @@ ggplot(limma_speed, aes(factor(workers), speedup, fill = stage)) +
 Not everything in limma is worth dispatching, and the list of what was left alone is as much a part
 of the result as the list of what was not. `voom` measured 0.99x, because its `lowess` trend takes
 its span as a fraction of the gene count, so a block of half the genes fits a different curve and
-only the arithmetic after the trend splits. `contrasts.fit` is exactly splittable and the vendor
+only the arithmetic after the trend splits. `contrasts.fit` is exactly splittable and the original
 returns before a PSOCK worker could finish starting. `eBayes`, `fitFDist` and `topTable` pool across every gene by construction.
 None of them ships as a `workers` argument that does nothing.
 

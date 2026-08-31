@@ -4,7 +4,7 @@
 ## helper_seq_parallel.R plays for ComBat-seq, and reuses its dispatch layer unchanged:
 ## combat_row_chunks, combat_parallel_lapply, combat_parallel_check, combat_row_order.
 ##
-## Nothing here reimplements limma. The vendor function is called unchanged on each block.
+## Nothing here reimplements limma. The original function is called unchanged on each block.
 ## What this file does is resolve, once and on the full matrix, the arguments a block would
 ## otherwise reinterpret, and refuse to split when a block would take a different branch
 ## than the whole matrix would.
@@ -75,13 +75,13 @@ rp_weights_rows <- function(w, ii) {
 #' Decide whether a row split can reproduce the branch the whole matrix takes
 #'
 #' Returns TRUE when every block provably lands on the same side of `NoProbeWts` as the
-#' full matrix, reading the vendor's own guard expression rather than approximating it.
+#' full matrix, reading the original's own guard expression rather than approximating it.
 #' Non-positive weights become NA and are punched into M first, so the finiteness test is
 #' taken on the matrix limma will actually branch on.
 #'
-#' The `gls` punch is deliberately a superset of the vendor's: gls.series punches on
+#' The `gls` punch is deliberately a superset of the original's: gls.series punches on
 #' `w < 1e-15` after mapping NA to 0, and this punches non-finite weights as well. A `+Inf`
-#' weight therefore reports the split unsafe where the vendor would have tolerated it, which
+#' weight therefore reports the split unsafe where the original would have tolerated it, which
 #' costs a serial run on an input nobody has. The alternative is a guard that is right by
 #' coincidence.
 #'
@@ -100,15 +100,20 @@ rp_branch_stable <- function(M, weights, punch = c("lm", "gls")) {
   # here reports a split as safe when it is not: a weight strictly inside (0, 1e-15) is
   # punched by gls.series and not by lm.series, which put ten of forty sigma values on the
   # wrong branch with no error and no warning.
+  # The punch exists only to make a cell non-finite, and the answer is `all cells finite`, so
+  # the weights can be reduced instead of materialised. `w[w <= 0] <- NA` copied the weights,
+  # `is.finite(w)` built a second full logical, its negation a third, and the subassignment
+  # copied M as well: five full-size allocations to decide one TRUE or FALSE. min() and max()
+  # report every failure mode (NA for any NA, NaN for any NaN, an infinity for either
+  # infinity), so the two rules reduce exactly. lm passes a weight iff it is finite and > 0;
+  # gls maps NA to 0 first and punches below 1e-15, so it passes iff finite and >= 1e-15.
+  # Measured on array weights: 20,000 x 24 2.13 ms to 1.25 ms, 200,000 x 48 40.85 ms to
+  # 27.04 ms on the lm punch and 77.60 ms to 25.76 ms on the gls one.
+  if (!length(M)) return(TRUE)     # min() of nothing is +Inf and would flip the answer
   if (!is.null(weights)) {
-    w <- weights
-    if (punch == "lm") {
-      w[w <= 0] <- NA
-      M[!is.finite(w)] <- NA
-    } else {
-      w[is.na(w)] <- 0
-      M[!is.finite(w) | w < 1e-15] <- NA
-    }
+    lo <- suppressWarnings(min(weights)); hi <- suppressWarnings(max(weights))
+    if (!(is.finite(lo) && is.finite(hi))) return(FALSE)
+    if (punch == "lm") { if (!(lo > 0)) return(FALSE) } else if (!(lo >= 1e-15)) return(FALSE)
   }
   # rowSums is non-finite for every row holding a non-finite cell, so the cheap scan can
   # only over-report. The exact scan settles the one case it invents, an overflowing sum.
@@ -153,7 +158,7 @@ rp_invariant <- function(parts, fields, what) {
     if (!identical(names(parts[[k]]), nm1)) {
       stop(what, ": block 1 returned (", paste(nm1, collapse = ", "), ") and block ", k,
            " returned (", paste(names(parts[[k]]), collapse = ", "), "). Different component ",
-           "sets mean the blocks took different branches inside the vendor. Refusing to ",
+           "sets mean the blocks took different branches inside the original. Refusing to ",
            "assemble one result out of two algorithms.", call. = FALSE)
     }
   }
