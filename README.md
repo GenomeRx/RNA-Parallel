@@ -17,11 +17,11 @@ TCGA, 18,270 genes by 1,500 tumours. Every arm `identical()` to the original on 
 
 | companion | runs | macOS<br>M3, 4P+4E | Linux<br>2x Xeon, 16 cores | Windows<br>Ultra 9 185H, 6P+10E |
 |---|---|---:|---:|---:|
-| `ComBat_seq_parallel()` | `sva::ComBat_seq` | 5.43x @ 8w | **9.34x @ 16w** | 2.92x @ 6w |
-| `calcNormFactors_parallel()` | `edgeR::normLibSizes` | **6.78x @ 8w** | 4.12x @ 8w | 1.63x @ 2w |
-| `lmFit_parallel()` | `limma::lmFit` | 3.02x @ 8w | **3.37x @ 16w** | serial |
-| `duplicateCorrelation_parallel()` | `limma::duplicateCorrelation` | 3.79x @ 6w | **7.22x @ 16w** | 2.21x @ 8w |
-| `removeBatchEffect_parallel()` | `limma::removeBatchEffect` | **2.97x @ 6w** | 1.39x @ 8w | serial |
+| `ComBat_seq_parallel()` | `sva::ComBat_seq` | 5.43x @ 8w | **9.34x @ 16w** | 3.57x @ 6w |
+| `calcNormFactors_parallel()` | `edgeR::normLibSizes` | **6.78x @ 8w** | 4.12x @ 8w | 1.74x @ 2w |
+| `lmFit_parallel()` | `limma::lmFit` | 3.02x @ 8w | **3.37x @ 16w** | 1.10x @ 4w |
+| `duplicateCorrelation_parallel()` | `limma::duplicateCorrelation` | 3.79x @ 6w | **7.22x @ 16w** | 2.07x @ 4w |
+| `removeBatchEffect_parallel()` | `limma::removeBatchEffect` | **2.97x @ 6w** | 1.39x @ 8w | 0.90x @ 2w |
 
 Originals are timed on both sides of the companion arms and averaged; short stages are the best
 of three. Bold marks the fastest platform. Machine specs and what separates them are in
@@ -30,15 +30,18 @@ of three. Bold marks the fastest platform. Machine specs and what separates them
 **Windows is the odd column and the reason is architectural, not incidental.** It has no
 `fork()`, so a worker is a whole process that receives a copy rather than sharing the parent's
 pages, and only 6 of its 16 cores are performance cores. Both facts pull the useful worker count
-down: the ComBat-seq curve peaks at 6 and turns over after. `serial` is not a missing measurement
-— it is the companion declining to split, because `lmFit` is cheap enough per cell that no
-dispatch repays the transfer there. It measured 0.52x before that gate closed, so the honest
-Windows contribution for those two is parity, not a speedup.
+down, and the ComBat-seq curve shows it directly: 2.12x, 3.34x, **3.57x**, 3.54x at 2, 4, 6 and 8
+workers, peaking exactly on the performance-core count and turning over after.
 
-Read the seconds as well as the ratios. Windows has the fastest original baseline of the three
-(1,506 s against Linux's 3,044 s), and speedup rewards a slow starting point, which is why the
-dual Xeon posts 9.34x while finishing *behind* the M3 in wall clock. The laptop is last on the
-clock at 515 s, 55% behind the Xeon's best and 73% behind the M3's.
+The `lmFit` and `removeBatchEffect` rows are not speedups and should not be read as any. Both
+gates close on a platform that copies, so what those two ratios measure is the original call plus
+the wrapper around it, scattering either side of 1.00x rather than climbing: 1.10x and 0.90x. The
+honest Windows contribution for those two is parity.
+
+Read the seconds as well as the ratios. Nothing about a ratio says which machine finishes first:
+the dual Xeon posts the highest number on four rows and still loses ComBat-seq on the clock to a
+laptop chip, 325.9 s against the M3's 298.6 s, because it starts from a 3,043.8 s original where
+the M3 starts from 1,619.8 s. Windows is last on both counts here, 720.1 s against 298.6 s.
 
 **Nothing is reimplemented.** The original function is the one that runs. It is called with its
 hot paths rebound in a child of its own environment, so every other symbol still resolves to
@@ -238,11 +241,11 @@ fastest companion arm on that machine, with its worker count. Bold marks the fas
 
 | stage | macOS original | macOS best | Linux original | Linux best | Windows original | Windows best |
 |---|---:|---:|---:|---:|---:|---:|
-| ComBat-seq | 1,619.8 s | **298.6 s** (8w) | 3,043.8 s | 325.9 s (16w) | 1,506.4 s | 515.3 s (6w) |
-| duplicateCorrelation | 663.7 s | 175.0 s (6w) | 469.1 s | **64.9 s** (16w) | 439.9 s | 198.8 s (8w) |
-| calcNormFactors (TMM) | 10.3 s | **1.5 s** (8w) | 19.5 s | 4.7 s (8w) | 16.3 s | 10.0 s (2w) |
-| lmFit | 4.4 s | **1.5 s** (8w) | 11.4 s | 3.4 s (16w) | 6.4 s | 6.3 s (serial) |
-| removeBatchEffect | 4.5 s | **1.5 s** (6w) | 2.5 s | 1.8 s (8w) | 2.9 s | 2.9 s (serial) |
+| ComBat-seq | 1,619.8 s | **298.6 s** (8w) | 3,043.8 s | 325.9 s (16w) | 2,573.3 s | 720.1 s (6w) |
+| duplicateCorrelation | 663.7 s | 175.0 s (6w) | 469.1 s | **64.9 s** (16w) | 784.8 s | 379.3 s (4w) |
+| calcNormFactors (TMM) | 10.3 s | **1.5 s** (8w) | 19.5 s | 4.7 s (8w) | 26.5 s | 15.2 s (2w) |
+| lmFit | 4.4 s | **1.5 s** (8w) | 11.4 s | 3.4 s (16w) | 10.1 s | 9.2 s (4w) |
+| removeBatchEffect | 4.5 s | **1.5 s** (6w) | 2.5 s | 1.8 s (8w) | 4.4 s | 4.9 s (2w) |
 
 Speedup is a ratio and rewards a slower core: Linux scales further, 9.34x against 5.43x, and
 still finishes behind at 325.9 s against 298.6 s. Read the seconds. On Linux, pin
@@ -250,17 +253,20 @@ still finishes behind at 325.9 s against 298.6 s. Read the seconds. On Linux, pi
 changes little here: unpinning moves DGEMM throughput 3.6x, from 61 to 216 GFLOPS, and `lmFit` by
 0.3%, because limma solves a small QR per gene.
 
-Windows reads lowest on ratio and last on the clock, for the same reason. Its original baseline is
-the fastest of the three, 1,506.4 s against Linux's 3,043.8 s, so there is less to win back, and
-at 515.3 s it finishes 55% behind a dual Xeon while running on a laptop. What it
-cannot do is scale as far, and that is architectural rather than incidental: no `fork()`, so a
-worker is a whole process that receives a copy instead of sharing the parent's pages, and only 6
-of its 16 cores are performance cores. Both push the useful worker count down, and the ComBat-seq
-curve shows it directly -- 1.80x, 2.77x, **2.92x**, 2.87x at 2, 4, 6 and 8 workers, peaking on the
-performance-core count and turning over after. The two `serial` entries are the companion
-declining to split rather than a missing measurement: `lmFit` is cheap enough per cell that no
-socket dispatch repays the transfer, measured at 0.14x on 21.6M cells and never reaching parity,
-so it runs whole and matches the original instead of losing to it.
+Windows reads lowest on ratio and last on the clock. Its original baseline sits between the other
+two, 2,573.3 s against the M3's 1,619.8 s and the Xeon's 3,043.8 s, so it is not the
+short-baseline story the previous box told; it is simply slower to finish, 720.1 s against 298.6 s
+and 325.9 s. What it cannot do is scale as far, and that is architectural rather than incidental:
+no `fork()`, so a worker is a whole process that receives a copy instead of sharing the parent's
+pages, and only 6 of its 16 cores are performance cores. Both push the useful worker count down,
+and the ComBat-seq curve shows it directly -- 2.12x, 3.34x, **3.57x**, 3.54x at 2, 4, 6 and 8
+workers, peaking on the performance-core count and turning over after.
+
+`lmFit` and `removeBatchEffect` measure 1.10x and 0.90x here, and neither is a speedup. Both size
+gates close where the payload is copied, so the companion runs the original whole and the ratio is
+that call plus the wrapper: it lands either side of 1.00x depending on which arm the noise favours,
+rather than climbing with workers. Left to split, `lmFit` measured 0.14x on 21.6M cells and never
+reached parity, which is why the gate exists.
 
 ## When a companion is worth reaching for
 
@@ -307,7 +313,7 @@ pass-through. On that input, call the original.
 
 | knob | default | change it when |
 |---|---|---|
-| `workers` | `min(8, detectCores() - 2)`, capped at performance cores without `fork()` | rarely. Going past your *performance* core count can be slower, as the Windows curve shows: 1.80x, 2.77x, **2.92x**, 2.87x at 2, 4, 6 and 8 workers on a chip with six. See `?workers` |
+| `workers` | `min(8, detectCores() - 2)`, capped at performance cores without `fork()` | rarely. Going past your *performance* core count can be slower, as the Windows curve shows: 2.12x, 3.34x, **3.57x**, 3.54x at 2, 4, 6 and 8 workers on a chip with six. See `?workers` |
 | `chunks` | `workers` | only to cut peak memory per worker |
 | `parallel_backend` | `"mclapply"` | you cannot fork, or a cluster is already running |
 

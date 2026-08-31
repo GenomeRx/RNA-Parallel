@@ -373,7 +373,8 @@ rp_order_min_cells <- function(parallel_backend) {
 #' the right answer at the speed of the function it wraps.
 #'
 #' `future` is the only backend that runs real workers there without the caller registering a
-#' cluster first, and it measured 2.92x on the cohort against `foreach`'s 0.28x. But it needs a
+#' cluster first, and on the Windows machine that comparison was made on it measured 2.92x on the
+#' cohort against `foreach`'s 0.28x. But it needs a
 #' plan, and this package will not set one: a caller's plan is theirs, and silently starting
 #' sixteen processes inside someone's session is worse than being slow. Defaulting to `future`
 #' unconditionally would therefore hand most Windows users a warning on every dispatch and no
@@ -633,7 +634,7 @@ combat_default_workers <- function(workers = NULL) {
 #' 6 performance cores and 10 efficiency ones -- not a rounding error, but the difference
 #' between a sensible default and one that recruits ten slow workers.
 #'
-#' The topology answers it without a original table: on Intel hybrid parts only performance cores
+#' The topology answers it without an original table: on Intel hybrid parts only performance cores
 #' carry SMT, so the number of logical processors ABOVE the physical count is the number of cores
 #' with a second thread. 22 logical against 16 physical gives 6, which is right. The formula
 #' degrades correctly everywhere else: on a uniformly hyperthreaded machine every core has a
@@ -1235,7 +1236,7 @@ combat_parallel_lapply <- function(idx, f, workers,
     # a silent serial run looks identical to a parallel one until you time it
     if (is.null(.combat_clusters$warned_windows)) {
       # Not foreach. Measured on Windows, foreach fell 1.18x, 0.94x, 0.57x, 0.28x at 2, 4, 8
-      # and 16 workers while future held 2.92x on the cohort, and combat_default_backend()
+      # and 16 workers while future held 2.92x on the cohort of the day, and combat_default_backend()
       # picks future itself once a plan exists. Sending people to the slower one at the exact
       # moment they discover the problem is the opposite of helping.
       message("mclapply cannot fork on Windows, so this ran serially. ",

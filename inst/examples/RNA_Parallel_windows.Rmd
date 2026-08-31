@@ -1488,7 +1488,7 @@ mem_gb <- win_num("Win32_ComputerSystem", "TotalPhysicalMemory") / 2^30
 # sources. Keeping the schema identical is what makes the three tables comparable side by
 # side; only where each value comes from changes.
 #
-# performance cores are read from the topology rather than a original table, the same way the
+# performance cores are read from the topology rather than an original table, the same way the
 # package's own default does it: on this family only P-cores carry SMT, so the number of
 # logical processors above the physical count is the number of cores with a second thread.
 # 22 logical against 16 physical gives 6, which is right, and the guard degrades to the
