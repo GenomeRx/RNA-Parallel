@@ -296,17 +296,24 @@ rp_label <- function(what, x) {
 
 #' Begin a timed, optionally quiet, progress-ticking companion step
 #'
-#' Returns a handle for `rp_step_end()`, or NULL when timing, quiet, and progress are all off
-#' (progress defaults on, so this is the explicit `combat.progress = FALSE` case). Registering
-#' the teardown with `on.exit()` in the caller is what makes this exception-safe: the sink
-#' unwinds and the elapsed line still prints when the original throws, so a failed run reports
-#' where it failed rather than vanishing.
+#' Returns a handle for `rp_step_end()`, or NULL when timing, quiet, console progress, and file
+#' progress (`combat.progress.dir`) are all off (progress defaults on, so this is the explicit
+#' `combat.progress = FALSE` case with no directory set). Registering the teardown with
+#' `on.exit()` in the caller is what makes this exception-safe: the sink unwinds and the
+#' elapsed line still prints when the original throws, so a failed run reports where it failed
+#' rather than vanishing.
 #' @noRd
 rp_step_begin <- function(label, what, x, backend, workers) {
   timing <- rp_opt_flag("combat.timing")
   quiet  <- rp_opt_flag("combat.quiet")
   progress <- rp_opt_flag("combat.progress", default = TRUE)
-  if (!timing && !quiet && !progress) return(NULL)
+  # File progress needs the real stage label even when the console tick is off: a caller who
+  # wants only combat.progress.dir (say, on a headless RStudio Server run where the console
+  # tick is pointless) still needs .rp_dispatch$progress_label set below to something other
+  # than the generic "dispatch" fallback, or every stage's TSV rows read identically and
+  # rnaparallel_progress() cannot tell a ComBat-seq run from an lmFit run in the same dir.
+  file_progress <- !is.null(rp_progress_dir())
+  if (!timing && !quiet && !progress && !file_progress) return(NULL)
   # NOT reentrant, on purpose. calcNormFactors_parallel on a DGEList reaches the original's
   # DGEList method, which calls the companion again on the counts matrix, so one user-facing
   # call is two nested calls here and printed itself twice. Only the outermost reports, and
