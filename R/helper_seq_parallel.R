@@ -1081,6 +1081,13 @@ combat_parallel_lapply <- function(idx, f, workers,
   # 2 * n_batch + 3 dispatches a run.
   .lean_tag <- new.env(parent = parent.env(environment()))
   .lean_tag$f <- f
+  # Captured as plain values in the MASTER, not read from .rp_dispatch inside the worker: a
+  # PSOCK worker is a fresh process that does not inherit the master's global env or its
+  # options() unless told to, and rp_progress_dir()/the stage label would silently read as
+  # unset there. mclapply's forked children do inherit a copy, but capturing here keeps one
+  # code path for all four backends instead of a fork-only shortcut that quietly breaks PSOCK.
+  .lean_tag$progress_dir   <- rp_progress_dir()
+  .lean_tag$progress_stage <- .rp_dispatch$progress_label %||% "dispatch"
   f_tagged <- function(ii) {
     k <- attr(ii, "combat_chunk")
     attr(ii, "combat_chunk") <- NULL
@@ -1093,6 +1100,20 @@ combat_parallel_lapply <- function(idx, f, workers,
     Sys.setenv(RNAPARALLEL_IN_WORKER = "1")
     on.exit(if (is.na(prev)) Sys.unsetenv("RNAPARALLEL_IN_WORKER")
             else Sys.setenv(RNAPARALLEL_IN_WORKER = prev), add = TRUE)
+    # File progress covers the stretch the console tick cannot: once the master calls into
+    # mclapply/future/BiocParallel/foreach it blocks until every chunk returns, so this is
+    # the only place inside that block anything can be reported from. No-op when
+    # combat.progress.dir was unset in the master (rp_progress_file_write() checks `dir`).
+    # Bare symbols, not `.lean_tag$progress_dir`: `environment(f_tagged) <- .lean_tag` makes
+    # THIS function's own scope .lean_tag, so a name bound in it resolves directly, the same
+    # way `f` above is called bare rather than as `.lean_tag$f`. `.lean_tag$progress_dir`
+    # would look up a variable named `.lean_tag` INSIDE .lean_tag itself, which does not
+    # exist, and future's globals scan does not pull the enclosing binding in either --
+    # measured as `object '.lean_tag' not found` under a real multisession plan.
+    if (!is.null(progress_dir)) {
+      rp_progress_file_write(progress_dir, progress_stage, k, "start")
+      on.exit(rp_progress_file_write(progress_dir, progress_stage, k, "done"), add = TRUE)
+    }
     list(combat_chunk = k, value = f(ii))
   }
   environment(f_tagged) <- .lean_tag

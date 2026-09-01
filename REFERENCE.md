@@ -177,6 +177,28 @@ screen between "computing" and the final line, and a slow run looked identical t
 The line clears itself before the `combat.timing` summary prints. Set
 `options(combat.progress = FALSE)` for silence.
 
+**File progress, for a call that blocks for hours.** The console tick above only fires between
+dispatches in the master process; once the master calls into `mclapply`/`future`/`BiocParallel`/
+`foreach` it blocks synchronously until every chunk returns, and nothing in the master can print
+during that block. Workers cannot fix this by writing to the master's console either: a forked
+child's stdout is not reliably multiplexed back to an RStudio Server session, and PSOCK/
+BiocParallel workers share no console with the master at all.
+
+Set `options(combat.progress.dir = "some/writable/path")` before the call. Each worker appends
+a TSV line, one file per worker PID, at the start and end of every chunk it runs. From a
+SEPARATE R session, while the run is still going:
+
+```r
+rnaparallel_progress("some/writable/path")
+#> 47 done, 128 started, 0 stalled, 12.4m/chunk, ETA 16:42
+```
+
+`done`/`started`/`stalled` count chunks (`stalled` = started, never finished, which is what a
+killed worker looks like). The seconds-per-chunk and ETA need at least two finished chunks to
+mean anything and read `NA` until then. Off unless a directory is set; every write is one line
+per chunk, not per gene, so the cost is immaterial next to the compute itself even at hundreds
+of chunks over hours.
+
 `rnaparallel_stale()` returns TRUE if the package was reinstalled under a running session. The
 fix is to restart R.
 

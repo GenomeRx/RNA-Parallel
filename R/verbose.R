@@ -124,6 +124,9 @@ rp_or0 <- function(x) if (is.null(x)) 0L else x
 # like a slow one. This is the fix: one line, overwritten in place with a carriage return, so
 # it never scrolls and never floods a log. On by default so every parallel call is visible
 # without opting in; set options(combat.progress = FALSE) to silence it.
+#
+# This tick fires in the MASTER process between dispatches -- see the file-based mechanism
+# below for the part that survives the master blocking inside one big parallel call.
 
 #' @noRd
 rp_progress_tick <- function() {
@@ -156,6 +159,125 @@ rp_progress_done <- function() {
   cat(cr, strrep(" ", 60L), cr, sep = "", file = stderr())
   utils::flush.console()
   invisible(NULL)
+}
+
+
+# ---- file progress (opt-in, for a blocking parallel call) --------------------
+
+# The console tick above only fires in the MASTER process, and only between dispatches: the
+# moment mclapply/future/BiocParallel/foreach blocks for the actual parallel work, the master
+# is synchronously waiting and cannot print anything until it returns. On a single large
+# dispatch (one ComBat-seq stage split into a few hundred chunks across 16 workers) that block
+# can run for hours, and the tick above goes silent for the whole stretch: exactly the gap
+# that made a live run indistinguishable from a hung one on a real 14h53m + 13h pooled run.
+#
+# Workers cannot fix this by writing to the master's console either: a forked child's stdout
+# is not reliably multiplexed back to an RStudio Server session, and PSOCK/BiocParallel
+# workers do not share a console at all. A file each worker can append to, read from a
+# SEPARATE session while the master blocks, is the only channel that survives all four
+# backends. One file per worker PID avoids write contention between workers.
+#
+# Off unless the caller sets a directory. Every write is one line; the cost is a
+# file-append syscall per chunk, not per gene, so at hundreds of chunks over hours it is
+# immaterial next to the compute itself.
+
+#' @noRd
+rp_progress_dir <- function() {
+  d <- getOption("combat.progress.dir", NA_character_)
+  if (is.na(d) || !nzchar(d)) return(NULL)
+  d
+}
+
+#' Append one chunk-progress line to this worker's own file
+#'
+#' TSV so it parses without guessing a delimiter: unix time, stage label, chunk index,
+#' event ("start" or "done"). One file per worker PID means every writer only ever appends
+#' to a file nothing else touches, so no locking is needed on any of the four backends,
+#' including PSOCK workers that share nothing with each other. `dir` is passed explicitly
+#' rather than read via `rp_progress_dir()`/`getOption()`, because the one caller that matters
+#' (the dispatch wrapper in `combat_parallel_lapply()`) already resolved it once in the master
+#' and captured it as a plain value in the worker's closure -- a PSOCK worker does not inherit
+#' the master's `options()`, so reading the option again inside the worker would silently see
+#' the default instead.
+#' @noRd
+rp_progress_file_write <- function(dir, stage, chunk, event) {
+  if (is.null(dir)) return(invisible(NULL))
+  pid <- Sys.getpid()
+  path <- file.path(dir, sprintf("rnaparallel-%d.tsv", pid))
+  line <- sprintf("%.0f\t%s\t%d\t%s\n", as.numeric(Sys.time()), stage, chunk, event)
+  # append = TRUE, one write per line: a worker that dies mid-chunk leaves a "start" with no
+  # matching "done", which is itself useful (rnaparallel_progress() reports it as stalled)
+  # rather than losing the row a buffered/batched write would risk on a killed process.
+  try(cat(line, file = path, append = TRUE), silent = TRUE)
+  invisible(NULL)
+}
+
+#' Summarise chunk progress from a `combat.progress.dir`, with an ETA
+#'
+#' Reads every `rnaparallel-*.tsv` file in `dir`, pairs each chunk's start/done rows, and
+#' reports completed chunks, a mean seconds-per-chunk from the ones that finished, and a
+#' projected finish time. Meant to be called from a SEPARATE R session while the run that is
+#' writing the files is still blocked inside its parallel call: that is the whole point of
+#' writing to a file rather than a console the blocked session cannot flush anyway.
+#'
+#' @param dir Directory passed as `options(combat.progress.dir = ...)` in the running session.
+#' @return Invisibly, a list with `done`, `started`, `stalled` (started, never finished) and
+#'   `eta` (a `POSIXct`, or `NA` if fewer than two chunks have finished). Also prints one line.
+#' @examples
+#' \dontrun{
+#' # in the running session:
+#' options(combat.progress.dir = "/tmp/rnaparallel-progress")
+#' ComBat_seq_parallel(counts, batch = batch, group = group, workers = 16L)
+#'
+#' # from a second session, while the first is still running:
+#' rnaparallel_progress("/tmp/rnaparallel-progress")
+#' }
+#' @export
+rnaparallel_progress <- function(dir) {
+  files <- list.files(dir, pattern = "^rnaparallel-.*\\.tsv$", full.names = TRUE)
+  if (!length(files)) {
+    message("no rnaparallel-*.tsv files in ", dir, " yet")
+    return(invisible(list(done = 0L, started = 0L, stalled = 0L, eta = as.POSIXct(NA))))
+  }
+  rows <- do.call(rbind, lapply(files, function(f) {
+    tryCatch(
+      utils::read.delim(f, header = FALSE, sep = "\t",
+                        col.names = c("ts", "stage", "chunk", "event"),
+                        colClasses = c("numeric", "character", "integer", "character")),
+      error = function(e) NULL)
+  }))
+  if (is.null(rows) || !nrow(rows)) {
+    message("no readable progress rows in ", dir, " yet")
+    return(invisible(list(done = 0L, started = 0L, stalled = 0L, eta = as.POSIXct(NA))))
+  }
+  starts <- rows[rows$event == "start", ]
+  dones  <- rows[rows$event == "done", ]
+  key <- function(d) paste(d$stage, d$chunk)
+  done_key <- key(dones)
+  stalled <- starts[!(key(starts) %in% done_key), , drop = FALSE]
+
+  n_done <- nrow(dones)
+  n_started <- nrow(starts)
+  secs_per_chunk <- NA_real_
+  eta <- as.POSIXct(NA)
+  if (n_done >= 2L) {
+    # matched by (stage, chunk): a chunk's own start row, not the run's earliest start, so a
+    # straggler chunk started late does not get credited with an unfairly long duration.
+    m <- merge(starts[c("stage", "chunk", "ts")], dones[c("stage", "chunk", "ts")],
+              by = c("stage", "chunk"), suffixes = c("_start", "_done"))
+    durs <- m$ts_done - m$ts_start
+    secs_per_chunk <- mean(durs[durs >= 0])
+    remaining <- n_started - n_done
+    if (!is.na(secs_per_chunk) && remaining > 0L) {
+      eta <- Sys.time() + secs_per_chunk * remaining
+    }
+  }
+  msg <- sprintf("%d done, %d started, %d stalled%s%s",
+                n_done, n_started, nrow(stalled),
+                if (!is.na(secs_per_chunk)) sprintf(", %s/chunk", rp_secs(secs_per_chunk)) else "",
+                if (!is.na(eta)) sprintf(", ETA %s", format(eta, "%H:%M")) else "")
+  message(msg)
+  invisible(list(done = n_done, started = n_started, stalled = nrow(stalled), eta = eta))
 }
 
 
