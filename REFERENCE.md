@@ -169,12 +169,13 @@ The engine column reports what ran, not what was asked for: a call under a size 
 pinned original excerpt stands down after an upstream change, the line says
 `[match_quantiles stood down]`.
 
-**`options(combat.progress = TRUE)`** prints a live count on one line, overwritten in place with
-a carriage return (`  ComBat-seq 18,270 x 1,500: 42 dispatched`), throttled to 4/sec. `combat.timing`
-alone reports once a call finishes; ComBat-seq dispatches its hot paths up to `2 * n_batch + 3`
-times per call, so a cohort of hundreds of batches showed nothing on screen between "computing"
-and the final line, and a slow run looked identical to a stuck one. The line clears itself before
-the `combat.timing` summary prints. Off by default.
+**Progress ticks by default.** Every parallel call prints a live count on one line, overwritten
+in place with a carriage return (`  ComBat-seq 18,270 x 1,500: 42 dispatched`), throttled to
+4/sec. `combat.timing` alone reports once a call finishes; ComBat-seq dispatches its hot paths up
+to `2 * n_batch + 3` times per call, so a cohort of hundreds of batches used to show nothing on
+screen between "computing" and the final line, and a slow run looked identical to a stuck one.
+The line clears itself before the `combat.timing` summary prints. Set
+`options(combat.progress = FALSE)` for silence.
 
 `rnaparallel_stale()` returns TRUE if the package was reinstalled under a running session. The
 fix is to restart R.

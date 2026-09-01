@@ -116,17 +116,18 @@ rp_note_fallback <- function(what) {
 rp_or0 <- function(x) if (is.null(x)) 0L else x
 
 
-# ---- single-line progress (opt-in) --------------------------------------------
+# ---- single-line progress (default on) ----------------------------------------
 
 # combat.timing prints one line at the END of a call. ComBat-seq alone dispatches its hot
 # paths up to 2*n_batch + 3 times per call, so on a large cohort (hundreds of batches) there
 # is nothing on screen between "computing" and the final line, and a stuck run looks exactly
-# like a slow one. This is the opt-in fix: one line, overwritten in place with a carriage
-# return, so it never scrolls and never floods a log. Off by default, same as timing and quiet.
+# like a slow one. This is the fix: one line, overwritten in place with a carriage return, so
+# it never scrolls and never floods a log. On by default so every parallel call is visible
+# without opting in; set options(combat.progress = FALSE) to silence it.
 
 #' @noRd
 rp_progress_tick <- function() {
-  if (!rp_opt_flag("combat.progress")) return(invisible(NULL))
+  if (!rp_opt_flag("combat.progress", default = TRUE)) return(invisible(NULL))
   # Throttled to 4/sec: enough to prove the run is alive, not enough to slow it down or
   # flood a log file that doesn't understand a bare carriage return (each tick still costs
   # a Sys.time() read).
@@ -148,7 +149,7 @@ rp_progress_tick <- function() {
 
 #' @noRd
 rp_progress_done <- function() {
-  if (!rp_opt_flag("combat.progress")) return(invisible(NULL))
+  if (!rp_opt_flag("combat.progress", default = TRUE)) return(invisible(NULL))
   # Clear the line rather than leaving a stale count sitting there once the step's own
   # combat.timing line (if any) prints below it.
   cr <- "\r"
@@ -171,17 +172,18 @@ rp_label <- function(what, x) {
   sprintf("%s %s x %s", what, format(d[1L], big.mark = ","), format(d[2L], big.mark = ","))
 }
 
-#' Begin a timed, optionally quiet companion step
+#' Begin a timed, optionally quiet, progress-ticking companion step
 #'
-#' Returns a handle for `rp_step_end()`, or NULL when neither option is on, which is the
-#' default and costs one `getOption` per call. Registering the teardown with `on.exit()` in the
-#' caller is what makes this exception-safe: the sink unwinds and the elapsed line still prints
-#' when the original throws, so a failed run reports where it failed rather than vanishing.
+#' Returns a handle for `rp_step_end()`, or NULL when timing, quiet, and progress are all off
+#' (progress defaults on, so this is the explicit `combat.progress = FALSE` case). Registering
+#' the teardown with `on.exit()` in the caller is what makes this exception-safe: the sink
+#' unwinds and the elapsed line still prints when the original throws, so a failed run reports
+#' where it failed rather than vanishing.
 #' @noRd
 rp_step_begin <- function(label, what, x, backend, workers) {
   timing <- rp_opt_flag("combat.timing")
   quiet  <- rp_opt_flag("combat.quiet")
-  progress <- rp_opt_flag("combat.progress")
+  progress <- rp_opt_flag("combat.progress", default = TRUE)
   if (!timing && !quiet && !progress) return(NULL)
   # NOT reentrant, on purpose. calcNormFactors_parallel on a DGEList reaches the original's
   # DGEList method, which calls the companion again on the counts matrix, so one user-facing

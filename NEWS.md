@@ -3,12 +3,12 @@
 Windows is a supported platform, the socket backends work, and the companions no longer pay for
 work they throw away.
 
-- **`options(combat.progress = TRUE)`** prints one line, overwritten in place, ticking up as
-  dispatches happen. `combat.timing` alone only reports after a call finishes, and ComBat-seq
-  alone dispatches its hot paths up to `2 * n_batch + 3` times per call, so a cohort with
-  hundreds of batches showed nothing between "computing" and the final summary, and a slow run
-  looked identical to a stuck one. The tick is throttled to 4/sec and off by default, same as
-  `combat.timing` and `combat.quiet`.
+- **`combat.progress` is now on by default.** No option needs to be set: every parallel call
+  ticks a live "N dispatched" line, overwritten in place, so you can always tell a slow run from
+  a stuck one. `combat.timing` alone only reports after a call finishes, and ComBat-seq alone
+  dispatches its hot paths up to `2 * n_batch + 3` times per call, so a cohort with hundreds of
+  batches used to show nothing between "computing" and the final summary. Set
+  `options(combat.progress = FALSE)` to go back to silent.
 
 - **Three companions could not run on the `future` backend at all.** A closure is serialised with
   its defining environment, and every dispatched job in the package was built in a frame holding
