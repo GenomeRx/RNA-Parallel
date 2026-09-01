@@ -77,8 +77,13 @@ against all five originals, no download required. At cohort scale, the same chec
 [inst/examples/](inst/examples/). [tests/](tests/testthat) covers every argument path, chunk
 layout, backend, and dispatch count: 400+ assertions.
 
-**See what's running:** `options(combat.timing = TRUE)` prints the real engine per call, `serial`
-vs `mclapply x6`, etc. See [REFERENCE.md](REFERENCE.md#seeing-what-is-running).
+**See what's running:** every parallel call ticks a live "N dispatched" line by default,
+overwritten in place, so a long ComBat-seq run against hundreds of batches never sits silent.
+`options(combat.timing = TRUE)` adds the real engine per call once it finishes, `serial` vs
+`mclapply x6`, etc. For a call that blocks inside the parallel backend for hours, set
+`options(combat.progress.dir = "some/path")` and call `rnaparallel_progress(dir)` from a
+SEPARATE session for chunks done, a mean seconds-per-chunk, and an ETA. See
+[REFERENCE.md](REFERENCE.md#seeing-what-is-running).
 
 ## Tuning
 

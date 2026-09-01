@@ -71,6 +71,7 @@ rp_count_reset <- function() {
   .rp_dispatch$par <- 0L
   .rp_dispatch$ser <- 0L
   .rp_dispatch$fallback <- character()
+  .rp_dispatch$progress_last <- NULL
   invisible(NULL)
 }
 
@@ -79,6 +80,7 @@ rp_count_reset <- function() {
 rp_count <- function(parallel) {
   if (isTRUE(parallel)) .rp_dispatch$par <- rp_or0(.rp_dispatch$par) + 1L
   else                  .rp_dispatch$ser <- rp_or0(.rp_dispatch$ser) + 1L
+  rp_progress_tick()
   invisible(NULL)
 }
 
@@ -114,6 +116,254 @@ rp_note_fallback <- function(what) {
 rp_or0 <- function(x) if (is.null(x)) 0L else x
 
 
+# ---- single-line progress (default on) ----------------------------------------
+
+# combat.timing prints one line at the END of a call. ComBat-seq alone dispatches its hot
+# paths up to 2*n_batch + 3 times per call, so on a large cohort (hundreds of batches) there
+# is nothing on screen between "computing" and the final line, and a stuck run looks exactly
+# like a slow one. This is the fix: one line, overwritten in place with a carriage return, so
+# it never scrolls and never floods a log. On by default so every parallel call is visible
+# without opting in; set options(combat.progress = FALSE) to silence it.
+#
+# This tick fires in the MASTER process between dispatches. See the file-based mechanism
+# below for the part that survives the master blocking inside one big parallel call.
+
+#' @noRd
+rp_progress_tick <- function() {
+  if (!rp_opt_flag("combat.progress", default = TRUE)) return(invisible(NULL))
+  # Throttled to 4/sec: enough to prove the run is alive, not enough to slow it down or
+  # flood a log file that doesn't understand a bare carriage return (each tick still costs
+  # a Sys.time() read).
+  now <- Sys.time()
+  last <- .rp_dispatch$progress_last
+  if (!is.null(last) && as.numeric(now - last, units = "secs") < 0.25) return(invisible(NULL))
+  .rp_dispatch$progress_last <- now
+
+  n <- rp_or0(.rp_dispatch$par) + rp_or0(.rp_dispatch$ser)
+  label <- .rp_dispatch$progress_label %||% "dispatch"
+  # No total is known in advance (batch count varies by call site), so this counts up rather
+  # than filling a bar to a percentage that would have to guess. A rising count is still
+  # unambiguous evidence of life; a percentage that never appears is worse than none.
+  cr <- "\r"
+  cat(cr, sprintf("  %s: %d dispatched ", label, n), sep = "", file = stderr())
+  utils::flush.console()
+  invisible(NULL)
+}
+
+#' @noRd
+rp_progress_done <- function() {
+  if (!rp_opt_flag("combat.progress", default = TRUE)) return(invisible(NULL))
+  # Clear the line rather than leaving a stale count sitting there once the step's own
+  # combat.timing line (if any) prints below it.
+  cr <- "\r"
+  cat(cr, strrep(" ", 60L), cr, sep = "", file = stderr())
+  utils::flush.console()
+  invisible(NULL)
+}
+
+
+# ---- file progress (opt-in, for a blocking parallel call) --------------------
+
+# The console tick above only fires in the MASTER process, and only between dispatches: the
+# moment mclapply/future/BiocParallel/foreach blocks for the actual parallel work, the master
+# is synchronously waiting and cannot print anything until it returns. On a single large
+# dispatch (one ComBat-seq stage split into a few hundred chunks across 16 workers) that block
+# can run for hours, and the tick above goes silent for the whole stretch: exactly the gap
+# that made a live run indistinguishable from a hung one on a real 14h53m + 13h pooled run.
+#
+# Workers cannot fix this by writing to the master's console either: a forked child's stdout
+# is not reliably multiplexed back to an RStudio Server session, and PSOCK/BiocParallel
+# workers do not share a console at all. A file each worker can append to, read from a
+# SEPARATE session while the master blocks, is the only channel that survives all four
+# backends. One file per worker PID avoids write contention between workers.
+#
+# Off unless the caller sets a directory. Every write is one line; the cost is a
+# file-append syscall per chunk, not per gene, so at hundreds of chunks over hours it is
+# immaterial next to the compute itself.
+
+#' @noRd
+rp_progress_dir <- function() {
+  d <- getOption("combat.progress.dir", NA_character_)
+  if (is.na(d) || !nzchar(d)) return(NULL)
+  d
+}
+
+#' Append one chunk-progress line to this worker's own file
+#'
+#' TSV so it parses without guessing a delimiter: unix time, stage label, chunk index,
+#' event ("start" or "done"). One file per worker PID means every writer only ever appends
+#' to a file nothing else touches, so no locking is needed on any of the four backends,
+#' including PSOCK workers that share nothing with each other. `dir` is passed explicitly
+#' rather than read via `rp_progress_dir()`/`getOption()`, because the one caller that matters
+#' (the dispatch wrapper in `combat_parallel_lapply()`) already resolved it once in the master
+#' and captured it as a plain value in the worker's closure. A PSOCK worker does not inherit
+#' the master's `options()`, so reading the option again inside the worker would silently see
+#' the default instead.
+#' @noRd
+rp_progress_file_write <- function(dir, stage, chunk, event) {
+  if (is.null(dir)) return(invisible(NULL))
+  pid <- Sys.getpid()
+  path <- file.path(dir, sprintf("rnaparallel-%d.tsv", pid))
+  line <- sprintf("%.0f\t%s\t%d\t%s\n", as.numeric(Sys.time()), stage, chunk, event)
+  # append = TRUE, one write per line: a worker that dies mid-chunk leaves a "start" with no
+  # matching "done", which is itself useful (rnaparallel_progress() reports it as stalled)
+  # rather than losing the row a buffered/batched write would risk on a killed process.
+  try(cat(line, file = path, append = TRUE), silent = TRUE)
+  invisible(NULL)
+}
+
+#' Summarise chunk progress from a `combat.progress.dir`, with an ETA
+#'
+#' Reads every `rnaparallel-*.tsv` file in `dir`, pairs each chunk's start/done rows, and
+#' reports completed chunks, a mean seconds-per-chunk from the ones that finished, and a
+#' projected finish time. Meant to be called from a SEPARATE R session while the run that is
+#' writing the files is still blocked inside its parallel call: that is the whole point of
+#' writing to a file rather than a console the blocked session cannot flush anyway.
+#'
+#' A single continuously-updating bar DURING one blocking call is not something the running
+#' session can print: once it calls into `mclapply`/`future`/`BiocParallel`/`foreach` it is
+#' synchronously waiting and cannot redraw a console until the call returns, which is the whole
+#' reason this writes to files instead. `watch = TRUE` gets the live-bar behaviour anyway, from
+#' the side that CAN keep drawing: this function's own process, polling the files and
+#' redrawing a real `[#####-----] 47%` bar with the current stage name, once a second, until
+#' every chunk in the last dispatch is done.
+#'
+#' @param dir Directory passed as `options(combat.progress.dir = ...)` in the running session.
+#' @param watch If `TRUE`, poll and redraw a live bar every `interval` seconds instead of
+#'   returning once. Meant for a SEPARATE terminal/session next to the one running the actual
+#'   computation; stop it with Ctrl-C or `interval` reaching a stall (see below).
+#' @param interval Seconds between redraws in watch mode.
+#' @param stall_after Seconds with no new "done" row before watch mode gives up and returns,
+#'   so a finished or crashed run does not poll forever with nobody watching. Default 10
+#'   minutes: long enough to survive one very slow chunk, short enough to actually stop.
+#' @return Invisibly, a list with `done`, `started`, `stalled` (started, never finished) and
+#'   `eta` (a `POSIXct`, or `NA` if fewer than two chunks have finished). Also prints one line
+#'   (or, in watch mode, one redrawn bar).
+#' @examples
+#' \dontrun{
+#' # in the running session:
+#' options(combat.progress.dir = "/tmp/rnaparallel-progress")
+#' ComBat_seq_parallel(counts, batch = batch, group = group, workers = 16L)
+#'
+#' # from a second session, while the first is still running:
+#' rnaparallel_progress("/tmp/rnaparallel-progress")
+#'
+#' # or, for a live-updating bar in that second session:
+#' rnaparallel_progress("/tmp/rnaparallel-progress", watch = TRUE)
+#' }
+#' @export
+rnaparallel_progress <- function(dir, watch = FALSE, interval = 1, stall_after = 600) {
+  if (isTRUE(watch)) return(rp_progress_watch(dir, interval, stall_after))
+  rp_progress_once(dir)
+}
+
+#' @noRd
+rp_progress_read <- function(dir) {
+  files <- list.files(dir, pattern = "^rnaparallel-.*\\.tsv$", full.names = TRUE)
+  if (!length(files)) return(NULL)
+  rows <- do.call(rbind, lapply(files, function(f) {
+    tryCatch(
+      utils::read.delim(f, header = FALSE, sep = "\t",
+                        col.names = c("ts", "stage", "chunk", "event"),
+                        colClasses = c("numeric", "character", "integer", "character")),
+      error = function(e) NULL)
+  }))
+  if (is.null(rows) || !nrow(rows)) return(NULL)
+  rows
+}
+
+#' @noRd
+rp_progress_summarise <- function(rows) {
+  starts <- rows[rows$event == "start", ]
+  dones  <- rows[rows$event == "done", ]
+  key <- function(d) paste(d$stage, d$chunk)
+  done_key <- key(dones)
+  stalled <- starts[!(key(starts) %in% done_key), , drop = FALSE]
+
+  n_done <- nrow(dones)
+  n_started <- nrow(starts)
+  secs_per_chunk <- NA_real_
+  eta <- as.POSIXct(NA)
+  if (n_done >= 2L) {
+    # matched by (stage, chunk): a chunk's own start row, not the run's earliest start, so a
+    # straggler chunk started late does not get credited with an unfairly long duration.
+    m <- merge(starts[c("stage", "chunk", "ts")], dones[c("stage", "chunk", "ts")],
+              by = c("stage", "chunk"), suffixes = c("_start", "_done"))
+    durs <- m$ts_done - m$ts_start
+    secs_per_chunk <- mean(durs[durs >= 0])
+    remaining <- n_started - n_done
+    if (!is.na(secs_per_chunk) && remaining > 0L) {
+      eta <- Sys.time() + secs_per_chunk * remaining
+    }
+  }
+  # The stage shown is whichever one has the most recent activity, so a multi-stage run (five
+  # companions in one script, one progress.dir) shows the stage actually running right now
+  # rather than the alphabetically first one.
+  cur_stage <- if (nrow(rows)) rows$stage[which.max(rows$ts)] else NA_character_
+  list(done = n_done, started = n_started, stalled = nrow(stalled), eta = eta,
+      secs_per_chunk = secs_per_chunk, stage = cur_stage)
+}
+
+#' @noRd
+rp_progress_once <- function(dir) {
+  rows <- rp_progress_read(dir)
+  if (is.null(rows)) {
+    message("no rnaparallel-*.tsv files in ", dir, " yet")
+    return(invisible(list(done = 0L, started = 0L, stalled = 0L, eta = as.POSIXct(NA))))
+  }
+  s <- rp_progress_summarise(rows)
+  msg <- sprintf("%d done, %d started, %d stalled%s%s",
+                s$done, s$started, s$stalled,
+                if (!is.na(s$secs_per_chunk)) sprintf(", %s/chunk", rp_secs(s$secs_per_chunk)) else "",
+                if (!is.na(s$eta)) sprintf(", ETA %s", format(s$eta, "%H:%M")) else "")
+  message(msg)
+  invisible(s[c("done", "started", "stalled", "eta")])
+}
+
+#' A real `[#####-----] 47%` bar, drawn in the WATCHING process, not the blocked one
+#'
+#' This is the process that can actually keep redrawing: the running session is synchronously
+#' blocked inside its parallel call and cannot. Stops on its own once `started` chunks stop
+#' growing for `stall_after` seconds (the run finished, or nobody is writing to `dir` at all)
+#' so a call left running does not poll an abandoned directory forever.
+#' @noRd
+rp_progress_watch <- function(dir, interval, stall_after) {
+  last_activity <- Sys.time()
+  last_started <- -1L
+  cr <- "\r"
+  repeat {
+    rows <- rp_progress_read(dir)
+    if (is.null(rows)) {
+      cat(cr, strrep(" ", 70L), cr, "  waiting for ", dir, " ...", sep = "")
+      utils::flush.console()
+    } else {
+      s <- rp_progress_summarise(rows)
+      if (s$started != last_started) { last_activity <- Sys.time(); last_started <- s$started }
+      pct <- if (s$started > 0L) s$done / s$started else 0
+      width <- 24L
+      filled <- round(pct * width)
+      bar <- paste0("[", strrep("#", filled), strrep("-", width - filled), "]")
+      eta_txt <- if (!is.na(s$eta)) sprintf(" ETA %s", format(s$eta, "%H:%M")) else ""
+      line <- sprintf("  %s %3.0f%%  %-28s %d/%d%s",
+                      bar, pct * 100, substr(s$stage %||% "", 1L, 28L),
+                      s$done, s$started, eta_txt)
+      cat(cr, strrep(" ", 90L), cr, line, sep = "")
+      utils::flush.console()
+      if (s$started > 0L && s$done >= s$started &&
+          as.numeric(Sys.time() - last_activity, units = "secs") > 2) {
+        cat("\n")
+        return(invisible(s[c("done", "started", "stalled", "eta")]))
+      }
+    }
+    if (as.numeric(Sys.time() - last_activity, units = "secs") > stall_after) {
+      cat("\n  no new chunks in ", stall_after, "s, stopping watch\n", sep = "")
+      return(invisible(NULL))
+    }
+    Sys.sleep(interval)
+  }
+}
+
+
 # ---- the step wrapper --------------------------------------------------------
 
 #' Default label for a companion call
@@ -127,17 +377,26 @@ rp_label <- function(what, x) {
   sprintf("%s %s x %s", what, format(d[1L], big.mark = ","), format(d[2L], big.mark = ","))
 }
 
-#' Begin a timed, optionally quiet companion step
+#' Begin a timed, optionally quiet, progress-ticking companion step
 #'
-#' Returns a handle for `rp_step_end()`, or NULL when neither option is on, which is the
-#' default and costs one `getOption` per call. Registering the teardown with `on.exit()` in the
-#' caller is what makes this exception-safe: the sink unwinds and the elapsed line still prints
-#' when the original throws, so a failed run reports where it failed rather than vanishing.
+#' Returns a handle for `rp_step_end()`, or NULL when timing, quiet, console progress, and file
+#' progress (`combat.progress.dir`) are all off (progress defaults on, so this is the explicit
+#' `combat.progress = FALSE` case with no directory set). Registering the teardown with
+#' `on.exit()` in the caller is what makes this exception-safe: the sink unwinds and the
+#' elapsed line still prints when the original throws, so a failed run reports where it failed
+#' rather than vanishing.
 #' @noRd
 rp_step_begin <- function(label, what, x, backend, workers) {
   timing <- rp_opt_flag("combat.timing")
   quiet  <- rp_opt_flag("combat.quiet")
-  if (!timing && !quiet) return(NULL)
+  progress <- rp_opt_flag("combat.progress", default = TRUE)
+  # File progress needs the real stage label even when the console tick is off: a caller who
+  # wants only combat.progress.dir (say, on a headless RStudio Server run where the console
+  # tick is pointless) still needs .rp_dispatch$progress_label set below to something other
+  # than the generic "dispatch" fallback, or every stage's TSV rows read identically and
+  # rnaparallel_progress() cannot tell a ComBat-seq run from an lmFit run in the same dir.
+  file_progress <- !is.null(rp_progress_dir())
+  if (!timing && !quiet && !progress && !file_progress) return(NULL)
   # NOT reentrant, on purpose. calcNormFactors_parallel on a DGEList reaches the original's
   # DGEList method, which calls the companion again on the counts matrix, so one user-facing
   # call is two nested calls here and printed itself twice. Only the outermost reports, and
@@ -156,6 +415,7 @@ rp_step_begin <- function(label, what, x, backend, workers) {
             timing = timing,
             con = if (quiet) rp_quiet_begin() else NULL)
   rp_count_reset()
+  .rp_dispatch$progress_label <- h$label
   .rp_dispatch$depth <- 1L
   h
 }
@@ -165,6 +425,7 @@ rp_step_end <- function(h) {
   if (is.null(h)) return(invisible(NULL))
   .rp_dispatch$depth <- max(0L, rp_or0(.rp_dispatch$depth) - 1L)
   if (isTRUE(h$nested)) return(invisible(NULL))
+  rp_progress_done()
   if (!is.null(h$con)) rp_quiet_end(h$con)
   if (!isTRUE(h$timing)) return(invisible(NULL))
   secs <- proc.time()[["elapsed"]] - h$t0
