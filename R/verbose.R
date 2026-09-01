@@ -71,6 +71,7 @@ rp_count_reset <- function() {
   .rp_dispatch$par <- 0L
   .rp_dispatch$ser <- 0L
   .rp_dispatch$fallback <- character()
+  .rp_dispatch$progress_last <- NULL
   invisible(NULL)
 }
 
@@ -79,6 +80,7 @@ rp_count_reset <- function() {
 rp_count <- function(parallel) {
   if (isTRUE(parallel)) .rp_dispatch$par <- rp_or0(.rp_dispatch$par) + 1L
   else                  .rp_dispatch$ser <- rp_or0(.rp_dispatch$ser) + 1L
+  rp_progress_tick()
   invisible(NULL)
 }
 
@@ -114,6 +116,48 @@ rp_note_fallback <- function(what) {
 rp_or0 <- function(x) if (is.null(x)) 0L else x
 
 
+# ---- single-line progress (opt-in) --------------------------------------------
+
+# combat.timing prints one line at the END of a call. ComBat-seq alone dispatches its hot
+# paths up to 2*n_batch + 3 times per call, so on a large cohort (hundreds of batches) there
+# is nothing on screen between "computing" and the final line, and a stuck run looks exactly
+# like a slow one. This is the opt-in fix: one line, overwritten in place with a carriage
+# return, so it never scrolls and never floods a log. Off by default, same as timing and quiet.
+
+#' @noRd
+rp_progress_tick <- function() {
+  if (!rp_opt_flag("combat.progress")) return(invisible(NULL))
+  # Throttled to 4/sec: enough to prove the run is alive, not enough to slow it down or
+  # flood a log file that doesn't understand a bare carriage return (each tick still costs
+  # a Sys.time() read).
+  now <- Sys.time()
+  last <- .rp_dispatch$progress_last
+  if (!is.null(last) && as.numeric(now - last, units = "secs") < 0.25) return(invisible(NULL))
+  .rp_dispatch$progress_last <- now
+
+  n <- rp_or0(.rp_dispatch$par) + rp_or0(.rp_dispatch$ser)
+  label <- .rp_dispatch$progress_label %||% "dispatch"
+  # No total is known in advance (batch count varies by call site), so this counts up rather
+  # than filling a bar to a percentage that would have to guess. A rising count is still
+  # unambiguous evidence of life; a percentage that never appears is worse than none.
+  cr <- "\r"
+  cat(cr, sprintf("  %s: %d dispatched ", label, n), sep = "", file = stderr())
+  utils::flush.console()
+  invisible(NULL)
+}
+
+#' @noRd
+rp_progress_done <- function() {
+  if (!rp_opt_flag("combat.progress")) return(invisible(NULL))
+  # Clear the line rather than leaving a stale count sitting there once the step's own
+  # combat.timing line (if any) prints below it.
+  cr <- "\r"
+  cat(cr, strrep(" ", 60L), cr, sep = "", file = stderr())
+  utils::flush.console()
+  invisible(NULL)
+}
+
+
 # ---- the step wrapper --------------------------------------------------------
 
 #' Default label for a companion call
@@ -137,7 +181,8 @@ rp_label <- function(what, x) {
 rp_step_begin <- function(label, what, x, backend, workers) {
   timing <- rp_opt_flag("combat.timing")
   quiet  <- rp_opt_flag("combat.quiet")
-  if (!timing && !quiet) return(NULL)
+  progress <- rp_opt_flag("combat.progress")
+  if (!timing && !quiet && !progress) return(NULL)
   # NOT reentrant, on purpose. calcNormFactors_parallel on a DGEList reaches the original's
   # DGEList method, which calls the companion again on the counts matrix, so one user-facing
   # call is two nested calls here and printed itself twice. Only the outermost reports, and
@@ -156,6 +201,7 @@ rp_step_begin <- function(label, what, x, backend, workers) {
             timing = timing,
             con = if (quiet) rp_quiet_begin() else NULL)
   rp_count_reset()
+  .rp_dispatch$progress_label <- h$label
   .rp_dispatch$depth <- 1L
   h
 }
@@ -165,6 +211,7 @@ rp_step_end <- function(h) {
   if (is.null(h)) return(invisible(NULL))
   .rp_dispatch$depth <- max(0L, rp_or0(.rp_dispatch$depth) - 1L)
   if (isTRUE(h$nested)) return(invisible(NULL))
+  rp_progress_done()
   if (!is.null(h$con)) rp_quiet_end(h$con)
   if (!isTRUE(h$timing)) return(invisible(NULL))
   secs <- proc.time()[["elapsed"]] - h$t0

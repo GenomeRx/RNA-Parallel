@@ -78,7 +78,10 @@ against all five originals, no download required. At cohort scale, the same chec
 layout, backend, and dispatch count: 400+ assertions.
 
 **See what's running:** `options(combat.timing = TRUE)` prints the real engine per call, `serial`
-vs `mclapply x6`, etc. See [REFERENCE.md](REFERENCE.md#seeing-what-is-running).
+vs `mclapply x6`, etc. `options(combat.progress = TRUE)` adds a live count of dispatches so far,
+overwritten in place, useful on a long ComBat-seq run against hundreds of batches where the
+timing line alone would otherwise stay silent until the call finishes. See
+[REFERENCE.md](REFERENCE.md#seeing-what-is-running).
 
 ## Tuning
 
