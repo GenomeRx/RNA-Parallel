@@ -220,9 +220,25 @@ rp_progress_file_write <- function(dir, stage, chunk, event) {
 #' writing the files is still blocked inside its parallel call: that is the whole point of
 #' writing to a file rather than a console the blocked session cannot flush anyway.
 #'
+#' A single continuously-updating bar DURING one blocking call is not something the running
+#' session can print: once it calls into `mclapply`/`future`/`BiocParallel`/`foreach` it is
+#' synchronously waiting and cannot redraw a console until the call returns, which is the whole
+#' reason this writes to files instead. `watch = TRUE` gets the live-bar behaviour anyway, from
+#' the side that CAN keep drawing: this function's own process, polling the files and
+#' redrawing a real `[#####-----] 47%` bar with the current stage name, once a second, until
+#' every chunk in the last dispatch is done.
+#'
 #' @param dir Directory passed as `options(combat.progress.dir = ...)` in the running session.
+#' @param watch If `TRUE`, poll and redraw a live bar every `interval` seconds instead of
+#'   returning once. Meant for a SEPARATE terminal/session next to the one running the actual
+#'   computation; stop it with Ctrl-C or `interval` reaching a stall (see below).
+#' @param interval Seconds between redraws in watch mode.
+#' @param stall_after Seconds with no new "done" row before watch mode gives up and returns,
+#'   so a finished or crashed run does not poll forever with nobody watching. Default 10
+#'   minutes: long enough to survive one very slow chunk, short enough to actually stop.
 #' @return Invisibly, a list with `done`, `started`, `stalled` (started, never finished) and
-#'   `eta` (a `POSIXct`, or `NA` if fewer than two chunks have finished). Also prints one line.
+#'   `eta` (a `POSIXct`, or `NA` if fewer than two chunks have finished). Also prints one line
+#'   (or, in watch mode, one redrawn bar).
 #' @examples
 #' \dontrun{
 #' # in the running session:
@@ -231,14 +247,20 @@ rp_progress_file_write <- function(dir, stage, chunk, event) {
 #'
 #' # from a second session, while the first is still running:
 #' rnaparallel_progress("/tmp/rnaparallel-progress")
+#'
+#' # or, for a live-updating bar in that second session:
+#' rnaparallel_progress("/tmp/rnaparallel-progress", watch = TRUE)
 #' }
 #' @export
-rnaparallel_progress <- function(dir) {
+rnaparallel_progress <- function(dir, watch = FALSE, interval = 1, stall_after = 600) {
+  if (isTRUE(watch)) return(rp_progress_watch(dir, interval, stall_after))
+  rp_progress_once(dir)
+}
+
+#' @noRd
+rp_progress_read <- function(dir) {
   files <- list.files(dir, pattern = "^rnaparallel-.*\\.tsv$", full.names = TRUE)
-  if (!length(files)) {
-    message("no rnaparallel-*.tsv files in ", dir, " yet")
-    return(invisible(list(done = 0L, started = 0L, stalled = 0L, eta = as.POSIXct(NA))))
-  }
+  if (!length(files)) return(NULL)
   rows <- do.call(rbind, lapply(files, function(f) {
     tryCatch(
       utils::read.delim(f, header = FALSE, sep = "\t",
@@ -246,10 +268,12 @@ rnaparallel_progress <- function(dir) {
                         colClasses = c("numeric", "character", "integer", "character")),
       error = function(e) NULL)
   }))
-  if (is.null(rows) || !nrow(rows)) {
-    message("no readable progress rows in ", dir, " yet")
-    return(invisible(list(done = 0L, started = 0L, stalled = 0L, eta = as.POSIXct(NA))))
-  }
+  if (is.null(rows) || !nrow(rows)) return(NULL)
+  rows
+}
+
+#' @noRd
+rp_progress_summarise <- function(rows) {
   starts <- rows[rows$event == "start", ]
   dones  <- rows[rows$event == "done", ]
   key <- function(d) paste(d$stage, d$chunk)
@@ -272,12 +296,71 @@ rnaparallel_progress <- function(dir) {
       eta <- Sys.time() + secs_per_chunk * remaining
     }
   }
+  # The stage shown is whichever one has the most recent activity, so a multi-stage run (five
+  # companions in one script, one progress.dir) shows the stage actually running right now
+  # rather than the alphabetically first one.
+  cur_stage <- if (nrow(rows)) rows$stage[which.max(rows$ts)] else NA_character_
+  list(done = n_done, started = n_started, stalled = nrow(stalled), eta = eta,
+      secs_per_chunk = secs_per_chunk, stage = cur_stage)
+}
+
+#' @noRd
+rp_progress_once <- function(dir) {
+  rows <- rp_progress_read(dir)
+  if (is.null(rows)) {
+    message("no rnaparallel-*.tsv files in ", dir, " yet")
+    return(invisible(list(done = 0L, started = 0L, stalled = 0L, eta = as.POSIXct(NA))))
+  }
+  s <- rp_progress_summarise(rows)
   msg <- sprintf("%d done, %d started, %d stalled%s%s",
-                n_done, n_started, nrow(stalled),
-                if (!is.na(secs_per_chunk)) sprintf(", %s/chunk", rp_secs(secs_per_chunk)) else "",
-                if (!is.na(eta)) sprintf(", ETA %s", format(eta, "%H:%M")) else "")
+                s$done, s$started, s$stalled,
+                if (!is.na(s$secs_per_chunk)) sprintf(", %s/chunk", rp_secs(s$secs_per_chunk)) else "",
+                if (!is.na(s$eta)) sprintf(", ETA %s", format(s$eta, "%H:%M")) else "")
   message(msg)
-  invisible(list(done = n_done, started = n_started, stalled = nrow(stalled), eta = eta))
+  invisible(s[c("done", "started", "stalled", "eta")])
+}
+
+#' A real `[#####-----] 47%` bar, drawn in the WATCHING process, not the blocked one
+#'
+#' This is the process that can actually keep redrawing: the running session is synchronously
+#' blocked inside its parallel call and cannot. Stops on its own once `started` chunks stop
+#' growing for `stall_after` seconds (the run finished, or nobody is writing to `dir` at all)
+#' so a call left running does not poll an abandoned directory forever.
+#' @noRd
+rp_progress_watch <- function(dir, interval, stall_after) {
+  last_activity <- Sys.time()
+  last_started <- -1L
+  cr <- "\r"
+  repeat {
+    rows <- rp_progress_read(dir)
+    if (is.null(rows)) {
+      cat(cr, strrep(" ", 70L), cr, "  waiting for ", dir, " ...", sep = "")
+      utils::flush.console()
+    } else {
+      s <- rp_progress_summarise(rows)
+      if (s$started != last_started) { last_activity <- Sys.time(); last_started <- s$started }
+      pct <- if (s$started > 0L) s$done / s$started else 0
+      width <- 24L
+      filled <- round(pct * width)
+      bar <- paste0("[", strrep("#", filled), strrep("-", width - filled), "]")
+      eta_txt <- if (!is.na(s$eta)) sprintf(" ETA %s", format(s$eta, "%H:%M")) else ""
+      line <- sprintf("  %s %3.0f%%  %-28s %d/%d%s",
+                      bar, pct * 100, substr(s$stage %||% "", 1L, 28L),
+                      s$done, s$started, eta_txt)
+      cat(cr, strrep(" ", 90L), cr, line, sep = "")
+      utils::flush.console()
+      if (s$started > 0L && s$done >= s$started &&
+          as.numeric(Sys.time() - last_activity, units = "secs") > 2) {
+        cat("\n")
+        return(invisible(s[c("done", "started", "stalled", "eta")]))
+      }
+    }
+    if (as.numeric(Sys.time() - last_activity, units = "secs") > stall_after) {
+      cat("\n  no new chunks in ", stall_after, "s, stopping watch\n", sep = "")
+      return(invisible(NULL))
+    }
+    Sys.sleep(interval)
+  }
 }
 
 
