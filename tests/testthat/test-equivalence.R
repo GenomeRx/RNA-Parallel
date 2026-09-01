@@ -211,6 +211,7 @@ test_that("the export surface is exactly the entry points and the shared control
                     "lmFit_parallel", "duplicateCorrelation_parallel",
                     "calcNormFactors_parallel",
                     "combat_backends", "combat_cluster_stop", "rnaparallel_stale",
+                    "rnaparallel_progress",
                     "removeBatchEffect_parallel"))
 })
 ## The backend resolver is what makes this work against sva OR a sourced copy of

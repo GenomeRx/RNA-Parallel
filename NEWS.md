@@ -3,6 +3,24 @@
 Windows is a supported platform, the socket backends work, and the companions no longer pay for
 work they throw away.
 
+- **`combat.progress` is now on by default.** No option needs to be set: every parallel call
+  ticks a live "N dispatched" line, overwritten in place, so you can always tell a slow run from
+  a stuck one. `combat.timing` alone only reports after a call finishes, and ComBat-seq alone
+  dispatches its hot paths up to `2 * n_batch + 3` times per call, so a cohort with hundreds of
+  batches used to show nothing between "computing" and the final summary. Set
+  `options(combat.progress = FALSE)` to go back to silent.
+
+- **`options(combat.progress.dir = ...)` plus `rnaparallel_progress()`** cover the gap the
+  console tick above cannot: once the master calls into the parallel backend it blocks until
+  every chunk returns, sometimes for hours, and nothing can print from a blocked process. Set
+  a directory and each worker appends a start/done line per chunk to its own file as it works;
+  call `rnaparallel_progress(dir)` from a SEPARATE session to see chunks done, a mean
+  seconds-per-chunk, and an ETA, while the run is still going. Built from a real pooled run
+  (40,609 genes, 9,493 specimens, 464 batches, 16 workers) that ran 14h53m and then 13h more
+  with no output at all, on either the console or the workers' own stdout, because forked and
+  PSOCK workers cannot reliably reach an RStudio Server console. A file both sides can read
+  survives all four backends the package supports. Off unless a directory is set.
+
 - **Three companions could not run on the `future` backend at all.** A closure is serialised with
   its defining environment, and every dispatched job in the package was built in a frame holding
   far more than its body reads. Under `plan(multisession)` on a 54.9 MiB matrix,
