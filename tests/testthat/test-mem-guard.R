@@ -130,3 +130,31 @@ test_that("the mem-guard warning names all three numbers, not just the outcome",
   expect_warning(rnaparallel:::rp_mem_cap(16L),
                 regexp = "16 workers.*GB.*GB.*GB", perl = TRUE)
 })
+
+## rp_getppid(): the orphan-fork exit check reads this. It does not exist as a base R
+## function on every build (confirmed FALSE via exists() on the R 4.6.1 UCRT Windows build
+## this package is tested on), which crashed every single dispatch under a real
+## future::multisession run before this fallback existed -- caught fixing the bar, not a
+## hypothetical.
+
+test_that("rp_getppid never errors, even when Sys.getppid does not exist on this build", {
+  expect_no_error(v <- rnaparallel:::rp_getppid())
+  expect_true(is.na(v) || (is.numeric(v) && v > 0))
+})
+
+test_that("rp_getppid returns a real value when Sys.getppid is present", {
+  skip_if_not(exists("Sys.getppid", where = baseenv(), mode = "function"),
+             "this R build has no Sys.getppid; NA path covered by the test above")
+  v <- rnaparallel:::rp_getppid()
+  expect_true(is.numeric(v) && v > 0)
+})
+
+test_that("rp_getppid returns NA, not an error, when both Sys.getppid and ps are unavailable", {
+  skip_if(exists("Sys.getppid", where = baseenv(), mode = "function"),
+         "cannot hide a real base function that already exists on this build")
+  testthat::local_mocked_bindings(
+    requireNamespace = function(...) FALSE,
+    .package = "base"
+  )
+  expect_true(is.na(rnaparallel:::rp_getppid()))
+})

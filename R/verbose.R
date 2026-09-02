@@ -88,6 +88,7 @@ rp_count_reset <- function() {
   .rp_dispatch$ser <- 0L
   .rp_dispatch$fallback <- character()
   .rp_dispatch$progress_last <- NULL
+  .rp_dispatch$progress_total <- NULL
   invisible(NULL)
 }
 
@@ -336,17 +337,26 @@ rp_progress_once <- function(dir) {
   invisible(s[c("done", "started", "stalled", "eta")])
 }
 
-#' A real `[#####-----] 47%` bar, drawn in the WATCHING process, not the blocked one
+#' A live `|====------|` bar, matching data.table's `fread()` style, drawn in the WATCHING
+#' process, not the blocked one
 #'
 #' This is the process that can actually keep redrawing: the running session is synchronously
 #' blocked inside its parallel call and cannot. Stops on its own once `started` chunks stop
 #' growing for `stall_after` seconds (the run finished, or nobody is writing to `dir` at all)
 #' so a call left running does not poll an abandoned directory forever.
+#'
+#' Single line, overwritten in place with a carriage return, same mechanism as the console
+#' tick: `fread()` itself prints a static two-line bar once per file, not a redrawn one, since
+#' it only ever reports its OWN progress from its OWN process. This is a genuinely live bar
+#' polling a SEPARATE process's progress files, which is a different problem; a two-line
+#' redraw would need ANSI cursor-up escapes that not every terminal honours identically, so
+#' one line keeps the same `|===---|` look without that risk.
 #' @noRd
 rp_progress_watch <- function(dir, interval, stall_after) {
   last_activity <- Sys.time()
   last_started <- -1L
   cr <- "\r"
+  width <- 50L    # fread()'s own bar width
   repeat {
     rows <- rp_progress_read(dir)
     if (is.null(rows)) {
@@ -356,14 +366,13 @@ rp_progress_watch <- function(dir, interval, stall_after) {
       s <- rp_progress_summarise(rows)
       if (s$started != last_started) { last_activity <- Sys.time(); last_started <- s$started }
       pct <- if (s$started > 0L) s$done / s$started else 0
-      width <- 24L
       filled <- round(pct * width)
-      bar <- paste0("[", strrep("#", filled), strrep("-", width - filled), "]")
-      eta_txt <- if (!is.na(s$eta)) sprintf(" ETA %s", format(s$eta, "%H:%M")) else ""
-      line <- sprintf("  %s %3.0f%%  %-28s %d/%d%s",
-                      bar, pct * 100, substr(s$stage %||% "", 1L, 28L),
-                      s$done, s$started, eta_txt)
-      cat(cr, strrep(" ", 90L), cr, line, sep = "")
+      bar <- paste0("|", strrep("=", filled), strrep("-", width - filled), "|")
+      eta_txt <- if (!is.na(s$eta)) sprintf("  ETA %s", format(s$eta, "%H:%M")) else ""
+      stage_txt <- substr(s$stage %||% "", 1L, 28L)
+      line <- sprintf("%s %3.0f%%  %-28s %d/%d%s",
+                      bar, pct * 100, stage_txt, s$done, s$started, eta_txt)
+      cat(cr, strrep(" ", width + 60L), cr, line, sep = "")
       utils::flush.console()
       if (s$started > 0L && s$done >= s$started &&
           as.numeric(Sys.time() - last_activity, units = "secs") > 2) {

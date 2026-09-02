@@ -81,9 +81,9 @@ layout, backend, and dispatch count: 400+ assertions.
 overwritten in place, so a long ComBat-seq run against hundreds of batches never sits silent.
 `options(combat.timing = TRUE)` adds the real engine per call once it finishes, `serial` vs
 `mclapply x6`, etc. For a call that blocks inside the parallel backend for hours, set
-`options(combat.progress.dir = "some/path")` and call `rnaparallel_progress(dir)` from a
-SEPARATE session for chunks done, a mean seconds-per-chunk, and an ETA. See
-[REFERENCE.md](REFERENCE.md#seeing-what-is-running).
+`options(combat.progress.dir = "some/path")` and call `rnaparallel_progress(dir, watch = TRUE)`
+from a SEPARATE session for a live `|====------|` bar, `data.table::fread()` style, with chunks
+done and an ETA. See [REFERENCE.md](REFERENCE.md#seeing-what-is-running).
 
 **Memory:** forking a large matrix can exceed a machine's RAM even when the parent alone fits,
 and on a box without swap the kernel SIGKILLs the process with no R error at all. `rp_mem_cap()`

@@ -199,6 +199,20 @@ mean anything and read `NA` until then. Off unless a directory is set; every wri
 per chunk, not per gene, so the cost is immaterial next to the compute itself even at hundreds
 of chunks over hours.
 
+**A live bar**, `data.table::fread()` style, from the same directory, from that same SEPARATE
+session:
+
+```r
+rnaparallel_progress("some/writable/path", watch = TRUE)
+#> |==================================================| 62%  ComBat-seq 40,609 x 9,493  79/128  ETA 16:42
+```
+
+Redraws every `interval` seconds (default 1) on one line, overwritten in place, same mechanism
+as the console tick above but drawn from the WATCHING process rather than the one blocked
+inside the parallel call, since only the watcher is free to keep redrawing. Stops on its own
+once `started` stops growing for `stall_after` seconds (default 600), whether that means the
+run finished or nobody is writing to `dir` at all.
+
 `rnaparallel_stale()` returns TRUE if the package was reinstalled under a running session. The
 fix is to restart R.
 

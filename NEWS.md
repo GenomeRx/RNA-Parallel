@@ -31,7 +31,16 @@ work they throw away.
   running and holding its share of the matrix for as long as the machine stayed up; two runs
   left 111 GB and 116 GB stranded that way, immune to `SIGTERM` because R installs a handler
   and the worker is blocked mid-computation. Every worker now checks `Sys.getppid() == 1` and
-  exits if its master is gone.
+  exits if its master is gone. `Sys.getppid()` is not a base R function on every build (it does
+  not exist at all on the R 4.6.1 UCRT Windows build this package is tested on), so the check
+  now goes through `rp_getppid()`, which falls back to `ps::ps_ppid()` when installed and
+  returns `NA` (skip the check) otherwise, rather than crashing every single dispatch on a
+  build that lacks it.
+
+- **`rnaparallel_progress(dir, watch = TRUE)` now renders a live `|====------|` bar**, matching
+  `data.table::fread()`'s own style: `|==================================================| 62%
+  ComBat-seq 40,609 x 9,493 79/128 ETA 16:42`. Same mechanism as before, watched from a SEPARATE
+  process/terminal while the running session is blocked inside its parallel call.
 
 - **Peak RSS in the `combat.timing` line**, from `VmHWM`, so the number that decides whether a
   fit survives is visible in the log a run already produces: `pooled ComBat-seq    mclapply

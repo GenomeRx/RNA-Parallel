@@ -401,6 +401,26 @@ combat_default_backend <- function() {
 
 # ---- memory guard -------------------------------------------------------------
 
+#' This process's own parent PID, or NA when nothing on this build can read it
+#'
+#' `Sys.getppid()` is not a base R function on every build: it does not exist at all on the
+#' R 4.6.1 UCRT Windows build this package is verified against (`exists("Sys.getppid")` is
+#' FALSE there, not merely unimplemented for one caller), so calling it unconditionally
+#' crashed every dispatch on that build rather than skipping cleanly. Falls back to
+#' `ps::ps_ppid()` when that package is installed and `Sys.getppid()` is not present; NA
+#' otherwise, and NA is treated by every caller as "cannot tell, skip the check", the same
+#' convention as the rest of the memory-guard readers in this file.
+#' @noRd
+rp_getppid <- function() {
+  if (exists("Sys.getppid", where = baseenv(), mode = "function")) {
+    return(tryCatch(get("Sys.getppid", envir = baseenv())(), error = function(e) NA_integer_))
+  }
+  if (requireNamespace("ps", quietly = TRUE)) {
+    return(tryCatch(as.integer(ps::ps_ppid()), error = function(e) NA_integer_))
+  }
+  NA_integer_
+}
+
 #' Bytes of RAM the kernel thinks are actually obtainable right now
 #'
 #' MemAvailable, not MemFree: free excludes reclaimable page cache and reads far
@@ -1221,10 +1241,20 @@ combat_parallel_lapply <- function(idx, f, workers,
     # because R installs a handler and the worker is blocked, so only SIGKILL works and only
     # if somebody notices. getppid() == 1 is the one signal a fork can read for itself.
     #
+    # Sys.getppid() is not a base R function on every build: it does not exist at all on the
+    # R 4.6.1 UCRT Windows build this was verified against (`exists("Sys.getppid")` is FALSE,
+    # not merely unavailable to a worker), and the original code called it unconditionally,
+    # which crashed every single dispatch under a real future::multisession run with "could
+    # not find function Sys.getppid" -- not a worker-only failure, the whole mechanism assumed
+    # a base function that is not universally present. rp_getppid() below fails to NA rather
+    # than erroring, and NA skips the check exactly like the platforms that never had
+    # Sys.getppid to begin with: on Windows there is no fork at all for this to protect
+    # against, so skipping is correct there regardless.
+    #
     # Guarded on the pid differing from the master's: f_tagged also runs IN the master under a
     # serial or custom backend, and quitting there would take the caller's whole session down.
     # A master launched with setsid (any nohup/detached render) legitimately has ppid 1.
-    if (Sys.getpid() != master_pid && Sys.getppid() == 1L)
+    if (Sys.getpid() != master_pid && isTRUE(rp_getppid() == 1L))
       quit(save = "no", status = 0L, runLast = FALSE)
     list(combat_chunk = k, value = f(ii))
   }
