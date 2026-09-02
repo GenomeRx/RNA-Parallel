@@ -220,7 +220,7 @@ rp_row_blocks <- function(M, weights, env, workers, chunks, parallel_backend, wh
 #'
 #' @param label Optional name for this call in the timing line, when
 #'   `options(combat.timing = TRUE)` is set. Defaults to the companion and the matrix shape,
-#'   e.g. `ComBat-seq 18,270 x 1,500`; pass a cohort name to tell calls apart in a loop.
+#'   e.g. `lmFit 18,270 x 1,500`; pass a cohort name to tell calls apart in a loop.
 #' @return An `MArrayLM`, `identical()` to what the backend's own `lmFit` returns for the
 #'   same input. Under either size gate, on a branch a block would flip, or at
 #'   `workers = 1`, that is literally what it is: one plain call to the backend with a

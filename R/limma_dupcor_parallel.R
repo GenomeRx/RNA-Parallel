@@ -235,7 +235,8 @@ rp_tail_decomposes <- function(fn, ndups, max_block) {
 #'
 #' @param label Optional name for this call in the timing line, when
 #'   `options(combat.timing = TRUE)` is set. Defaults to the companion and the matrix shape,
-#'   e.g. `ComBat-seq 18,270 x 1,500`; pass a cohort name to tell calls apart in a loop.
+#'   e.g. `duplicateCorrelation 18,270 x 1,500`; pass a cohort name to tell calls apart in a
+#'   loop.
 #' @return `list(consensus.correlation, cor, atanh.correlations)`, `identical()` to what the
 #'   backend returns for the same input.
 #'

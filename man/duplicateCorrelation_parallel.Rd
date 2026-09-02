@@ -60,7 +60,8 @@ applies, because \code{duplicateCorrelation} does not reach \code{lm.fit} per ge
 
 \item{label}{Optional name for this call in the timing line, when
 \code{options(combat.timing = TRUE)} is set. Defaults to the companion and the matrix shape,
-e.g. \verb{ComBat-seq 18,270 x 1,500}; pass a cohort name to tell calls apart in a loop.}
+e.g. \verb{duplicateCorrelation 18,270 x 1,500}; pass a cohort name to tell calls apart in a
+loop.}
 }
 \value{
 \code{list(consensus.correlation, cor, atanh.correlations)}, \code{identical()} to what the

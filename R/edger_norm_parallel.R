@@ -553,8 +553,13 @@ rp_apply_shim <- function(apply0, workers, chunks, parallel_backend) {
 #'   `normLibSizes.default` when available, with the older name as a fallback.
 #'
 #' @param label Optional name for this call in the timing line, when
-#'   `options(combat.timing = TRUE)` is set. Defaults to the companion and the matrix shape,
-#'   e.g. `TMM 12,000 x 700`; pass a cohort name to tell calls apart in a loop.
+#'   `options(combat.timing = TRUE)` is set. Defaults to `calcNormFactors` plus the resolved
+#'   method and matrix shape, e.g. `calcNormFactors TMM 12,000 x 700` -- unlike the other four
+#'   companions (whose default is just their own name, e.g. `lmFit 18,270 x 1,500`), this one
+#'   also names the method, since `calcNormFactors_parallel(method = "TMM")` and `method =
+#'   "RLE"` take genuinely different code paths worth telling apart in a multi-call log or a
+#'   shared `combat.progress.dir` (`rnaparallel_progress()` groups TSV rows by this string).
+#'   Pass a cohort name to tell calls apart in a loop.
 #' @return For a matrix, the named numeric vector edgeR returns. For a
 #'   `DGEList`, the object with `$samples$norm.factors` replaced, exactly as
 #'   edgeR returns it.
@@ -592,7 +597,8 @@ calcNormFactors_parallel <- function(object, lib.size = NULL,
   # timing and quieting are on.exit hooks, so an error unwinds the sink and still reports the
   # elapsed line: a failed run says where it failed instead of vanishing. Placed after the
   # prologue because that is what resolves `workers` from NULL to a number worth printing.
-  .rp <- rp_step_begin(label, match.arg(method), object, parallel_backend, workers)
+  .rp <- rp_step_begin(label, paste("calcNormFactors", match.arg(method)), object,
+                       parallel_backend, workers)
   on.exit(rp_step_end(.rp), add = TRUE)
   if (!is.function(parallel_backend)) {
     parallel_backend <- match.arg(parallel_backend, combat_backends())

@@ -455,9 +455,9 @@ rp_progress_watch <- function(dir, interval, stall_after) {
       filled <- round(pct * width)
       bar <- paste0("|", strrep("=", filled), strrep("-", width - filled), "|")
       eta_txt <- if (!is.na(s$eta)) sprintf("  ETA %s", format(s$eta, "%H:%M")) else ""
-      stage_txt <- substr(s$stage %||% "", 1L, 28L)
-      line <- sprintf("%s %3.0f%%  %-28s %d/%d%s",
-                      bar, pct * 100, stage_txt, s$done, s$started, eta_txt)
+      stage_txt <- substr(s$stage %||% "", 1L, RP_LABEL_WIDTH)
+      line <- sprintf("%s %3.0f%%  %-*s %d/%d%s",
+                      bar, pct * 100, RP_LABEL_WIDTH, stage_txt, s$done, s$started, eta_txt)
       cat(cr, strrep(" ", width + 60L), cr, line, sep = "")
       utils::flush.console()
       if (s$started > 0L && s$done >= s$started &&
@@ -687,8 +687,8 @@ rp_step_end <- function(h) {
   # it a memory problem is invisible in the only log the run produces.
   peak <- rp_mem_peak()
   pk <- if (is.na(peak)) "" else sprintf("  peak %.0f GB", peak / 2^30)
-  message(sprintf("  %-34s %-16s %8s%s%s",
-                  substr(h$label, 1L, 34L), engine, rp_secs(secs), pk, note))
+  message(sprintf("  %-*s %-16s %8s%s%s",
+                  RP_LABEL_WIDTH, substr(h$label, 1L, RP_LABEL_WIDTH), engine, rp_secs(secs), pk, note))
   invisible(NULL)
 }
 
@@ -702,3 +702,14 @@ rp_secs <- function(s) {
 
 #' @noRd
 `%||%` <- function(a, b) if (is.null(a)) b else a
+
+# One width, shared by every surface that prints a companion's label: the console tick
+# (below), the timing line (rp_step_end), and the watch-mode bar's stage field. Longest
+# realistic default label is duplicateCorrelation's own: "duplicateCorrelation 18,270 x
+# 1,500" at 36 chars. Sized to 40 so the widest real default and its dimensions both always
+# fit; previously the timing line used 34 and the watch bar used 28, both narrower than
+# dupcor's default, so those two surfaces silently truncated it mid-number
+# ("...18,270 x 1,50") while the console tick (unbounded) did not -- three different label
+# widths for what is meant to be one consistent format across every parallel companion.
+RP_LABEL_WIDTH <- 40L
+

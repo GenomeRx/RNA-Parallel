@@ -62,8 +62,12 @@ four. The default resolved to 6 there and was optimal; raising it by hand made i
 \code{normLibSizes.default} when available, with the older name as a fallback.}
 
 \item{label}{Optional name for this call in the timing line, when
-\code{options(combat.timing = TRUE)} is set. Defaults to the companion and the matrix shape,
-e.g. \verb{TMM 12,000 x 700}; pass a cohort name to tell calls apart in a loop.}
+\code{options(combat.timing = TRUE)} is set. Defaults to \code{calcNormFactors} plus the resolved
+method and matrix shape, e.g. \verb{calcNormFactors TMM 12,000 x 700} -- unlike the other four
+companions (whose default is just their own name, e.g. \verb{lmFit 18,270 x 1,500}), this one
+also names the method, since \code{calcNormFactors_parallel(method = "TMM")} and \code{method = "RLE"} take genuinely different code paths worth telling apart in a multi-call log or a
+shared \code{combat.progress.dir} (\code{rnaparallel_progress()} groups TSV rows by this string).
+Pass a cohort name to tell calls apart in a loop.}
 }
 \value{
 For a matrix, the named numeric vector edgeR returns. For a

@@ -3,6 +3,32 @@
 Windows is a supported platform, the socket backends work, and the companions no longer pay for
 work they throw away.
 
+- **Verbose/progress format made consistent across all five companions.** A second Fable
+  review, this time of `verbose.R` and its five call sites, found the timing line, watch-mode
+  bar, and default label wording had each drifted independently:
+  - One shared label width (`RP_LABEL_WIDTH`, 40 chars) now backs the timing line, the
+    watch-mode bar's stage field, and the console tick. Previously the timing line truncated
+    at 34 and the watch bar at 28, both narrower than `duplicateCorrelation`'s own default
+    label (36 chars), so those two surfaces silently cut it mid-number
+    (`...18,270 x 1,50`) while the untruncated console tick did not.
+  - `calcNormFactors_parallel()`'s default label now reads `calcNormFactors TMM 12,000 x 700`
+    instead of bare `TMM 12,000 x 700`, matching the other four companions' "own function name
+    first" convention (`lmFit ...`, `ComBat-seq ...`, `duplicateCorrelation ...`,
+    `removeBatchEffect ...`) so a shared `combat.progress.dir` across a multi-stage script
+    groups TSV rows under a name that actually maps back to the call that produced them.
+  - Fixed two `@param label` doc examples (`lmFit_parallel()`, `duplicateCorrelation_parallel()`)
+    that had been copy-pasted from ComBat-seq's own doc and showed the wrong default string.
+  - `removeBatchEffect_parallel()` now carries the same "timing and quieting are on.exit
+    hooks" comment the other four companions already had at their own `rp_step_begin()` call.
+
+  Deferred to a follow-up (real findings, larger/riskier changes): unifying worker
+  warning/message replay behaviour (currently only `duplicateCorrelation_parallel()` collects
+  and replays distinct child conditions once; the same PSOCK/multisession swallowing risk
+  applies to the other four); and having a nested re-entry skip re-running `rp_mem_cap()` a
+  second time within one user-facing call, which can currently print a second degrade warning
+  and/or have the timing line's engine column understate the actual worker count used by an
+  inner dispatch.
+
 - **Fable review pass: dispatch overhead trimmed on every call, socket serialization halved on
   the edgeR RLE path, one fewer allocation on ComBat-seq's quantile matcher.** Three concrete
   fixes from a full-package memory review, each verified with the existing 204-case identical()
