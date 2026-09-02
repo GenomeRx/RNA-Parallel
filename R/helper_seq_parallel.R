@@ -2042,12 +2042,25 @@ match_quantiles_parallel <- function(mq, counts_sub, old_mu, old_phi, new_mu, ne
   parts <- combat_parallel_check(
     combat_parallel_lapply(idx, do_rows, workers, parallel_backend, cells = length(counts_sub)),
     "match_quantiles_parallel", idx)
-  # Same argument as glmFit_rows_parallel's bind(): one chunk makes both the rbind and the
-  # gather no-ops on the values, and a sorted `ord` makes the gather one too.
-  m <- if (length(parts) == 1L && is.matrix(parts[[1L]])) parts[[1L]]
-       else do.call(rbind, parts)
-  ord <- combat_row_order(idx)
-  if (is.unsorted(ord)) m[ord, , drop = FALSE] else m
+  # Fused bind+reorder: preallocate the output once and scatter each chunk straight into its
+  # final row positions (`m[idx[[k]], ] <- parts[[k]]`), instead of `do.call(rbind, parts)`
+  # (one full allocation) followed by `m[ord, , drop = FALSE]` (a second full allocation to
+  # undo the interleaving). Safe here specifically because match_quantiles_rows() already
+  # strips dimnames from every chunk (dimnames(out) <- NULL), so there is no rowname parity
+  # to reconstruct across the scatter -- unlike glmFit_rows_parallel's bind()/rp_bind_rows(),
+  # which carry real gene names and are left on the rbind+permute path pending that separate
+  # verification. Type-promotes to double if any chunk did (match_quantiles_rows returns
+  # integer when every cell in that chunk stayed <= 1, double the moment one took the
+  # qnbinom branch), matching what rbind() would have promoted to across all chunks combined.
+  ncol_out <- ncol(parts[[1L]])
+  if (length(parts) == 1L) {
+    m <- parts[[1L]]
+  } else {
+    ty <- if (any(vapply(parts, typeof, character(1)) == "double")) "double" else "integer"
+    m <- matrix(vector(ty, nrow(counts_sub) * ncol_out), nrow(counts_sub), ncol_out)
+    for (k in seq_along(parts)) m[idx[[k]], ] <- parts[[k]]
+  }
+  m
 }
 
 #' Row-parallel tagwise dispersion estimation

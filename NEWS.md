@@ -3,6 +3,17 @@
 Windows is a supported platform, the socket backends work, and the companions no longer pay for
 work they throw away.
 
+- **`match_quantiles_parallel()`: bind+reorder fused into one scatter, one allocation not two.**
+  `do.call(rbind, parts)` (allocate the whole output) then `m[ord, , drop = FALSE]` (allocate
+  it again to undo the interleaving) is now `m[idx[[k]], ] <- parts[[k]]` per chunk into a
+  single preallocated matrix -- the permute copy is gone entirely, and it was always paid on
+  the real parallel path since interleaved chunks are never already sorted. Safe specifically
+  here because `match_quantiles_rows()` already strips dimnames from every chunk, so there is
+  no rowname parity to reconstruct across the scatter; `glmFit_rows_parallel`'s equivalent
+  `bind()` carries real gene names and is left on the rbind+permute path pending that separate
+  verification. `identical()` to the pre-fusion path across the existing 204-case suite,
+  including the randomised match_quantiles equivalence tests.
+
 - **Verbose/progress format made consistent across all five companions.** A second Fable
   review, this time of `verbose.R` and its five call sites, found the timing line, watch-mode
   bar, and default label wording had each drifted independently:
