@@ -17,6 +17,16 @@ work they throw away.
   to dirty, workload-dependent so it is an option; `combat.mem.guard = FALSE` disables the
   whole check.
 
+- **`rnaparallel_set_mem_limit()`** is a second, independent net against the same SIGKILL:
+  `R_MAX_VSIZE` is R's own vector-heap ceiling, checked on every allocation, that turns an
+  overshoot into a catchable `cannot allocate vector of size X` error rather than leaving the
+  kernel to silently kill the process. `rp_mem_cap()` above degrades the worker count based
+  on a live reading before a fork; this sets a fixed session-wide ceiling instead, in
+  `~/.Renviron` (or a `path` you pass), by reading total RAM, halving it, and rounding to the
+  nearest of 8/16/32/64/128/256/512/1024 GB. `dry_run = TRUE` shows the computed value without
+  writing anything; the write only takes effect on the NEXT R session, since `.Renviron` is
+  read once at startup.
+
 - **A fork whose master died now exits on its own.** Reparented to init, an orphaned fork kept
   running and holding its share of the matrix for as long as the machine stayed up; two runs
   left 111 GB and 116 GB stranded that way, immune to `SIGTERM` because R installs a handler

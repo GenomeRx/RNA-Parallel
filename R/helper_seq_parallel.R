@@ -415,6 +415,37 @@ rp_mem_available <- function() {
   as.numeric(gsub("\\D", "", m[1L])) * 1024
 }
 
+#' Total installed bytes of RAM, not what is currently free
+#'
+#' MemTotal from /proc/meminfo on Linux; `Get-CimInstance Win32_ComputerSystem` via
+#' PowerShell on Windows, since R_MAX_VSIZE is meaningful there too and
+#' rnaparallel_set_mem_limit() needs a number to halve on any platform a caller runs on.
+#' `wmic` was tried first and dropped: it no longer exists on current Windows builds
+#' (removed from Windows 11 24H2 onward), so it returned "command not found" rather than a
+#' number and rnaparallel_set_mem_limit() read that as "cannot tell" on every affected
+#' machine. NA when neither source is readable, which callers treat as "ask the user".
+#' @noRd
+rp_mem_total <- function() {
+  if (file.exists("/proc/meminfo")) {
+    l <- tryCatch(readLines("/proc/meminfo", n = 64L), error = function(e) character())
+    m <- grep("^MemTotal:", l, value = TRUE)
+    if (length(m)) return(as.numeric(gsub("\\D", "", m[1L])) * 1024)
+    return(NA_real_)
+  }
+  if (identical(.Platform$OS.type, "windows")) {
+    out <- tryCatch(
+      system2("powershell", c("-NoProfile", "-Command",
+              "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory"),
+              stdout = TRUE, stderr = FALSE),
+      error = function(e) character())
+    val <- suppressWarnings(as.numeric(trimws(out)))
+    val <- val[!is.na(val) & val > 0]
+    if (length(val)) return(val[1L])
+  }
+  NA_real_
+}
+
+
 #' Resident bytes of this process
 #'
 #' Field 24 of /proc/self/stat is RSS in pages. Read from stat rather than status

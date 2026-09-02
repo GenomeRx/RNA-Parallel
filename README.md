@@ -85,6 +85,14 @@ overwritten in place, so a long ComBat-seq run against hundreds of batches never
 SEPARATE session for chunks done, a mean seconds-per-chunk, and an ETA. See
 [REFERENCE.md](REFERENCE.md#seeing-what-is-running).
 
+**Memory:** forking a large matrix can exceed a machine's RAM even when the parent alone fits,
+and on a box without swap the kernel SIGKILLs the process with no R error at all. `rp_mem_cap()`
+degrades the worker count before that happens, using a live reading, on by default; set
+`options(combat.mem.guard = FALSE)` to disable it. `rnaparallel_set_mem_limit()` is a second,
+independent net: it sets `R_MAX_VSIZE`, R's own allocation ceiling, to half the machine's RAM so
+an overshoot becomes a catchable error instead of a silent kill. See
+[REFERENCE.md](REFERENCE.md#memory).
+
 ## Tuning
 
 | knob | default | change it when |

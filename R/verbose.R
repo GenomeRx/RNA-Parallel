@@ -449,6 +449,108 @@ rp_mem_peak <- function() {
   as.numeric(gsub("\\D", "", m[1L])) * 1024
 }
 
+
+# ---- setting R_MAX_VSIZE for people who want a second safety net -------------
+
+# rp_mem_cap() degrades the WORKER COUNT before a fork based on live /proc readings; it is a
+# preventive guess, tuned by combat.mem.divergence, and the PR that added it disclosed the
+# 0.25 default missing a real case (a 4-worker fit that dirtied more per worker than assumed).
+# R_MAX_VSIZE is a different, independent net: R's own vector-heap ceiling, checked on every
+# allocation, that turns an overshoot into a catchable "cannot allocate vector of size X"
+# error instead of leaving the kernel to SIGKILL the process with no condition raised at all.
+# Setting it is standard R practice, not something this package invents, but nobody sets it
+# without being told to, and the number to pick depends on a machine's own RAM, which most
+# people do not have memorized in GB let alone bytes.
+
+#' Set `R_MAX_VSIZE` to half the machine's RAM, rounded to the nearest whole tier
+#'
+#' Reads total RAM (`/proc/meminfo` on Linux, PowerShell's `Get-CimInstance` on Windows),
+#' halves it, and rounds to the nearest of 8/16/32/64/128/256/512/1024 GB, R's own
+#' vector-heap ceiling. This does NOT replace [rp_mem_cap()]: that guard degrades the worker
+#' count before a fork based on a live reading of what is available right now; this sets a
+#' fixed ceiling R itself enforces on every allocation, in every session, whether or not
+#' this package's dispatch code is what allocated the memory. Two independent nets against
+#' the same failure mode (a silent kernel SIGKILL with no R condition to catch), not one
+#' superseding the other.
+#'
+#' Writes (or updates) the `R_MAX_VSIZE` line in the target `.Renviron`, which only takes
+#' effect on the NEXT R session; `.Renviron` is read once at startup, so this cannot change
+#' the limit for the session that calls it. Existing lines for other variables are left
+#' untouched; only a pre-existing `R_MAX_VSIZE=` line, if any, is replaced.
+#'
+#' `path` defaults to `Sys.getenv("R_ENVIRON_USER", path.expand("~/.Renviron"))`, R's own
+#' resolution order for the per-user file, and on Windows `path.expand("~")` resolves via
+#' `USERPROFILE`, not the `HOME` environment variable: a test that tried to redirect this by
+#' setting `HOME` still wrote to the real file, because `path.expand()` never consulted it.
+#' Pass `path` explicitly to target anything else, which is also how to test this function
+#' without touching a real `.Renviron`.
+#'
+#' @param fraction Fraction of total RAM to use before rounding to a tier. Default 0.5 (half),
+#'   matching the standard "leave the other half for the OS, other processes, and anything not
+#'   going through this package" rule of thumb.
+#' @param dry_run If `TRUE` (default `FALSE`), print what would be written without touching
+#'   `path`. Use this first: the computed value is worth checking before it becomes the
+#'   ceiling every future R session on this machine runs under.
+#' @param path `.Renviron` path to write. Defaults to R's own per-user file; override for
+#'   testing or to target `Renviron.site` / a project-local `.Renviron` instead.
+#' @return Invisibly, the chosen value in bytes, or `NA` if total RAM could not be read.
+#' @examples
+#' \dontrun{
+#' rnaparallel_set_mem_limit(dry_run = TRUE)   # see what it would write, change nothing
+#' rnaparallel_set_mem_limit()                 # write it; restart R for it to take effect
+#' }
+#' @export
+rnaparallel_set_mem_limit <- function(fraction = 0.5, dry_run = FALSE,
+                                      path = Sys.getenv("R_ENVIRON_USER",
+                                                        path.expand("~/.Renviron"))) {
+  if (!(is.numeric(fraction) && length(fraction) == 1L && !is.na(fraction) &&
+        fraction > 0 && fraction <= 1)) {
+    stop("`fraction` must be a single number in (0, 1]; got ", deparse(fraction), call. = FALSE)
+  }
+  if (!(is.character(path) && length(path) == 1L && !is.na(path) && nzchar(path))) {
+    stop("`path` must be a single non-empty string; got ", deparse(path), call. = FALSE)
+  }
+  total <- rp_mem_total()
+  if (is.na(total)) {
+    message("could not read total RAM on this platform (checked /proc/meminfo and ",
+            "PowerShell). Set R_MAX_VSIZE yourself in ", path, ", e.g. R_MAX_VSIZE=64Gb")
+    return(invisible(NA_real_))
+  }
+  target <- total * fraction
+  tiers_gb <- c(8, 16, 32, 64, 128, 256, 512, 1024)
+  tiers_b <- tiers_gb * 2^30
+  # Nearest by ratio in log space, not absolute difference: 100 GB is meant to round to 128,
+  # not sit exactly between 64 and 128 by raw GB and get pulled to whichever is closer in a
+  # way that ignores how differently 64->128 and 512->1024 both double.
+  chosen_gb <- tiers_gb[which.min(abs(log(tiers_b / target)))]
+  chosen_b <- chosen_gb * 2^30
+
+  line <- sprintf("R_MAX_VSIZE=%dGb", chosen_gb)
+  message(sprintf("total RAM ~%.0f GB, %.0f%% -> nearest tier: %s (target: %s)",
+                  total / 2^30, fraction * 100, line, path))
+
+  if (isTRUE(dry_run)) {
+    message("dry_run = TRUE: nothing written. Re-run with dry_run = FALSE to set it.")
+    return(invisible(chosen_b))
+  }
+
+  existing <- if (file.exists(path)) readLines(path, warn = FALSE) else character()
+  # Exact-prefix match only: a line that merely mentions R_MAX_VSIZE in a comment is left
+  # alone, and only a real `R_MAX_VSIZE=...` assignment is replaced.
+  is_vsize <- grepl("^\\s*R_MAX_VSIZE\\s*=", existing)
+  if (any(is_vsize)) {
+    existing[is_vsize] <- line
+  } else {
+    existing <- c(existing, line)
+  }
+  dir.create(dirname(path), showWarnings = FALSE, recursive = TRUE)
+  writeLines(existing, path)
+  message("wrote ", path, ". Restart R for this to take effect; .Renviron is read once ",
+          "at session start.")
+  invisible(chosen_b)
+}
+
+
 #' @noRd
 rp_step_end <- function(h) {
   if (is.null(h)) return(invisible(NULL))
