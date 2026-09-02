@@ -197,6 +197,17 @@ rp_progress_done <- function() {
 # Off unless the caller sets a directory. Every write is one line; the cost is a
 # file-append syscall per chunk, not per gene, so at hundreds of chunks over hours it is
 # immaterial next to the compute itself.
+#
+# One file per worker PID, and the file is APPEND-ONLY for the life of that PID: a worker
+# pool reused across multiple companion calls in one long pipeline script (five companions,
+# one shared `future::multisession` plan, `combat.progress.dir` set once at the top) keeps
+# writing to the SAME files across every call, since the PID does not change. That is
+# correct within any one call (rp_progress_summarise() needs every row to tell "started,
+# never finished" from "not started yet"), but nothing here truncates a file BETWEEN calls,
+# so the recommendation for a long pipeline is a fresh subdirectory per stage
+# (`options(combat.progress.dir = file.path(base, "lmfit"))`, then `file.path(base, "combat")`)
+# rather than one directory for the whole script. Truncating mid-run is not the fix: that
+# would corrupt exactly the "stalled" and "done" counts this mechanism exists to report.
 
 #' @noRd
 rp_progress_dir <- function() {
@@ -274,18 +285,66 @@ rnaparallel_progress <- function(dir, watch = FALSE, interval = 1, stall_after =
   rp_progress_once(dir)
 }
 
+#' Read every worker's progress file, optionally tailing rather than re-reading whole
+#'
+#' Each worker only ever APPENDS a line (`rp_progress_file_write()`, `append = TRUE`,
+#' one `cat()` per chunk); no line already on disk is ever rewritten. That makes byte-offset
+#' tailing safe: bytes read on a previous call can never have changed, so re-reading them
+#' again buys nothing. Pass `cache` (a mutable environment, one entry per file path holding
+#' the last-seen file size and the parsed rows through that point) to skip re-reading and
+#' re-parsing everything already seen; omit it for a one-shot call, where there is only ever
+#' one read and caching has nothing to save.
+#'
+#' Matters specifically in `watch = TRUE` mode: a redraw every `interval` seconds over a
+#' multi-hour run means the same worker files get read from byte 0 every single poll without
+#' this, so the read cost grows with elapsed time even though each poll only cares about the
+#' handful of lines written since the last one.
 #' @noRd
-rp_progress_read <- function(dir) {
+rp_progress_read <- function(dir, cache = NULL) {
   files <- list.files(dir, pattern = "^rnaparallel-.*\\.tsv$", full.names = TRUE)
   if (!length(files)) return(NULL)
-  rows <- do.call(rbind, lapply(files, function(f) {
-    tryCatch(
-      utils::read.delim(f, header = FALSE, sep = "\t",
-                        col.names = c("ts", "stage", "chunk", "event"),
-                        colClasses = c("numeric", "character", "integer", "character")),
-      error = function(e) NULL)
-  }))
+  rows <- do.call(rbind, lapply(files, rp_progress_read_file, cache = cache))
   if (is.null(rows) || !nrow(rows)) return(NULL)
+  rows
+}
+
+#' @noRd
+rp_progress_parse_lines <- function(lines) {
+  if (!length(lines)) return(NULL)
+  tryCatch(
+    utils::read.delim(text = paste(lines, collapse = "\n"), header = FALSE, sep = "\t",
+                      col.names = c("ts", "stage", "chunk", "event"),
+                      colClasses = c("numeric", "character", "integer", "character")),
+    error = function(e) NULL)
+}
+
+#' @noRd
+rp_progress_read_file <- function(path, cache) {
+  if (is.null(cache)) {
+    lines <- tryCatch(readLines(path, warn = FALSE), error = function(e) character())
+    return(rp_progress_parse_lines(lines))
+  }
+  sz <- tryCatch(file.size(path), error = function(e) NA_real_)
+  prev <- cache[[path]]
+  # File shrank (rare: cleared between polls) means the byte offset from last time no
+  # longer means anything on this file, so start over rather than seek past the end.
+  if (!is.null(prev) && !is.na(sz) && sz >= prev$size) {
+    if (sz == prev$size) return(prev$rows)   # nothing new: skip the read entirely
+    con <- tryCatch(file(path, open = "rb"), error = function(e) NULL)
+    if (is.null(con)) return(prev$rows)
+    on.exit(close(con), add = TRUE)
+    if (prev$size > 0) seek(con, where = prev$size, origin = "start")
+    new_lines <- tryCatch(readLines(con, warn = FALSE), error = function(e) character())
+    new_rows <- rp_progress_parse_lines(new_lines)
+    combined <- if (is.null(new_rows)) prev$rows
+                else if (is.null(prev$rows)) new_rows
+                else rbind(prev$rows, new_rows)
+    cache[[path]] <- list(size = sz, rows = combined)
+    return(combined)
+  }
+  lines <- tryCatch(readLines(path, warn = FALSE), error = function(e) character())
+  rows <- rp_progress_parse_lines(lines)
+  cache[[path]] <- list(size = if (is.na(sz)) 0 else sz, rows = rows)
   rows
 }
 
@@ -357,8 +416,12 @@ rp_progress_watch <- function(dir, interval, stall_after) {
   last_started <- -1L
   cr <- "\r"
   width <- 50L    # fread()'s own bar width
+  # One cache across every poll in this watch call: the whole reason to tail is to stop
+  # re-reading and re-parsing lines already seen, which only pays off across REPEATED reads
+  # of the same files. A fresh cache per poll would tail nothing and cost the same as none.
+  cache <- new.env(parent = emptyenv())
   repeat {
-    rows <- rp_progress_read(dir)
+    rows <- rp_progress_read(dir, cache = cache)
     if (is.null(rows)) {
       cat(cr, strrep(" ", 70L), cr, "  waiting for ", dir, " ...", sep = "")
       utils::flush.console()

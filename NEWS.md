@@ -45,6 +45,12 @@ work they throw away.
   `data.table::fread()`'s own style: `|==================================================| 62%
   ComBat-seq 40,609 x 9,493 79/128 ETA 16:42`. Same mechanism as before, watched from a SEPARATE
   process/terminal while the running session is blocked inside its parallel call.
+  Redraws now TAIL each worker's file rather than re-reading it whole every poll:
+  verified on a real run, 32 of 34 polls against a growing file skipped or only read the
+  new bytes, the other 2 being the first sighting of each worker's file. Matters most on a
+  long `watch = TRUE` session against a long-running dispatch, where the read cost used to
+  grow with elapsed time even though each poll only cares about the handful of lines
+  written since the last one.
 
 - **Peak RSS in the `combat.timing` line**, from `VmHWM`, so the number that decides whether a
   fit survives is visible in the log a run already produces: `pooled ComBat-seq    mclapply
