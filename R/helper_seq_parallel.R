@@ -1803,22 +1803,50 @@ glmFit_rows_parallel <- function(y, design, dispersion, offset, weights = NULL,
 
   # chunks are interleaved, so every gene-indexed result comes back permuted
   ord <- combat_row_order(idx)
-  # `ord` is a permutation of seq_len(nrow(y)), and the only sorted permutation of 1:n is 1:n,
-  # so an unsorted test decides exactly whether the gather moves anything. At one chunk both
-  # the rbind and the gather are no-ops on the values and pure copies in cost: measured on an
-  # 18,270 x 1,500 field, 136 ms for the rbind and 53 ms for the permute, both removed. That is
-  # the documented `workers = 1` and `chunks = 1` path, which paid for two full copies of every
-  # bound field to return what it was given. is.matrix guards the single-chunk shortcut so a
-  # vector field still goes through rbind, which would legitimately promote it to one row.
+  # Fused bind+reorder: scatter each chunk directly into a single preallocated matrix at its
+  # final row positions (`m[idx[[k]], ] <- pieces[[k]]`) instead of `do.call(rbind, pieces)`
+  # (one full allocation) followed by `m[ord, , drop = FALSE]` (a second full allocation to
+  # undo the interleaving) -- same fusion as match_quantiles_parallel's bind, applied here with
+  # extra care because these fields carry real gene names. A preallocated matrix() starts with
+  # NULL dimnames, and `m[rows, ] <- piece` copies VALUES only, never names, so dimnames must
+  # be set explicitly afterward -- but that turns out to be simpler than rbind's own collapse
+  # behaviour, not harder: rbind() with any piece missing rownames collapses the whole result
+  # to unnamed rows (measured in rp_bind_rows, helper_limma_parallel.R), and a preallocated
+  # matrix already starts unnamed, so "only set rownames if pieces HAD them" reproduces that
+  # collapse exactly with no special-casing. Rownames set from `y` itself (not the pieces)
+  # since the scatter places each gene at its own original row position by construction --
+  # y[ii, ] already keeps y's own rownames for that slice, so the two are the same value.
   bind <- function(nm) {
     pieces <- lapply(fits, function(f) f[[nm]])
-    m <- if (length(pieces) == 1L && is.matrix(pieces[[1L]])) pieces[[1L]]
-         else do.call(rbind, pieces)
+    if (length(pieces) == 1L && is.matrix(pieces[[1L]])) {
+      m <- pieces[[1L]]
+    } else {
+      p1 <- pieces[[1L]]
+      m <- matrix(vector(typeof(p1), nrow(y) * ncol(p1)), nrow(y), ncol(p1))
+      # Checked per chunk BEFORE the scatter, not after: `m[idx[[k]], ] <- pieces[[k]]` with a
+      # too-long piece recycles across rows silently (R's own assignment recycling, not an
+      # error) and a too-short one errors with base R's own "number of items to replace is
+      # not a multiple of replacement length" rather than this function's own "bound to"
+      # message. rbind() caught the same corruption differently: an over-long chunk changed
+      # the TOTAL row count post-bind, which the check after this loop compared against
+      # nrow(y). A per-chunk check here is strictly earlier and covers the recycle case that
+      # comparing only the final total would miss (two chunks off by +1/-1 could recycle-hide
+      # a wrong total by coincidence in a way this loop's per-chunk check cannot).
+      for (k in seq_along(pieces)) {
+        if (nrow(pieces[[k]]) != length(idx[[k]])) {
+          stop("glmFit_rows_parallel: field '", nm, "' bound to ", nrow(pieces[[k]]),
+               " rows where ", nrow(y), " were dispatched", call. = FALSE)
+        }
+        m[idx[[k]], ] <- pieces[[k]]
+      }
+      if (!is.null(rownames(p1))) rownames(m) <- rownames(y)
+      if (!is.null(colnames(p1))) colnames(m) <- colnames(p1)
+    }
     if (nrow(m) != nrow(y)) {
       stop("glmFit_rows_parallel: field '", nm, "' bound to ", nrow(m), " rows where ",
            nrow(y), " were dispatched", call. = FALSE)
     }
-    if (is.unsorted(ord)) m[ord, , drop = FALSE] else m
+    m
   }
   vec <- function(nm) {
     v <- unlist(lapply(fits, function(f) f[[nm]]), use.names = FALSE)

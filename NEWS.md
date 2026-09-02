@@ -3,6 +3,19 @@
 Windows is a supported platform, the socket backends work, and the companions no longer pay for
 work they throw away.
 
+- **`glmFit_rows_parallel()`: same bind+reorder fusion as match_quantiles, with dimname
+  parity preserved.** Extends the previous release's scatter fusion (one allocation instead
+  of rbind-then-permute's two) to the field this package's own gene-named fits actually
+  carry: rownames are restored from `y` (the scatter places each gene at its own original
+  row, so `y`'s and the pieces' names are the same value) only when the pieces themselves
+  had rownames, reproducing `rbind()`'s own "any unnamed piece collapses the whole result to
+  unnamed" behaviour with no special-casing. A per-chunk row-count check runs BEFORE the
+  scatter rather than after, catching a wrong-length chunk (deliberately induced by
+  `test-parallel.R`'s "a GLM chunk of the wrong length is refused after the bind" test) as
+  this function's own `"bound to"` error instead of R's silent row-recycling or a generic
+  base-R replacement-length error -- caught by the real `R CMD check` test suite on the first
+  attempt at this fusion, fixed before merge, not shipped and found later.
+
 - **`match_quantiles_parallel()`: bind+reorder fused into one scatter, one allocation not two.**
   `do.call(rbind, parts)` (allocate the whole output) then `m[ord, , drop = FALSE]` (allocate
   it again to undo the interleaving) is now `m[idx[[k]], ] <- parts[[k]]` per chunk into a
