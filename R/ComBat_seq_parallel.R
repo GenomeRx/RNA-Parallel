@@ -108,6 +108,14 @@
 #' @param chunks Row chunks per parallel step. Defaults to `workers`, which is almost always
 #'   what you want -- passing `chunks = workers` explicitly is redundant. Raise it above
 #'   `workers` only to cut peak memory per worker, at slightly more fork overhead.
+#'   `options(combat.mem.chunk.cells = N)` does this automatically: it raises the chunk count
+#'   past whatever `chunks`/`workers` asked for so no single chunk exceeds `N` cells
+#'   (`rows_in_chunk * ncol(counts)`), never lowers it, and never changes which rows are in
+#'   which chunk beyond the count -- output is bit-identical regardless. Off (`NULL`) by
+#'   default: unlike the worker-count guard (`rp_mem_cap()`), which reads live available RAM,
+#'   this option has no auto-derivation from RAM, because a chunk's real byte cost beyond its
+#'   raw cell count is workload-dependent across the companions and this package has no
+#'   measured multiplier to convert cells to bytes safely for every one of them at once.
 #' @param parallel_backend One of [combat_backends()], or a function
 #'   `function(idx, f, workers)` returning a list in the order of `idx`. The
 #'   function form plugs in any framework this package does not name, including

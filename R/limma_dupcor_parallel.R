@@ -353,7 +353,8 @@ duplicateCorrelation_parallel <- function(object, design = NULL, ndups = 2L, spa
   ngenes <- nrow(M)
   # min_rows = 1: hazard 3 is an lm.fit effect and duplicateCorrelation never reaches
   # lm.fit, so clamping to 2 here only cost parallelism on tiny inputs.
-  idx <- combat_row_chunks(ngenes, workers = workers, chunks = chunks, min_rows = 1L)
+  idx <- combat_row_chunks(ngenes, workers = workers, chunks = chunks, min_rows = 1L,
+                           ncol = ncol(M))
 
   # Rebuilt against an environment holding only what the body reads. A closure is serialised
   # WITH its defining environment, so on a socket backend this frame's live bindings and its

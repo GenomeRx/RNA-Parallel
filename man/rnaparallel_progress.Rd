@@ -15,14 +15,16 @@ computation; stop it with Ctrl-C or \code{interval} reaching a stall (see below)
 
 \item{interval}{Seconds between redraws in watch mode.}
 
-\item{stall_after}{Seconds with no new "done" row before watch mode gives up and returns,
-so a finished or crashed run does not poll forever with nobody watching. Default 10
-minutes: long enough to survive one very slow chunk, short enough to actually stop.}
+\item{stall_after}{Seconds with no new "done" OR "start" row before watch mode gives up
+and returns, so a finished or crashed run does not poll forever with nobody watching.
+Default 10 minutes: long enough to survive one very slow chunk, short enough to actually
+stop.}
 }
 \value{
 Invisibly, a list with \code{done}, \code{started}, \code{stalled} (started, never finished) and
-\code{eta} (a \code{POSIXct}, or \code{NA} if fewer than two chunks have finished). Also prints one line
-(or, in watch mode, one redrawn bar).
+\code{eta} (a \code{POSIXct}, or \code{NA} if fewer than two chunks have finished) -- on every return
+path, including a stall: the last summary read is still the most useful answer, and
+was already computed, so there is no reason to throw it away for \code{NULL}.
 }
 \description{
 Reads every \verb{rnaparallel-*.tsv} file in \code{dir}, pairs each chunk's start/done rows, and

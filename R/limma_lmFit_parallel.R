@@ -58,7 +58,7 @@ rp_row_blocks <- function(M, weights, env, workers, chunks, parallel_backend, wh
   if (!rp_branch_stable(M, w, punch)) return(serial_fn())
 
   # min_rows = 2 is exactness, not tuning: lm.fit drops a one-column response to a vector.
-  idx <- combat_row_chunks(nrow(M), workers, chunks, min_rows = 2L)
+  idx <- combat_row_chunks(nrow(M), workers, chunks, min_rows = 2L, ncol = ncol(M))
   if (length(idx) < 2L) return(serial_fn())
 
   # The fast branch reads weights[1, ] only. A matrix flagged arrayweights but varying by

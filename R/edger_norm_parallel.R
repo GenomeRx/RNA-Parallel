@@ -246,8 +246,13 @@ rp_rank_once <- function(rank0) {
 #' @noRd
 rp_norm_cols <- function(ncols, cells, f, workers, chunks, parallel_backend, min_cells,
                          what) {
-  # the two-row floor is an lm.fit row-axis hazard; columns have no analogue
-  idx <- combat_row_chunks(ncols, workers = workers, chunks = chunks)
+  # the two-row floor is an lm.fit row-axis hazard; columns have no analogue.
+  # `ncol` here means "cells per column", the OTHER axis of the real matrix, since
+  # combat_row_chunks() is splitting columns and needs the per-chunk cell count to bound
+  # combat.mem.chunk.cells the same way the row-splitting callers do. cells / ncols is
+  # exactly that: total cells over columns being split leaves rows per column.
+  idx <- combat_row_chunks(ncols, workers = workers, chunks = chunks,
+                           ncol = if (ncols > 0) cells / ncols else NULL)
   parts <- combat_parallel_check(
     combat_parallel_lapply(idx, f, workers, parallel_backend, cells = cells,
                            min_cells = min_cells),

@@ -147,10 +147,21 @@ combat_backend <- function(fn = NULL) {
 #' @param min_rows Smallest number of rows any chunk may hold. The chunk count is
 #'   clamped to `ntag %/% min_rows` so no chunk falls below it. Callers whose original
 #'   function branches on block shape pass 2; the default 1 reproduces the old clamp.
+#' @param ncol Column count of the matrix being split, if known. Together with
+#'   `getOption("combat.mem.chunk.cells")` this raises `nch` so no single chunk holds more
+#'   than that many cells (`rows_in_chunk * ncol`), REGARDLESS of what `workers`/`chunks`
+#'   asked for. Opt-in and off by default: unlike the worker-count guard (`rp_mem_cap()`),
+#'   which reads live available RAM, this has no live-RAM auto-derivation, because the bytes
+#'   a chunk actually costs beyond the raw cell count is workload-dependent (a GLM fit copies
+#'   design matrices and offsets several times over; a column trim does not) and this package
+#'   does not have measured per-companion multipliers to convert "cells" to "bytes" safely --
+#'   guessing one would either erase the speedup (too conservative) or not actually bound
+#'   memory (too loose). Pass the cell budget you have measured for your own workload.
+#'   `NULL` (the default) or `ncol` unknown means this has no effect, identical to before.
 #' @return A list of integer vectors covering `seq_len(ntag)` exactly once.
 #' @noRd
 combat_row_chunks <- function(ntag, workers = 4L, chunks = NULL, interleave = TRUE,
-                              min_rows = 1L) {
+                              min_rows = 1L, ncol = NULL) {
   ntag <- as.integer(ntag)
   if (ntag < 1L) stop("no rows to split", call. = FALSE)
   # An unusable `chunks` clamps to one chunk rather than erroring: results stay correct and
@@ -165,6 +176,18 @@ combat_row_chunks <- function(ntag, workers = 4L, chunks = NULL, interleave = TR
   # Measured: 4080 of 16000 one-gene blocks not identical() to serial. At min_rows = 1
   # this reduces to the old clamp exactly, so ComBat-seq callers are unaffected.
   nch <- max(1L, min(nch, ntag %/% min_rows))
+  # A chunk-count FLOOR, raised past whatever was requested, never lowered below it: more
+  # chunks at the same concurrency changes only how the SAME work is split, never which rows
+  # go where or in what order they come back, so this cannot change a single output value --
+  # combat_row_order() restores original order regardless of nch, and the test suite asserts
+  # identical() output across a range of explicit chunk counts already. Verified against
+  # min_rows the same way: floored again by ntag %/% min_rows so the exactness constraint
+  # above still wins if the two ever conflict.
+  budget <- suppressWarnings(as.numeric(getOption("combat.mem.chunk.cells", NA_real_)))
+  if (!is.na(budget) && budget > 0 && !is.null(ncol) && is.finite(ncol) && ncol > 0) {
+    need <- ceiling((ntag * ncol) / budget)
+    nch <- as.integer(max(1L, min(max(nch, need), ntag %/% min_rows)))
+  }
   if (nch == 1L) return(list(seq_len(ntag)))
   # `rep_len(seq_len(nch), ntag)` puts chunk k at positions k, k + nch, k + 2*nch, ..., and
   # split() returns those groups in sorted key order, so group k IS seq.int(k, ntag, by = nch).
@@ -1701,7 +1724,7 @@ glmFit_rows_parallel <- function(y, design, dispersion, offset, weights = NULL,
                                  workers = 4L, chunks = NULL,
                                  parallel_backend = getOption("combat.backend", combat_default_backend())) {
   y <- as.matrix(y)
-  idx <- combat_row_chunks(nrow(y), workers = workers, chunks = chunks)
+  idx <- combat_row_chunks(nrow(y), workers = workers, chunks = chunks, ncol = ncol(y))
 
   # Without an explicit offset each worker rebuilds library sizes from its own genes, which
   # moved coefficients by 1.8 in testing and raises nothing. Refuse rather than guess.
@@ -1977,7 +2000,8 @@ combat_mq_dispatch <- function(mq, counts_sub, old_mu, old_phi) {
 match_quantiles_parallel <- function(mq, counts_sub, old_mu, old_phi, new_mu, new_phi,
                                      workers = 4L, chunks = NULL,
                                      parallel_backend = getOption("combat.backend", combat_default_backend())) {
-  idx <- combat_row_chunks(nrow(counts_sub), workers = workers, chunks = chunks)
+  idx <- combat_row_chunks(nrow(counts_sub), workers = workers, chunks = chunks,
+                           ncol = ncol(counts_sub))
 
   # gate resolved once, before the fork, so a worker inherits the decision rather than
   # re-deparsing the backend body once per chunk
@@ -2114,7 +2138,7 @@ estimateGLMTagwiseDisp_rows_parallel <- function(y, design = NULL, dispersion = 
   if (is.null(span)) span <- if (ntag > 10) (10 / ntag)^0.23 else 1
   if (is.null(AveLogCPM)) AveLogCPM <- edgeR::aveLogCPM(y, offset = offset, weights = weights)
 
-  idx <- combat_row_chunks(ntag, workers = workers, chunks = chunks)
+  idx <- combat_row_chunks(ntag, workers = workers, chunks = chunks, ncol = ncol(y))
 
   # Rebuilt against an environment holding only what the body reads. A closure is serialised
   # WITH its defining environment, so on a socket backend this frame's live bindings and its
