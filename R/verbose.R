@@ -420,6 +420,19 @@ rp_step_begin <- function(label, what, x, backend, workers) {
   h
 }
 
+#' Peak resident bytes this process has ever held
+#'
+#' VmHWM, not VmRSS: the high-water mark is what the fit needed, and it is still readable
+#' after the memory has been released. NA off Linux.
+#' @noRd
+rp_mem_peak <- function() {
+  if (!file.exists("/proc/self/status")) return(NA_real_)
+  l <- tryCatch(readLines("/proc/self/status"), error = function(e) character())
+  m <- grep("^VmHWM:", l, value = TRUE)
+  if (!length(m)) return(NA_real_)
+  as.numeric(gsub("\\D", "", m[1L])) * 1024
+}
+
 #' @noRd
 rp_step_end <- function(h) {
   if (is.null(h)) return(invisible(NULL))
@@ -440,8 +453,13 @@ rp_step_end <- function(h) {
   fb <- .rp_dispatch$fallback
   if (length(fb)) note <- paste0(note, sprintf("  [%s stood down]", paste(fb, collapse = ", ")))
 
-  message(sprintf("  %-34s %-16s %8s%s",
-                  substr(h$label, 1L, 34L), engine, rp_secs(secs), note))
+  # VmHWM is the high-water mark, so it survives the gc() that follows a big fit and reports
+  # what the run actually needed rather than what it happens to hold when it finishes. Without
+  # it a memory problem is invisible in the only log the run produces.
+  peak <- rp_mem_peak()
+  pk <- if (is.na(peak)) "" else sprintf("  peak %.0f GB", peak / 2^30)
+  message(sprintf("  %-34s %-16s %8s%s%s",
+                  substr(h$label, 1L, 34L), engine, rp_secs(secs), pk, note))
   invisible(NULL)
 }
 

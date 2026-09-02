@@ -399,6 +399,74 @@ combat_default_backend <- function() {
 
 
 
+# ---- memory guard -------------------------------------------------------------
+
+#' Bytes of RAM the kernel thinks are actually obtainable right now
+#'
+#' MemAvailable, not MemFree: free excludes reclaimable page cache and reads far
+#' lower than what a fork can really have. NA on anything without /proc, which is
+#' every non-Linux platform, and every caller treats NA as "cannot tell, proceed".
+#' @noRd
+rp_mem_available <- function() {
+  if (!file.exists("/proc/meminfo")) return(NA_real_)
+  l <- tryCatch(readLines("/proc/meminfo", n = 64L), error = function(e) character())
+  m <- grep("^MemAvailable:", l, value = TRUE)
+  if (!length(m)) return(NA_real_)
+  as.numeric(gsub("\\D", "", m[1L])) * 1024
+}
+
+#' Resident bytes of this process
+#'
+#' Field 24 of /proc/self/stat is RSS in pages. Read from stat rather than status
+#' because it is one line and one split, and this runs on every dispatch.
+#' @noRd
+rp_mem_rss <- function() {
+  if (!file.exists("/proc/self/stat")) return(NA_real_)
+  v <- tryCatch(strsplit(readLines("/proc/self/stat", n = 1L), " ", fixed = TRUE)[[1L]],
+                error = function(e) character())
+  if (length(v) < 24L) return(NA_real_)
+  suppressWarnings(as.numeric(v[24L])) * 4096
+}
+
+#' Cap workers at what the machine can actually hold
+#'
+#' Forking is copy-on-write, so N workers do not cost N times the parent. They cost
+#' whatever each one writes to, and for a row-split fit over a large matrix that is a
+#' real fraction of it. When the total exceeds what is available the kernel does not
+#' return an allocation error to R: it SIGKILLs the process. There is no condition to
+#' catch, no traceback, and mclapply reports nothing, so the run simply disappears.
+#' Measured on a 40,609 x 9,493 matrix with 125 GB and no swap: 16 workers off a 50 GB
+#' parent died, 8 off 100 GB died, 4 off 23 GB died at 111 GB, 2 off 23 GB survived.
+#'
+#' So refuse at the door instead. Degrading to fewer workers finishes late; being
+#' killed loses the whole run and says nothing about why.
+#'
+#' combat.mem.divergence is the fraction of the parent each worker is assumed to
+#' dirty. It is workload-dependent, not a constant, which is why it is an option: a
+#' row-split GLM fit dirties far more than a per-column trimmed mean.
+#' @noRd
+rp_mem_cap <- function(workers) {
+  if (!isTRUE(rp_opt_flag("combat.mem.guard", default = TRUE))) return(workers)
+  if (workers <= 1L) return(workers)
+  avail <- rp_mem_available(); rss <- rp_mem_rss()
+  if (is.na(avail) || is.na(rss) || rss <= 0) return(workers)   # cannot tell, do not interfere
+  frac <- rp_opt_secs("combat.mem.divergence", 0.25)
+  if (frac <= 0) return(workers)
+  headroom <- avail * 0.8            # leave a fifth for everything that is not this fit
+  need <- rss * frac * workers
+  if (need <= headroom) return(workers)
+  fit <- max(1L, as.integer(floor(headroom / (rss * frac))))
+  if (fit >= workers) return(workers)
+  warning(sprintf(
+    paste0("rnaparallel: %d workers need ~%.0f GB on top of a %.0f GB parent and only ",
+           "%.0f GB is available, which on a machine without swap is a kernel kill, not ",
+           "an R error. Using %d instead. Set options(combat.mem.divergence=) if this ",
+           "workload dirties less, or options(combat.mem.guard=FALSE) to disable."),
+    workers, need / 2^30, rss / 2^30, avail / 2^30, fit), call. = FALSE)
+  fit
+}
+
+
 # ---- entry-point prologue -----------------------------------------------------
 
 #' Validate the four shared controls once, identically, for every entry point
@@ -427,7 +495,7 @@ rp_prologue <- function(workers) {
       }
     }
   }
-  w
+  rp_mem_cap(w)
 }
 
 
@@ -1086,6 +1154,7 @@ combat_parallel_lapply <- function(idx, f, workers,
   # options() unless told to, and rp_progress_dir()/the stage label would silently read as
   # unset there. mclapply's forked children do inherit a copy, but capturing here keeps one
   # code path for all four backends instead of a fork-only shortcut that quietly breaks PSOCK.
+  .lean_tag$master_pid     <- Sys.getpid()
   .lean_tag$progress_dir   <- rp_progress_dir()
   .lean_tag$progress_stage <- .rp_dispatch$progress_label %||% "dispatch"
   f_tagged <- function(ii) {
@@ -1114,6 +1183,18 @@ combat_parallel_lapply <- function(idx, f, workers,
       rp_progress_file_write(progress_dir, progress_stage, k, "start")
       on.exit(rp_progress_file_write(progress_dir, progress_stage, k, "done"), add = TRUE)
     }
+    # A fork whose master was killed is reparented to init and keeps running, holding its
+    # share of the matrix for as long as the machine is up. Nothing collects its result and
+    # nothing reaps it, so the memory the master died for stays gone: measured at 111 GB and
+    # 116 GB held by such orphans on two separate runs. SIGTERM does not clear them either,
+    # because R installs a handler and the worker is blocked, so only SIGKILL works and only
+    # if somebody notices. getppid() == 1 is the one signal a fork can read for itself.
+    #
+    # Guarded on the pid differing from the master's: f_tagged also runs IN the master under a
+    # serial or custom backend, and quitting there would take the caller's whole session down.
+    # A master launched with setsid (any nohup/detached render) legitimately has ppid 1.
+    if (Sys.getpid() != master_pid && Sys.getppid() == 1L)
+      quit(save = "no", status = 0L, runLast = FALSE)
     list(combat_chunk = k, value = f(ii))
   }
   environment(f_tagged) <- .lean_tag
