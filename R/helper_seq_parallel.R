@@ -450,7 +450,7 @@ rp_mem_cap <- function(workers) {
   if (workers <= 1L) return(workers)
   avail <- rp_mem_available(); rss <- rp_mem_rss()
   if (is.na(avail) || is.na(rss) || rss <= 0) return(workers)   # cannot tell, do not interfere
-  frac <- rp_opt_secs("combat.mem.divergence", 0.25)
+  frac <- rp_opt_num("combat.mem.divergence", 0.25)
   if (frac <= 0) return(workers)
   headroom <- avail * 0.8            # leave a fifth for everything that is not this fit
   need <- rss * frac * workers

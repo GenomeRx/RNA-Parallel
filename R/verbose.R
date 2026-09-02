@@ -31,6 +31,22 @@ rp_opt_secs <- function(name, default = 0) {
   v
 }
 
+#' Read a single non-negative numeric option that is not a duration
+#'
+#' Same validation as `rp_opt_secs()` but without the "seconds" wording, for options that
+#' are a fraction or a count rather than a time: `combat.mem.divergence` errored with
+#' "must be a single non-negative number of seconds" for a value that is neither, which is
+#' confusing on its own terms even though the number check itself was correct.
+#' @noRd
+rp_opt_num <- function(name, default = 0) {
+  v <- suppressWarnings(as.numeric(getOption(name, default)))
+  if (length(v) != 1L || is.na(v) || v < 0) {
+    stop("`", name, "` must be a single non-negative number; got ",
+         deparse(getOption(name)), call. = FALSE)
+  }
+  v
+}
+
 
 # ---- silencing the original ----------------------------------------------------
 

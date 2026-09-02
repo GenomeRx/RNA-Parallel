@@ -3,6 +3,30 @@
 Windows is a supported platform, the socket backends work, and the companions no longer pay for
 work they throw away.
 
+- **`rp_mem_cap()` refuses to fork past what the machine can hold.** Forking N workers off a
+  large parent is copy-on-write, so it does not cost N times the parent, but a row-split fit
+  writes a real fraction of it, and a machine without swap does not return an allocation error
+  when that fraction runs out: the kernel SIGKILLs the process, with no condition to catch, no
+  traceback, and `mclapply` reporting nothing. Measured on a 40,609 x 9,493 matrix, 125 GB, no
+  swap: 16 workers off a 50 GB parent died, 8 off 100 GB died, 4 off 23 GB died at 111 GB, 2 off
+  23 GB survived. Reads `MemAvailable` and the caller's own RSS from `/proc` before every
+  dispatch and degrades the worker count instead, warning with the three numbers so a run that
+  cannot proceed at full concurrency says why instead of vanishing. NA off Linux (or anywhere
+  `/proc` is missing) means proceed unchanged; the guard never blocks what it cannot measure.
+  `combat.mem.divergence` (default 0.25) is the fraction of the parent each worker is assumed
+  to dirty, workload-dependent so it is an option; `combat.mem.guard = FALSE` disables the
+  whole check.
+
+- **A fork whose master died now exits on its own.** Reparented to init, an orphaned fork kept
+  running and holding its share of the matrix for as long as the machine stayed up; two runs
+  left 111 GB and 116 GB stranded that way, immune to `SIGTERM` because R installs a handler
+  and the worker is blocked mid-computation. Every worker now checks `Sys.getppid() == 1` and
+  exits if its master is gone.
+
+- **Peak RSS in the `combat.timing` line**, from `VmHWM`, so the number that decides whether a
+  fit survives is visible in the log a run already produces: `pooled ComBat-seq    mclapply
+  x16    30.3h    peak 51 GB`.
+
 - **`combat.progress` is now on by default.** No option needs to be set: every parallel call
   ticks a live "N dispatched" line, overwritten in place, so you can always tell a slow run from
   a stuck one. `combat.timing` alone only reports after a call finishes, and ComBat-seq alone
