@@ -475,7 +475,7 @@ rp_mem_peak <- function() {
 #'
 #' Reads total RAM (`/proc/meminfo` on Linux, PowerShell's `Get-CimInstance` on Windows),
 #' halves it, and rounds to the nearest of 8/16/32/64/128/256/512/1024 GB, R's own
-#' vector-heap ceiling. This does NOT replace [rp_mem_cap()]: that guard degrades the worker
+#' vector-heap ceiling. This does NOT replace `rp_mem_cap()`: that guard degrades the worker
 #' count before a fork based on a live reading of what is available right now; this sets a
 #' fixed ceiling R itself enforces on every allocation, in every session, whether or not
 #' this package's dispatch code is what allocated the memory. Two independent nets against
