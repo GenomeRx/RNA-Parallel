@@ -13,9 +13,13 @@ work they throw away.
   dispatch and degrades the worker count instead, warning with the three numbers so a run that
   cannot proceed at full concurrency says why instead of vanishing. NA off Linux (or anywhere
   `/proc` is missing) means proceed unchanged; the guard never blocks what it cannot measure.
-  `combat.mem.divergence` (default 0.25) is the fraction of the parent each worker is assumed
-  to dirty, workload-dependent so it is an option; `combat.mem.guard = FALSE` disables the
-  whole check.
+  `combat.mem.divergence` (default 1: assume a worker can dirty the whole parent) is the
+  fraction of the parent each worker is assumed to dirty, workload-dependent so it is an
+  option; `combat.mem.guard = FALSE` disables the whole check. The default was raised from
+  an earlier 0.25 after checking it against the PR's own measured numbers: 4 workers off a
+  23 GB parent that actually grew to 111 GB (a real divergence of about 0.96) computed only
+  23 GB needed at 0.25 and would have proceeded unwarned into the same kill. Lower it
+  explicitly for a workload known to dirty less, e.g. a per-column trimmed mean.
 
 - **`rnaparallel_set_mem_limit()`** is a second, independent net against the same SIGKILL:
   `R_MAX_VSIZE` is R's own vector-heap ceiling, checked on every allocation, that turns an

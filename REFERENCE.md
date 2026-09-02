@@ -246,9 +246,10 @@ less, or options(combat.mem.guard=FALSE) to disable.
 ```
 
 `NA` off Linux (or anywhere `/proc` is missing) means proceed unchanged; the guard never blocks
-what it cannot measure. `combat.mem.divergence` (default 0.25) is the fraction of the parent
-each worker is assumed to dirty, workload-dependent, not a constant. `combat.mem.guard = FALSE`
-disables the whole check.
+what it cannot measure. `combat.mem.divergence` (default 1, assume a worker can dirty the whole
+parent) is the fraction of the parent each worker is assumed to dirty, workload-dependent, not
+a constant; lower it explicitly for a workload known to dirty less, e.g. a per-column trimmed
+mean. `combat.mem.guard = FALSE` disables the whole check.
 
 A fork whose master was killed is reparented to init and keeps running, holding its share of
 the matrix for as long as the machine stays up; `SIGTERM` does not clear it, because R installs

@@ -495,13 +495,22 @@ rp_mem_rss <- function() {
 #' combat.mem.divergence is the fraction of the parent each worker is assumed to
 #' dirty. It is workload-dependent, not a constant, which is why it is an option: a
 #' row-split GLM fit dirties far more than a per-column trimmed mean.
+#'
+#' Default is 1 (assume a worker can dirty the WHOLE parent), not a smaller number. The
+#' PR that added this guard measured 4 workers off a 23 GB parent growing to 111 GB before
+#' dying, a real per-worker divergence of about 0.96 -- close enough to 1 to have needed a
+#' default at least that high to catch the exact case the guard exists for. A default of
+#' 0.25 (the guard's own first draft) computes only 23 GB needed against that same parent
+#' and would have let all 4 workers through unwarned, straight into the same kill. Lower
+#' `combat.mem.divergence` explicitly for a workload known to dirty less, e.g. a per-column
+#' fit; the safe default has to assume the worse case it was built to prevent, not the best.
 #' @noRd
 rp_mem_cap <- function(workers) {
   if (!isTRUE(rp_opt_flag("combat.mem.guard", default = TRUE))) return(workers)
   if (workers <= 1L) return(workers)
   avail <- rp_mem_available(); rss <- rp_mem_rss()
   if (is.na(avail) || is.na(rss) || rss <= 0) return(workers)   # cannot tell, do not interfere
-  frac <- rp_opt_num("combat.mem.divergence", 0.25)
+  frac <- rp_opt_num("combat.mem.divergence", 1)
   if (frac <= 0) return(workers)
   headroom <- avail * 0.8            # leave a fifth for everything that is not this fit
   need <- rss * frac * workers

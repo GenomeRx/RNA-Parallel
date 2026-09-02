@@ -48,6 +48,26 @@ test_that("rp_mem_cap passes workers through when the fit clears headroom", {
   expect_identical(rnaparallel:::rp_mem_cap(8L), 8L)
 })
 
+test_that("default combat.mem.divergence is 1, not the guard's earlier 0.25", {
+  # The PR that added this guard measured 4 workers off a 23 GB parent needing 111 GB, a
+  # real per-worker divergence of about 0.96: at the old 0.25 default this exact case
+  # computed only 23 GB needed and would have proceeded unwarned into the same kill.
+  testthat::local_mocked_bindings(
+    rp_mem_available = function() 30 * 2^30,   # 30 GB available (headroom 24 GB)
+    rp_mem_rss = function() 23 * 2^30,         # the PR's own measured 23 GB parent
+    .package = "rnaparallel"
+  )
+  withr::local_options(combat.mem.divergence = NULL)   # no explicit option: use the default
+  # at divergence = 1: 4 * 23 GB = 92 GB needed, far past 24 GB headroom -> must degrade
+  expect_warning(fit <- rnaparallel:::rp_mem_cap(4L), "need")
+  expect_true(fit < 4L)
+  # at the OLD 0.25 default this same case computed 4 * 23 * 0.25 = 23 GB needed, which is
+  # under 24 GB headroom and would NOT have degraded -- confirming the default actually
+  # changed behavior on the case it exists to catch, not just the option's stated value
+  withr::local_options(combat.mem.divergence = 0.25)
+  expect_identical(rnaparallel:::rp_mem_cap(4L), 4L)
+})
+
 test_that("rp_mem_cap degrades workers instead of leaving a fit that would be killed", {
   testthat::local_mocked_bindings(
     rp_mem_available = function() 10 * 2^30,   # 10 GB available
