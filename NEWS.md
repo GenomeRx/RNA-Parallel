@@ -9,10 +9,11 @@ work they throw away.
   when that fraction runs out: the kernel SIGKILLs the process, with no condition to catch, no
   traceback, and `mclapply` reporting nothing. Measured on a 40,609 x 9,493 matrix, 125 GB, no
   swap: 16 workers off a 50 GB parent died, 8 off 100 GB died, 4 off 23 GB died at 111 GB, 2 off
-  23 GB survived. Reads `MemAvailable` and the caller's own RSS from `/proc` before every
-  dispatch and degrades the worker count instead, warning with the three numbers so a run that
-  cannot proceed at full concurrency says why instead of vanishing. NA off Linux (or anywhere
-  `/proc` is missing) means proceed unchanged; the guard never blocks what it cannot measure.
+  23 GB survived. Reads `MemAvailable` and the caller's own RSS from `/proc` on Linux, or via
+  the `ps` package (`ps_system_memory()`/`ps_memory_info()`) on Windows and macOS, before every
+  dispatch, and degrades the worker count instead, warning with the three numbers so a run that
+  cannot proceed at full concurrency says why instead of vanishing. NA when neither source is
+  available means proceed unchanged; the guard never blocks what it cannot measure.
   `combat.mem.divergence` (default 1: assume a worker can dirty the whole parent) is the
   fraction of the parent each worker is assumed to dirty, workload-dependent so it is an
   option; `combat.mem.guard = FALSE` disables the whole check. The default was raised from
@@ -50,9 +51,17 @@ work they throw away.
   new bytes, the other 2 being the first sighting of each worker's file. Matters most on a
   long `watch = TRUE` session against a long-running dispatch, where the read cost used to
   grow with elapsed time even though each poll only cares about the handful of lines
-  written since the last one.
+  written since the last one. Stall detection now tracks a "done" row the same as a "start"
+  row, not `started` alone: a run whose chunks all dispatched early (`preschedule = TRUE`) but
+  whose "done" rows are still trickling in used to hit the stall exit mid-run with a misleading
+  "no new chunks" message, even though chunks were actively finishing. A stall also now returns
+  the last real progress summary instead of `NULL`, matching the function's own documented
+  return contract, and includes the stalled-chunk count in the stall message when nonzero.
+  `interval` and `stall_after` are validated (must be a single positive number) rather than
+  reaching `Sys.sleep()` as a raw error or busy-polling on a bad value.
 
-- **Peak RSS in the `combat.timing` line**, from `VmHWM`, so the number that decides whether a
+- **Peak RSS in the `combat.timing` line**, from `VmHWM` on Linux or `ps::ps_memory_info()`'s
+  peak working set on Windows/macOS, so the number that decides whether a
   fit survives is visible in the log a run already produces: `pooled ComBat-seq    mclapply
   x16    30.3h    peak 51 GB`.
 

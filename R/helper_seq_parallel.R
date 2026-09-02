@@ -424,15 +424,24 @@ rp_getppid <- function() {
 #' Bytes of RAM the kernel thinks are actually obtainable right now
 #'
 #' MemAvailable, not MemFree: free excludes reclaimable page cache and reads far
-#' lower than what a fork can really have. NA on anything without /proc, which is
-#' every non-Linux platform, and every caller treats NA as "cannot tell, proceed".
+#' lower than what a fork can really have. `/proc/meminfo` on Linux; the `ps` package's
+#' `ps_system_memory()$avail` as a cross-platform fallback when installed, so the guard
+#' this branch is named for is not inert everywhere the package is actually developed
+#' (Windows and macOS both lack `/proc`). NA when neither source is available, which
+#' every caller treats as "cannot tell, proceed".
 #' @noRd
 rp_mem_available <- function() {
-  if (!file.exists("/proc/meminfo")) return(NA_real_)
-  l <- tryCatch(readLines("/proc/meminfo", n = 64L), error = function(e) character())
-  m <- grep("^MemAvailable:", l, value = TRUE)
-  if (!length(m)) return(NA_real_)
-  as.numeric(gsub("\\D", "", m[1L])) * 1024
+  if (file.exists("/proc/meminfo")) {
+    l <- tryCatch(readLines("/proc/meminfo", n = 64L), error = function(e) character())
+    m <- grep("^MemAvailable:", l, value = TRUE)
+    if (length(m)) return(as.numeric(gsub("\\D", "", m[1L])) * 1024)
+    return(NA_real_)
+  }
+  if (requireNamespace("ps", quietly = TRUE)) {
+    v <- tryCatch(ps::ps_system_memory()$avail, error = function(e) NA_real_)
+    if (!is.na(v)) return(as.numeric(v))
+  }
+  NA_real_
 }
 
 #' Total installed bytes of RAM, not what is currently free
@@ -468,15 +477,23 @@ rp_mem_total <- function() {
 
 #' Resident bytes of this process
 #'
-#' Field 24 of /proc/self/stat is RSS in pages. Read from stat rather than status
-#' because it is one line and one split, and this runs on every dispatch.
+#' Field 24 of /proc/self/stat is RSS in pages on Linux. `ps::ps_memory_info()$wset` (the
+#' working set, RSS's Windows/macOS equivalent) as a cross-platform fallback, same reason
+#' `rp_mem_available()` above has one: the guard cannot cap anything on a platform where
+#' this always reads NA.
 #' @noRd
 rp_mem_rss <- function() {
-  if (!file.exists("/proc/self/stat")) return(NA_real_)
-  v <- tryCatch(strsplit(readLines("/proc/self/stat", n = 1L), " ", fixed = TRUE)[[1L]],
-                error = function(e) character())
-  if (length(v) < 24L) return(NA_real_)
-  suppressWarnings(as.numeric(v[24L])) * 4096
+  if (file.exists("/proc/self/stat")) {
+    v <- tryCatch(strsplit(readLines("/proc/self/stat", n = 1L), " ", fixed = TRUE)[[1L]],
+                  error = function(e) character())
+    if (length(v) >= 24L) return(suppressWarnings(as.numeric(v[24L])) * 4096)
+    return(NA_real_)
+  }
+  if (requireNamespace("ps", quietly = TRUE)) {
+    v <- tryCatch(ps::ps_memory_info()[["wset"]], error = function(e) NA_real_)
+    if (!is.null(v) && !is.na(v)) return(as.numeric(v))
+  }
+  NA_real_
 }
 
 #' Cap workers at what the machine can actually hold
@@ -1405,20 +1422,20 @@ combat_parallel_lapply <- function(idx, f, workers,
     mclapply = {
       # fork only. Windows has no fork, so fall back rather than error.
       if (.Platform$OS.type == "windows") {
-    # a silent serial run looks identical to a parallel one until you time it
-    if (is.null(.combat_clusters$warned_windows)) {
-      # Not foreach. Measured on Windows, foreach fell 1.18x, 0.94x, 0.57x, 0.28x at 2, 4, 8
-      # and 16 workers while future held 2.92x on the cohort of the day, and combat_default_backend()
-      # picks future itself once a plan exists. Sending people to the slower one at the exact
-      # moment they discover the problem is the opposite of helping.
-      message("mclapply cannot fork on Windows, so this ran serially. ",
-              "Set future::plan(future::multisession, workers = N) and this will use the ",
-              "future backend automatically.")
-      .combat_clusters$warned_windows <- TRUE
+      # a silent serial run looks identical to a parallel one until you time it
+      if (is.null(.combat_clusters$warned_windows)) {
+        # Not foreach. Measured on Windows, foreach fell 1.18x, 0.94x, 0.57x, 0.28x at 2, 4, 8
+        # and 16 workers while future held 2.92x on the cohort of the day, and combat_default_backend()
+        # picks future itself once a plan exists. Sending people to the slower one at the exact
+        # moment they discover the problem is the opposite of helping.
+        message("mclapply cannot fork on Windows, so this ran serially. ",
+                "Set future::plan(future::multisession, workers = N) and this will use the ",
+                "future backend automatically.")
+        .combat_clusters$warned_windows <- TRUE
+      }
+      rp_count_serial_after_all()   # it did not fork; the line must not claim it did
+      return(lapply(idx, f))
     }
-    rp_count_serial_after_all()   # it did not fork; the line must not claim it did
-    return(lapply(idx, f))
-  }
       # mc.allow.recursive = FALSE, or a caller who wraps this in their own
       # mclapply/future_lapply over cohorts multiplies the worker count instead of
       # reusing it: 3 cohorts x 4 workers measured 12 concurrent grandchildren.

@@ -21,31 +21,28 @@ rp_opt_flag <- function(name, default = FALSE) {
   v
 }
 
+#' Read a single non-negative numeric option, refusing a garbage value
+#'
+#' `what` only changes the wording: `combat.timing.min` reads naturally as "a number of
+#' seconds", `combat.mem.divergence` does not (it errored with that exact wording for a
+#' value that is a fraction, not a duration, before this had a `what` argument at all).
+#' `rp_opt_secs()`/`rp_opt_num()` below are the two names every call site already uses;
+#' both are one-line wrappers so neither existing caller needed to change.
 #' @noRd
-rp_opt_secs <- function(name, default = 0) {
+rp_opt_number <- function(name, default, what) {
   v <- suppressWarnings(as.numeric(getOption(name, default)))
   if (length(v) != 1L || is.na(v) || v < 0) {
-    stop("`", name, "` must be a single non-negative number of seconds; got ",
+    stop("`", name, "` must be a single non-negative ", what, "; got ",
          deparse(getOption(name)), call. = FALSE)
   }
   v
 }
 
-#' Read a single non-negative numeric option that is not a duration
-#'
-#' Same validation as `rp_opt_secs()` but without the "seconds" wording, for options that
-#' are a fraction or a count rather than a time: `combat.mem.divergence` errored with
-#' "must be a single non-negative number of seconds" for a value that is neither, which is
-#' confusing on its own terms even though the number check itself was correct.
 #' @noRd
-rp_opt_num <- function(name, default = 0) {
-  v <- suppressWarnings(as.numeric(getOption(name, default)))
-  if (length(v) != 1L || is.na(v) || v < 0) {
-    stop("`", name, "` must be a single non-negative number; got ",
-         deparse(getOption(name)), call. = FALSE)
-  }
-  v
-}
+rp_opt_secs <- function(name, default = 0) rp_opt_number(name, default, "number of seconds")
+
+#' @noRd
+rp_opt_num <- function(name, default = 0) rp_opt_number(name, default, "number")
 
 
 # ---- silencing the original ----------------------------------------------------
@@ -88,7 +85,6 @@ rp_count_reset <- function() {
   .rp_dispatch$ser <- 0L
   .rp_dispatch$fallback <- character()
   .rp_dispatch$progress_last <- NULL
-  .rp_dispatch$progress_total <- NULL
   invisible(NULL)
 }
 
@@ -261,12 +257,14 @@ rp_progress_file_write <- function(dir, stage, chunk, event) {
 #'   returning once. Meant for a SEPARATE terminal/session next to the one running the actual
 #'   computation; stop it with Ctrl-C or `interval` reaching a stall (see below).
 #' @param interval Seconds between redraws in watch mode.
-#' @param stall_after Seconds with no new "done" row before watch mode gives up and returns,
-#'   so a finished or crashed run does not poll forever with nobody watching. Default 10
-#'   minutes: long enough to survive one very slow chunk, short enough to actually stop.
+#' @param stall_after Seconds with no new "done" OR "start" row before watch mode gives up
+#'   and returns, so a finished or crashed run does not poll forever with nobody watching.
+#'   Default 10 minutes: long enough to survive one very slow chunk, short enough to actually
+#'   stop.
 #' @return Invisibly, a list with `done`, `started`, `stalled` (started, never finished) and
-#'   `eta` (a `POSIXct`, or `NA` if fewer than two chunks have finished). Also prints one line
-#'   (or, in watch mode, one redrawn bar).
+#'   `eta` (a `POSIXct`, or `NA` if fewer than two chunks have finished) -- on every return
+#'   path, including a stall: the last summary read is still the most useful answer, and
+#'   was already computed, so there is no reason to throw it away for `NULL`.
 #' @examples
 #' \dontrun{
 #' # in the running session:
@@ -281,7 +279,22 @@ rp_progress_file_write <- function(dir, stage, chunk, event) {
 #' }
 #' @export
 rnaparallel_progress <- function(dir, watch = FALSE, interval = 1, stall_after = 600) {
-  if (isTRUE(watch)) return(rp_progress_watch(dir, interval, stall_after))
+  if (isTRUE(watch)) {
+    # The package refuses garbage everywhere else (rp_opt_flag, rp_opt_secs, every
+    # combat.min.* gate); this was the one public entry point that did not. interval <= 0
+    # either busy-polls (0) or reaches Sys.sleep() as an outright error (negative), and both
+    # are silent until they happen rather than refused at the door like everything else.
+    if (!(is.numeric(interval) && length(interval) == 1L && !is.na(interval) && interval > 0)) {
+      stop("`interval` must be a single positive number of seconds; got ",
+           deparse(interval), call. = FALSE)
+    }
+    if (!(is.numeric(stall_after) && length(stall_after) == 1L && !is.na(stall_after) &&
+          stall_after > 0)) {
+      stop("`stall_after` must be a single positive number of seconds; got ",
+           deparse(stall_after), call. = FALSE)
+    }
+    return(rp_progress_watch(dir, interval, stall_after))
+  }
   rp_progress_once(dir)
 }
 
@@ -414,6 +427,8 @@ rp_progress_once <- function(dir) {
 rp_progress_watch <- function(dir, interval, stall_after) {
   last_activity <- Sys.time()
   last_started <- -1L
+  last_done <- -1L
+  last_summary <- NULL
   cr <- "\r"
   width <- 50L    # fread()'s own bar width
   # One cache across every poll in this watch call: the whole reason to tail is to stop
@@ -427,7 +442,15 @@ rp_progress_watch <- function(dir, interval, stall_after) {
       utils::flush.console()
     } else {
       s <- rp_progress_summarise(rows)
-      if (s$started != last_started) { last_activity <- Sys.time(); last_started <- s$started }
+      last_summary <- s
+      # Activity is either a chunk STARTING or a chunk FINISHING: tracking only `started`
+      # (as this used to) means a run whose chunks were all dispatched early (preschedule,
+      # or simply a fast dispatcher) but whose done rows are still trickling in hits the
+      # stall exit mid-run, with the misleading "no new chunks" message on a run that is
+      # very much still producing chunks -- just not new START rows.
+      if (s$started != last_started || s$done != last_done) {
+        last_activity <- Sys.time(); last_started <- s$started; last_done <- s$done
+      }
       pct <- if (s$started > 0L) s$done / s$started else 0
       filled <- round(pct * width)
       bar <- paste0("|", strrep("=", filled), strrep("-", width - filled), "|")
@@ -444,8 +467,15 @@ rp_progress_watch <- function(dir, interval, stall_after) {
       }
     }
     if (as.numeric(Sys.time() - last_activity, units = "secs") > stall_after) {
-      cat("\n  no new chunks in ", stall_after, "s, stopping watch\n", sep = "")
-      return(invisible(NULL))
+      cat("\n  no new chunks in ", stall_after, "s, stopping watch", sep = "")
+      if (!is.null(last_summary) && last_summary$stalled > 0L) {
+        cat(sprintf(" (%d chunk%s never finished)", last_summary$stalled,
+                    if (last_summary$stalled == 1L) "" else "s"))
+      }
+      cat("\n")
+      return(invisible(
+        if (is.null(last_summary)) list(done = 0L, started = 0L, stalled = 0L, eta = as.POSIXct(NA))
+        else last_summary[c("done", "started", "stalled", "eta")]))
     }
     Sys.sleep(interval)
   }
@@ -511,14 +541,23 @@ rp_step_begin <- function(label, what, x, backend, workers) {
 #' Peak resident bytes this process has ever held
 #'
 #' VmHWM, not VmRSS: the high-water mark is what the fit needed, and it is still readable
-#' after the memory has been released. NA off Linux.
+#' after the memory has been released. `ps::ps_memory_info()$peak_wset` (Windows/macOS peak
+#' working set) as a cross-platform fallback, same reasoning as `rp_mem_available()` and
+#' `rp_mem_rss()` in `helper_seq_parallel.R`: without it, the peak-RSS column in the
+#' `combat.timing` line never appears off Linux at all. NA when neither is available.
 #' @noRd
 rp_mem_peak <- function() {
-  if (!file.exists("/proc/self/status")) return(NA_real_)
-  l <- tryCatch(readLines("/proc/self/status"), error = function(e) character())
-  m <- grep("^VmHWM:", l, value = TRUE)
-  if (!length(m)) return(NA_real_)
-  as.numeric(gsub("\\D", "", m[1L])) * 1024
+  if (file.exists("/proc/self/status")) {
+    l <- tryCatch(readLines("/proc/self/status"), error = function(e) character())
+    m <- grep("^VmHWM:", l, value = TRUE)
+    if (length(m)) return(as.numeric(gsub("\\D", "", m[1L])) * 1024)
+    return(NA_real_)
+  }
+  if (requireNamespace("ps", quietly = TRUE)) {
+    v <- tryCatch(ps::ps_memory_info()[["peak_wset"]], error = function(e) NA_real_)
+    if (!is.null(v) && !is.na(v)) return(as.numeric(v))
+  }
+  NA_real_
 }
 
 

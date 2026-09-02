@@ -90,7 +90,3 @@ test_that("returns the chosen value invisibly in bytes", {
   expect_identical(v, 32 * 2^30)
 })
 
-test_that("rp_mem_peak returns NA off Linux", {
-  skip_if(file.exists("/proc/self/status"), "this machine has /proc; NA path not exercised here")
-  expect_true(is.na(rnaparallel:::rp_mem_peak()))
-})

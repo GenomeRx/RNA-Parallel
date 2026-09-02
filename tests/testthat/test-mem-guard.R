@@ -1,19 +1,42 @@
 ## The memory guard: rp_mem_available(), rp_mem_rss(), rp_mem_cap(), rp_mem_peak().
 ##
-## /proc only exists on Linux, so most of this asserts the NA/pass-through path on any other
-## platform (this suite runs on Windows too) and exercises the real arithmetic by mocking
+## /proc is the Linux source; the `ps` package is the cross-platform fallback (same pattern
+## as rp_getppid() below), so these are NA only when NEITHER is available, not simply "off
+## Linux" -- this suite runs on Windows too, and with `ps` installed (it is a Suggests
+## dependency) these now return real numbers there, which is the whole point of having the
+## fallback. Real arithmetic elsewhere in this file is exercised by mocking
 ## rp_mem_available()/rp_mem_rss() rather than depending on actual system memory pressure,
 ## which is not reproducible in CI.
 
-test_that("rp_mem_available and rp_mem_rss return NA off Linux", {
-  skip_if(file.exists("/proc/meminfo"), "this machine has /proc; NA path not exercised here")
+test_that("rp_mem_available and rp_mem_rss return NA only with neither /proc nor ps", {
+  skip_if(file.exists("/proc/meminfo"), "this machine has /proc; not exercising the NA path")
+  skip_if(requireNamespace("ps", quietly = TRUE),
+         "ps is installed here, so real values are expected -- see the next test")
   expect_true(is.na(rnaparallel:::rp_mem_available()))
   expect_true(is.na(rnaparallel:::rp_mem_rss()))
 })
 
-test_that("rp_mem_peak returns NA off Linux", {
-  skip_if(file.exists("/proc/self/status"), "this machine has /proc; NA path not exercised here")
+test_that("rp_mem_available and rp_mem_rss return real numbers via ps off Linux", {
+  skip_if(file.exists("/proc/meminfo"), "this machine has /proc; ps fallback not exercised here")
+  skip_if_not_installed("ps")
+  avail <- rnaparallel:::rp_mem_available()
+  rss <- rnaparallel:::rp_mem_rss()
+  expect_true(is.numeric(avail) && !is.na(avail) && avail > 0)
+  expect_true(is.numeric(rss) && !is.na(rss) && rss > 0)
+})
+
+test_that("rp_mem_peak returns NA only with neither /proc nor ps", {
+  skip_if(file.exists("/proc/self/status"), "this machine has /proc; not exercising the NA path")
+  skip_if(requireNamespace("ps", quietly = TRUE),
+         "ps is installed here, so a real value is expected -- see the next test")
   expect_true(is.na(rnaparallel:::rp_mem_peak()))
+})
+
+test_that("rp_mem_peak returns a real number via ps off Linux", {
+  skip_if(file.exists("/proc/self/status"), "this machine has /proc; ps fallback not exercised here")
+  skip_if_not_installed("ps")
+  peak <- rnaparallel:::rp_mem_peak()
+  expect_true(is.numeric(peak) && !is.na(peak) && peak > 0)
 })
 
 test_that("rp_mem_cap is a no-op when it cannot read memory (NA means proceed)", {
