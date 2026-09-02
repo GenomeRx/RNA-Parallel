@@ -1236,6 +1236,30 @@ combat_parallel_lapply <- function(idx, f, workers,
   # output at serial pace and is indistinguishable from one that forked, unless something says so
   if (isTRUE(cells < mc)) { rp_count(FALSE); return(lapply(idx, f)) }
 
+  # A dispatch already running inside one of this package's workers must not open a second
+  # pool. ComBat-seq dispatches the tagwise loop ACROSS BATCHES and ships the original closure,
+  # whose environment still carries the rebound `estimateGLMTagwiseDisp`; inside the worker
+  # that symbol dispatches AGAIN over gene rows. The result is workers + workers^2 processes:
+  # measured 2 outer and 4 inner for `workers = 2L` on Windows, which extrapolates to 272 at
+  # the 16-worker arm, each one a fresh R process with edgeR and limma loaded.
+  #
+  # This used to be handled by `mc.allow.recursive = FALSE`, but that is an argument to
+  # parallel::mclapply and guards the fork branch alone. On Windows mclapply is serial and
+  # foreach/PSOCK is the only backend that runs workers at all, so the one platform that
+  # needed the guard was the one platform without it. The flag is process-local and set by
+  # `f_tagged` below, so this covers every backend, custom executors included.
+  #
+  # A caller's OWN parallel loop is unaffected: nothing marks their workers, so a companion
+  # called once per cohort inside their loop still parallelises, which is the nesting pattern
+  # the documentation recommends. Checked BEFORE tagging is built (moved ahead of it): this
+  # gate, like forced-serial/degenerate below, returns lapply(idx, f) untagged, so building
+  # idx_tagged/f_tagged/untag before it paid a full idx duplicate plus a closure alloc on
+  # every nested-worker call for nothing.
+  if (nzchar(Sys.getenv("RNAPARALLEL_IN_WORKER"))) {
+    rp_count(FALSE)
+    return(lapply(idx, f))
+  }
+
   # Every job carries its chunk number, and the number comes back with the result. Checking
   # only the LENGTH of what a backend returns cannot tell a correct answer from the same
   # chunks in the wrong order, and binding a reordered list scrambles genes silently rather
@@ -1348,27 +1372,6 @@ combat_parallel_lapply <- function(idx, f, workers,
     spare <- which(!filled)
     for (j in which(!ok)) if (length(spare)) { res[spare[1]] <- list(out[[j]]); spare <- spare[-1] }
     res
-  }
-
-  # A dispatch already running inside one of this package's workers must not open a second
-  # pool. ComBat-seq dispatches the tagwise loop ACROSS BATCHES and ships the original closure,
-  # whose environment still carries the rebound `estimateGLMTagwiseDisp`; inside the worker
-  # that symbol dispatches AGAIN over gene rows. The result is workers + workers^2 processes:
-  # measured 2 outer and 4 inner for `workers = 2L` on Windows, which extrapolates to 272 at
-  # the 16-worker arm, each one a fresh R process with edgeR and limma loaded.
-  #
-  # This used to be handled by `mc.allow.recursive = FALSE`, but that is an argument to
-  # parallel::mclapply and guards the fork branch alone. On Windows mclapply is serial and
-  # foreach/PSOCK is the only backend that runs workers at all, so the one platform that
-  # needed the guard was the one platform without it. The flag is process-local and set by
-  # `f_tagged` above, so this covers every backend, custom executors included.
-  #
-  # A caller's OWN parallel loop is unaffected: nothing marks their workers, so a companion
-  # called once per cohort inside their loop still parallelises, which is the nesting pattern
-  # the documentation recommends.
-  if (nzchar(Sys.getenv("RNAPARALLEL_IN_WORKER"))) {
-    rp_count(FALSE)
-    return(lapply(idx, f))
   }
 
   if (custom) {
@@ -1900,8 +1903,14 @@ glmFit_rows_parallel <- function(y, design, dispersion, offset, weights = NULL,
 #' Reached only through `combat_mq_dispatch()`.
 #' @noRd
 match_quantiles_rows <- function(counts_sub, old_mu, old_phi, new_mu, new_phi) {
-  out <- matrix(NA, nrow = nrow(counts_sub), ncol = ncol(counts_sub))
-  out[] <- counts_sub
+  # One copy, not two: `matrix(NA, ...)` (logical alloc) then `out[] <- counts_sub`
+  # (type-promoting realloc) paid the same result as `counts_sub` itself already IS, minus
+  # its dimnames. `out <- counts_sub; dimnames(out) <- NULL` keeps the identical type/value
+  # (no promotion needed -- counts_sub already has its final storage mode) and strips
+  # dimnames in place, matching sva::match_quantiles's dimnames-absent output the same way
+  # the old two-step did, in one allocation instead of two.
+  out <- counts_sub
+  dimnames(out) <- NULL
   big <- which(counts_sub > 1)
   if (length(big)) {
     r <- ((big - 1L) %% nrow(counts_sub)) + 1L        # gene each selected cell belongs to

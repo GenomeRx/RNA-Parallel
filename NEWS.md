@@ -3,6 +3,28 @@
 Windows is a supported platform, the socket backends work, and the companions no longer pay for
 work they throw away.
 
+- **Fable review pass: dispatch overhead trimmed on every call, socket serialization halved on
+  the edgeR RLE path, one fewer allocation on ComBat-seq's quantile matcher.** Three concrete
+  fixes from a full-package memory review, each verified with the existing 204-case identical()
+  suite (0 new failures) and a full `R CMD check` (0 ERROR/WARNING):
+  - `combat_parallel_lapply()` used to build its chunk-tagging machinery (`idx_tagged`,
+    `f_tagged`, `untag`) before checking whether the call was even going to dispatch. Every
+    early-return path (nested-worker re-entry, `combat.fork = FALSE`, a degenerate single
+    chunk/worker) paid a full duplicate of `idx` plus a closure allocation for tagging it then
+    threw away unused. Moved the tagging build to right before the two branches that actually
+    consume it.
+  - `rp_apply_shim()` (the edgeR RLE column-parallel path) stored the matrix twice per socket
+    task: once directly, once inside `FUN`'s own captured frame (`.calcFactorRLE`'s `data`).
+    R's serializer dedups repeated objects within one environment chain, not across two, so
+    each task wrote the whole matrix twice and each worker unserialized two copies. Now reads
+    `data` back out of `FUN`'s own environment instead of storing a second reference, halving
+    per-task payload on the exact path the largest inputs take (falls back to the old
+    double-store if a future edgeR release renames the internal variable).
+  - `match_quantiles_rows()` allocated a fresh logical `NA` matrix and then promoted it via
+    `out[] <- counts_sub`, paying for a type that was always going to become `counts_sub`'s own
+    storage mode. Now copies `counts_sub` directly and strips dimnames, one allocation instead
+    of two, same output.
+
 - **`rp_mem_cap()` refuses to fork past what the machine can hold.** Forking N workers off a
   large parent is copy-on-write, so it does not cost N times the parent, but a row-split fit
   writes a real fraction of it, and a machine without swap does not return an allocation error

@@ -445,10 +445,31 @@ rp_apply_shim <- function(apply0, workers, chunks, parallel_backend) {
     }
     # FUN is carried over UNCHANGED and deliberately: it closes over the original's frame, which
     # is where the pooled `gm` lives, and that is the one thing each block must still read.
-    # Only X and apply0 are leaned.
+    # `X` is NOT also stored in `lean`: X here and `data` in FUN's own captured frame
+    # (.calcFactorRLE's frame, since this is always called as apply(data, 2, ...)) are the
+    # SAME matrix SEXP reached via two different environments. R's serializer dedups repeated
+    # objects within one environment chain, not across two independent ones, so storing X a
+    # second time in `lean` had a socket/future task write the whole matrix twice and a worker
+    # unserialize two separate copies of it. Reading `data` back out of FUN's own environment
+    # inside per_chunk keeps exactly one path to the matrix, so it serializes once.
     lean <- new.env(parent = rp_home())
-    lean$apply0 <- apply0; lean$X <- X; lean$FUN <- FUN
-    per_chunk <- function(jj) apply0(X[, jj, drop = FALSE], 2, FUN)
+    lean$apply0 <- apply0; lean$FUN <- FUN
+    # Confirmed at call time, not merely assumed: `data` is edgeR's own local variable name
+    # inside `.calcFactorRLE`'s body (`apply(data, 2, ...)`), so it is present in FUN's frame
+    # on every edgeR release this package supports. Falls back to shipping X the old way if a
+    # future edgeR release renames it, rather than erroring on a missing variable.
+    has_data <- tryCatch(
+      identical(get("data", envir = environment(FUN), inherits = FALSE), X),
+      error = function(e) FALSE)
+    if (has_data) {
+      per_chunk <- function(jj) {
+        X <- get("data", envir = environment(FUN), inherits = FALSE)
+        apply0(X[, jj, drop = FALSE], 2, FUN)
+      }
+    } else {
+      lean$X <- X
+      per_chunk <- function(jj) apply0(X[, jj, drop = FALSE], 2, FUN)
+    }
     environment(per_chunk) <- lean
     rp_norm_cols(ncol(X), length(X), per_chunk,
                  workers, chunks, parallel_backend,
