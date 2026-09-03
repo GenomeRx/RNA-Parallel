@@ -3,6 +3,23 @@
 Windows is a supported platform, the socket backends work, and the companions no longer pay for
 work they throw away.
 
+- **`lmFit_parallel()` (both `lm.series` and `gls.series`) now replays worker warnings/messages,
+  matching `duplicateCorrelation_parallel()`'s existing behaviour.** Real per-gene warnings a
+  block raises (limma's own "Partial NA coefficients", non-finite-value notices) were silently
+  lost on PSOCK/most BiocParallel executors, which swallow child conditions entirely -- what
+  the caller saw depended on which `parallel_backend` happened to be active. `rp_row_blocks()`
+  (shared by both series functions) now captures and replays each distinct condition once,
+  the same pattern `duplicateCorrelation_parallel()` already used. Conditions are carried as
+  an ATTRIBUTE on the block's own return value rather than a wrapping list, specifically so a
+  custom `parallel_backend` that reaches into a block's result directly (this package's own
+  test suite proves dispatch is load-bearing exactly this way) still sees the block's own
+  shape unchanged; the attribute is stripped again before the final bound object is returned,
+  so `identical()` to plain `limma::lmFit` output is unaffected. First attempt wrapped the
+  return value in `list(value=, conds=)` instead, which broke two of this package's own
+  dispatch-proof tests immediately (caught by the real `R CMD check` suite, fixed before this
+  commit) -- `calcNormFactors_parallel()` and `ComBat_seq_parallel()`'s dispatch paths are
+  left with their existing (backend-dependent) condition behaviour as a documented follow-up.
+
 - **`glmFit_rows_parallel()`: same bind+reorder fusion as match_quantiles, with dimname
   parity preserved.** Extends the previous release's scatter fusion (one allocation instead
   of rbind-then-permute's two) to the field this package's own gene-named fits actually
