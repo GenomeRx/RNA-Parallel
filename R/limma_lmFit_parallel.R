@@ -58,7 +58,7 @@ rp_row_blocks <- function(M, weights, env, workers, chunks, parallel_backend, wh
   if (!rp_branch_stable(M, w, punch)) return(serial_fn())
 
   # min_rows = 2 is exactness, not tuning: lm.fit drops a one-column response to a vector.
-  idx <- combat_row_chunks(nrow(M), workers, chunks, min_rows = 2L)
+  idx <- combat_row_chunks(nrow(M), workers, chunks, min_rows = 2L, ncol = ncol(M))
   if (length(idx) < 2L) return(serial_fn())
 
   # The fast branch reads weights[1, ] only. A matrix flagged arrayweights but varying by
@@ -81,7 +81,33 @@ rp_row_blocks <- function(M, weights, env, workers, chunks, parallel_backend, wh
   lean <- new.env(parent = rp_home())
   lean$M <- M; lean$w <- w; lean$block_fn <- block_fn
   lean$rp_weights_rows <- rp_weights_rows
-  per_block <- function(ii) block_fn(M[ii, , drop = FALSE], rp_weights_rows(w, ii))
+  # Same condition-capture pattern duplicateCorrelation_parallel already carries (limma_dupcor_
+  # parallel.R's fit_block): warnings/messages a block raises (limma's own "Partial NA
+  # coefficients", non-finite-value notices, etc.) are captured here rather than left to print
+  # from inside the worker, where some backends (PSOCK, most BiocParallel executors) swallow
+  # child stdout/conditions entirely -- what the caller sees would otherwise silently depend on
+  # which parallel_backend happened to be active, dropping real per-gene warnings on exactly
+  # the backends this package recommends for Windows.
+  #
+  # Conditions are attached as an ATTRIBUTE on the block's own return value, not a wrapping
+  # list: a custom parallel_backend (this package's own test suite includes one that pokes
+  # `result$value$sigma` directly to prove dispatch is load-bearing) reaches straight through
+  # combat_parallel_lapply's own tag wrapper to what block_fn returned, and wrapping it a
+  # second time here broke that -- `result$value` would have been THIS function's wrapper,
+  # not the fit object underneath it, silently defeating any code (test or caller) that reads
+  # the tagged result's shape directly. `attr(value, "rp_conds") <- conds` cannot collide with
+  # a real list element name and survives unchanged through untag()/rbind()/bind() exactly
+  # like any other object attribute.
+  per_block <- function(ii) {
+    conds <- list()
+    keep <- function(cnd) conds[[length(conds) + 1L]] <<- cnd
+    value <- withCallingHandlers(
+      block_fn(M[ii, , drop = FALSE], rp_weights_rows(w, ii)),
+      warning = function(w) { keep(w); invokeRestart("muffleWarning") },
+      message = function(m) { keep(m); invokeRestart("muffleMessage") })
+    if (length(conds)) attr(value, "rp_conds") <- conds
+    value
+  }
   environment(per_block) <- lean
 
   parts <- combat_parallel_check(
@@ -89,6 +115,18 @@ rp_row_blocks <- function(M, weights, env, workers, chunks, parallel_backend, wh
       idx, per_block,
       workers, parallel_backend, cells = length(M), min_cells = min_cells),
     what, idx)
+
+  # Replay each distinct condition once, from the master, same as dupcor's own replay below.
+  cnds <- unlist(lapply(parts, function(p) attr(p, "rp_conds")), recursive = FALSE)
+  for (cnd in cnds[!duplicated(vapply(cnds, conditionMessage, ""))]) {
+    cnd$call <- NULL
+    if (inherits(cnd, "warning")) warning(cnd) else message(cnd)
+  }
+  # Stripped once replayed: `out <- parts[[1L]]` below reuses chunk 1's own list as the base
+  # object for the final return value, and identical() must not see an attribute the ORIGINAL
+  # limma::lmFit never attaches -- rp_conds was only ever a transport mechanism between the
+  # worker and this replay loop, not part of the documented return shape.
+  for (k in seq_along(parts)) attr(parts[[k]], "rp_conds") <- NULL
 
   rp_invariant(parts,
                intersect(c("qr", "assign", "rank", "pivot", "cov.coefficients",
@@ -220,7 +258,7 @@ rp_row_blocks <- function(M, weights, env, workers, chunks, parallel_backend, wh
 #'
 #' @param label Optional name for this call in the timing line, when
 #'   `options(combat.timing = TRUE)` is set. Defaults to the companion and the matrix shape,
-#'   e.g. `ComBat-seq 18,270 x 1,500`; pass a cohort name to tell calls apart in a loop.
+#'   e.g. `lmFit 18,270 x 1,500`; pass a cohort name to tell calls apart in a loop.
 #' @return An `MArrayLM`, `identical()` to what the backend's own `lmFit` returns for the
 #'   same input. Under either size gate, on a branch a block would flip, or at
 #'   `workers = 1`, that is literally what it is: one plain call to the backend with a

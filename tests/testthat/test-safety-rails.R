@@ -150,14 +150,25 @@ test_that("each least-squares branch reads its own size gate", {
   # the voom/weighted one from 2e4 to the same value and switched off a split measured at
   # 2.52x-3.39x. The whole suite is blind to it by construction: setup-parallel.R sets every
   # combat.min.* to 0, and 0 is returned from the first line for both branches.
+  #
+  # The `fork_default` path this test exercises when the option is unset goes through
+  # rp_copy_free(), which is intentionally OS-gated: mclapply cannot fork on Windows, so a
+  # Windows caller correctly reads Inf (the split never runs) rather than the fork_default
+  # value a Unix caller would get. Same reason the neighbouring
+  # "the break-even gates follow the backend's copy behaviour, not the OS" test skips on
+  # Windows for this exact code path; this test asserts the OS-correct value on each platform
+  # instead of skipping outright, since the option-set branch (the actual regression this
+  # test exists to catch) is identical on every OS.
   ls_gate <- rnaparallel:::rp_ls_min_cells
+  fork_default_ls <- if (rnaparallel:::rp_copy_free("mclapply")) 6e6 else Inf
+  fork_default_cells <- if (rnaparallel:::rp_copy_free("mclapply")) 2e4 else Inf
   withr::with_options(list(combat.min.ls.cells = 6e7, combat.min.cells = NULL), {
     expect_identical(ls_gate("combat.min.ls.cells", 6e6, "mclapply"), 6e7)
-    expect_identical(ls_gate("combat.min.cells", 2e4, "mclapply"), 2e4)   # NOT 6e7
+    expect_identical(ls_gate("combat.min.cells", 2e4, "mclapply"), fork_default_cells)  # NOT 6e7
   })
   withr::with_options(list(combat.min.ls.cells = NULL, combat.min.cells = 5e5), {
     expect_identical(ls_gate("combat.min.cells", 2e4, "mclapply"), 5e5)
-    expect_identical(ls_gate("combat.min.ls.cells", 6e6, "mclapply"), 6e6)
+    expect_identical(ls_gate("combat.min.ls.cells", 6e6, "mclapply"), fork_default_ls)
   })
 })
 

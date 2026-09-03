@@ -3,6 +3,157 @@
 Windows is a supported platform, the socket backends work, and the companions no longer pay for
 work they throw away.
 
+- **`lmFit_parallel()` (both `lm.series` and `gls.series`) now replays worker warnings/messages,
+  matching `duplicateCorrelation_parallel()`'s existing behaviour.** Real per-gene warnings a
+  block raises (limma's own "Partial NA coefficients", non-finite-value notices) were silently
+  lost on PSOCK/most BiocParallel executors, which swallow child conditions entirely -- what
+  the caller saw depended on which `parallel_backend` happened to be active. `rp_row_blocks()`
+  (shared by both series functions) now captures and replays each distinct condition once,
+  the same pattern `duplicateCorrelation_parallel()` already used. Conditions are carried as
+  an ATTRIBUTE on the block's own return value rather than a wrapping list, specifically so a
+  custom `parallel_backend` that reaches into a block's result directly (this package's own
+  test suite proves dispatch is load-bearing exactly this way) still sees the block's own
+  shape unchanged; the attribute is stripped again before the final bound object is returned,
+  so `identical()` to plain `limma::lmFit` output is unaffected. First attempt wrapped the
+  return value in `list(value=, conds=)` instead, which broke two of this package's own
+  dispatch-proof tests immediately (caught by the real `R CMD check` suite, fixed before this
+  commit) -- `calcNormFactors_parallel()` and `ComBat_seq_parallel()`'s dispatch paths are
+  left with their existing (backend-dependent) condition behaviour as a documented follow-up.
+
+- **`glmFit_rows_parallel()`: same bind+reorder fusion as match_quantiles, with dimname
+  parity preserved.** Extends the previous release's scatter fusion (one allocation instead
+  of rbind-then-permute's two) to the field this package's own gene-named fits actually
+  carry: rownames are restored from `y` (the scatter places each gene at its own original
+  row, so `y`'s and the pieces' names are the same value) only when the pieces themselves
+  had rownames, reproducing `rbind()`'s own "any unnamed piece collapses the whole result to
+  unnamed" behaviour with no special-casing. A per-chunk row-count check runs BEFORE the
+  scatter rather than after, catching a wrong-length chunk (deliberately induced by
+  `test-parallel.R`'s "a GLM chunk of the wrong length is refused after the bind" test) as
+  this function's own `"bound to"` error instead of R's silent row-recycling or a generic
+  base-R replacement-length error -- caught by the real `R CMD check` test suite on the first
+  attempt at this fusion, fixed before merge, not shipped and found later.
+
+- **`match_quantiles_parallel()`: bind+reorder fused into one scatter, one allocation not two.**
+  `do.call(rbind, parts)` (allocate the whole output) then `m[ord, , drop = FALSE]` (allocate
+  it again to undo the interleaving) is now `m[idx[[k]], ] <- parts[[k]]` per chunk into a
+  single preallocated matrix -- the permute copy is gone entirely, and it was always paid on
+  the real parallel path since interleaved chunks are never already sorted. Safe specifically
+  here because `match_quantiles_rows()` already strips dimnames from every chunk, so there is
+  no rowname parity to reconstruct across the scatter; `glmFit_rows_parallel`'s equivalent
+  `bind()` carries real gene names and is left on the rbind+permute path pending that separate
+  verification. `identical()` to the pre-fusion path across the existing 204-case suite,
+  including the randomised match_quantiles equivalence tests.
+
+- **Verbose/progress format made consistent across all five companions.** A second Fable
+  review, this time of `verbose.R` and its five call sites, found the timing line, watch-mode
+  bar, and default label wording had each drifted independently:
+  - One shared label width (`RP_LABEL_WIDTH`, 40 chars) now backs the timing line, the
+    watch-mode bar's stage field, and the console tick. Previously the timing line truncated
+    at 34 and the watch bar at 28, both narrower than `duplicateCorrelation`'s own default
+    label (36 chars), so those two surfaces silently cut it mid-number
+    (`...18,270 x 1,50`) while the untruncated console tick did not.
+  - `calcNormFactors_parallel()`'s default label now reads `calcNormFactors TMM 12,000 x 700`
+    instead of bare `TMM 12,000 x 700`, matching the other four companions' "own function name
+    first" convention (`lmFit ...`, `ComBat-seq ...`, `duplicateCorrelation ...`,
+    `removeBatchEffect ...`) so a shared `combat.progress.dir` across a multi-stage script
+    groups TSV rows under a name that actually maps back to the call that produced them.
+  - Fixed two `@param label` doc examples (`lmFit_parallel()`, `duplicateCorrelation_parallel()`)
+    that had been copy-pasted from ComBat-seq's own doc and showed the wrong default string.
+  - `removeBatchEffect_parallel()` now carries the same "timing and quieting are on.exit
+    hooks" comment the other four companions already had at their own `rp_step_begin()` call.
+
+  Deferred to a follow-up (real findings, larger/riskier changes): unifying worker
+  warning/message replay behaviour (currently only `duplicateCorrelation_parallel()` collects
+  and replays distinct child conditions once; the same PSOCK/multisession swallowing risk
+  applies to the other four); and having a nested re-entry skip re-running `rp_mem_cap()` a
+  second time within one user-facing call, which can currently print a second degrade warning
+  and/or have the timing line's engine column understate the actual worker count used by an
+  inner dispatch.
+
+- **Fable review pass: dispatch overhead trimmed on every call, socket serialization halved on
+  the edgeR RLE path, one fewer allocation on ComBat-seq's quantile matcher.** Three concrete
+  fixes from a full-package memory review, each verified with the existing 204-case identical()
+  suite (0 new failures) and a full `R CMD check` (0 ERROR/WARNING):
+  - `combat_parallel_lapply()` used to build its chunk-tagging machinery (`idx_tagged`,
+    `f_tagged`, `untag`) before checking whether the call was even going to dispatch. Every
+    early-return path (nested-worker re-entry, `combat.fork = FALSE`, a degenerate single
+    chunk/worker) paid a full duplicate of `idx` plus a closure allocation for tagging it then
+    threw away unused. Moved the tagging build to right before the two branches that actually
+    consume it.
+  - `rp_apply_shim()` (the edgeR RLE column-parallel path) stored the matrix twice per socket
+    task: once directly, once inside `FUN`'s own captured frame (`.calcFactorRLE`'s `data`).
+    R's serializer dedups repeated objects within one environment chain, not across two, so
+    each task wrote the whole matrix twice and each worker unserialized two copies. Now reads
+    `data` back out of `FUN`'s own environment instead of storing a second reference, halving
+    per-task payload on the exact path the largest inputs take (falls back to the old
+    double-store if a future edgeR release renames the internal variable).
+  - `match_quantiles_rows()` allocated a fresh logical `NA` matrix and then promoted it via
+    `out[] <- counts_sub`, paying for a type that was always going to become `counts_sub`'s own
+    storage mode. Now copies `counts_sub` directly and strips dimnames, one allocation instead
+    of two, same output.
+
+- **`rp_mem_cap()` refuses to fork past what the machine can hold.** Forking N workers off a
+  large parent is copy-on-write, so it does not cost N times the parent, but a row-split fit
+  writes a real fraction of it, and a machine without swap does not return an allocation error
+  when that fraction runs out: the kernel SIGKILLs the process, with no condition to catch, no
+  traceback, and `mclapply` reporting nothing. Measured on a 40,609 x 9,493 matrix, 125 GB, no
+  swap: 16 workers off a 50 GB parent died, 8 off 100 GB died, 4 off 23 GB died at 111 GB, 2 off
+  23 GB survived. Reads `MemAvailable` and the caller's own RSS from `/proc` on Linux, or via
+  the `ps` package (`ps_system_memory()`/`ps_memory_info()`) on Windows and macOS, before every
+  dispatch, and degrades the worker count instead, warning with the three numbers so a run that
+  cannot proceed at full concurrency says why instead of vanishing. NA when neither source is
+  available means proceed unchanged; the guard never blocks what it cannot measure.
+  `combat.mem.divergence` (default 1: assume a worker can dirty the whole parent) is the
+  fraction of the parent each worker is assumed to dirty, workload-dependent so it is an
+  option; `combat.mem.guard = FALSE` disables the whole check. The default was raised from
+  an earlier 0.25 after checking it against the PR's own measured numbers: 4 workers off a
+  23 GB parent that actually grew to 111 GB (a real divergence of about 0.96) computed only
+  23 GB needed at 0.25 and would have proceeded unwarned into the same kill. Lower it
+  explicitly for a workload known to dirty less, e.g. a per-column trimmed mean.
+
+- **`rnaparallel_set_mem_limit()`** is a second, independent net against the same SIGKILL:
+  `R_MAX_VSIZE` is R's own vector-heap ceiling, checked on every allocation, that turns an
+  overshoot into a catchable `cannot allocate vector of size X` error rather than leaving the
+  kernel to silently kill the process. `rp_mem_cap()` above degrades the worker count based
+  on a live reading before a fork; this sets a fixed session-wide ceiling instead, in
+  `~/.Renviron` (or a `path` you pass), by reading total RAM, halving it, and rounding to the
+  nearest of 8/16/32/64/128/256/512/1024 GB. `dry_run = TRUE` shows the computed value without
+  writing anything; the write only takes effect on the NEXT R session, since `.Renviron` is
+  read once at startup.
+
+- **A fork whose master died now exits on its own.** Reparented to init, an orphaned fork kept
+  running and holding its share of the matrix for as long as the machine stayed up; two runs
+  left 111 GB and 116 GB stranded that way, immune to `SIGTERM` because R installs a handler
+  and the worker is blocked mid-computation. Every worker now checks `Sys.getppid() == 1` and
+  exits if its master is gone. `Sys.getppid()` is not a base R function on every build (it does
+  not exist at all on the R 4.6.1 UCRT Windows build this package is tested on), so the check
+  now goes through `rp_getppid()`, which falls back to `ps::ps_ppid()` when installed and
+  returns `NA` (skip the check) otherwise, rather than crashing every single dispatch on a
+  build that lacks it.
+
+- **`rnaparallel_progress(dir, watch = TRUE)` now renders a live `|====------|` bar**, matching
+  `data.table::fread()`'s own style: `|==================================================| 62%
+  ComBat-seq 40,609 x 9,493 79/128 ETA 16:42`. Same mechanism as before, watched from a SEPARATE
+  process/terminal while the running session is blocked inside its parallel call.
+  Redraws now TAIL each worker's file rather than re-reading it whole every poll:
+  verified on a real run, 32 of 34 polls against a growing file skipped or only read the
+  new bytes, the other 2 being the first sighting of each worker's file. Matters most on a
+  long `watch = TRUE` session against a long-running dispatch, where the read cost used to
+  grow with elapsed time even though each poll only cares about the handful of lines
+  written since the last one. Stall detection now tracks a "done" row the same as a "start"
+  row, not `started` alone: a run whose chunks all dispatched early (`preschedule = TRUE`) but
+  whose "done" rows are still trickling in used to hit the stall exit mid-run with a misleading
+  "no new chunks" message, even though chunks were actively finishing. A stall also now returns
+  the last real progress summary instead of `NULL`, matching the function's own documented
+  return contract, and includes the stalled-chunk count in the stall message when nonzero.
+  `interval` and `stall_after` are validated (must be a single positive number) rather than
+  reaching `Sys.sleep()` as a raw error or busy-polling on a bad value.
+
+- **Peak RSS in the `combat.timing` line**, from `VmHWM` on Linux or `ps::ps_memory_info()`'s
+  peak working set on Windows/macOS, so the number that decides whether a
+  fit survives is visible in the log a run already produces: `pooled ComBat-seq    mclapply
+  x16    30.3h    peak 51 GB`.
+
 - **`combat.progress` is now on by default.** No option needs to be set: every parallel call
   ticks a live "N dispatched" line, overwritten in place, so you can always tell a slow run from
   a stuck one. `combat.timing` alone only reports after a call finishes, and ComBat-seq alone

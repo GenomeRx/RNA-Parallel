@@ -4,14 +4,27 @@
 \alias{rnaparallel_progress}
 \title{Summarise chunk progress from a \code{combat.progress.dir}, with an ETA}
 \usage{
-rnaparallel_progress(dir)
+rnaparallel_progress(dir, watch = FALSE, interval = 1, stall_after = 600)
 }
 \arguments{
 \item{dir}{Directory passed as \code{options(combat.progress.dir = ...)} in the running session.}
+
+\item{watch}{If \code{TRUE}, poll and redraw a live bar every \code{interval} seconds instead of
+returning once. Meant for a SEPARATE terminal/session next to the one running the actual
+computation; stop it with Ctrl-C or \code{interval} reaching a stall (see below).}
+
+\item{interval}{Seconds between redraws in watch mode.}
+
+\item{stall_after}{Seconds with no new "done" OR "start" row before watch mode gives up
+and returns, so a finished or crashed run does not poll forever with nobody watching.
+Default 10 minutes: long enough to survive one very slow chunk, short enough to actually
+stop.}
 }
 \value{
 Invisibly, a list with \code{done}, \code{started}, \code{stalled} (started, never finished) and
-\code{eta} (a \code{POSIXct}, or \code{NA} if fewer than two chunks have finished). Also prints one line.
+\code{eta} (a \code{POSIXct}, or \code{NA} if fewer than two chunks have finished) -- on every return
+path, including a stall: the last summary read is still the most useful answer, and
+was already computed, so there is no reason to throw it away for \code{NULL}.
 }
 \description{
 Reads every \verb{rnaparallel-*.tsv} file in \code{dir}, pairs each chunk's start/done rows, and
@@ -19,6 +32,15 @@ reports completed chunks, a mean seconds-per-chunk from the ones that finished, 
 projected finish time. Meant to be called from a SEPARATE R session while the run that is
 writing the files is still blocked inside its parallel call: that is the whole point of
 writing to a file rather than a console the blocked session cannot flush anyway.
+}
+\details{
+A single continuously-updating bar DURING one blocking call is not something the running
+session can print: once it calls into \code{mclapply}/\code{future}/\code{BiocParallel}/\code{foreach} it is
+synchronously waiting and cannot redraw a console until the call returns, which is the whole
+reason this writes to files instead. \code{watch = TRUE} gets the live-bar behaviour anyway, from
+the side that CAN keep drawing: this function's own process, polling the files and
+redrawing a real \verb{[#####-----] 47\%} bar with the current stage name, once a second, until
+every chunk in the last dispatch is done.
 }
 \examples{
 \dontrun{
@@ -28,5 +50,8 @@ ComBat_seq_parallel(counts, batch = batch, group = group, workers = 16L)
 
 # from a second session, while the first is still running:
 rnaparallel_progress("/tmp/rnaparallel-progress")
+
+# or, for a live-updating bar in that second session:
+rnaparallel_progress("/tmp/rnaparallel-progress", watch = TRUE)
 }
 }

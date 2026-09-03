@@ -147,10 +147,21 @@ combat_backend <- function(fn = NULL) {
 #' @param min_rows Smallest number of rows any chunk may hold. The chunk count is
 #'   clamped to `ntag %/% min_rows` so no chunk falls below it. Callers whose original
 #'   function branches on block shape pass 2; the default 1 reproduces the old clamp.
+#' @param ncol Column count of the matrix being split, if known. Together with
+#'   `getOption("combat.mem.chunk.cells")` this raises `nch` so no single chunk holds more
+#'   than that many cells (`rows_in_chunk * ncol`), REGARDLESS of what `workers`/`chunks`
+#'   asked for. Opt-in and off by default: unlike the worker-count guard (`rp_mem_cap()`),
+#'   which reads live available RAM, this has no live-RAM auto-derivation, because the bytes
+#'   a chunk actually costs beyond the raw cell count is workload-dependent (a GLM fit copies
+#'   design matrices and offsets several times over; a column trim does not) and this package
+#'   does not have measured per-companion multipliers to convert "cells" to "bytes" safely --
+#'   guessing one would either erase the speedup (too conservative) or not actually bound
+#'   memory (too loose). Pass the cell budget you have measured for your own workload.
+#'   `NULL` (the default) or `ncol` unknown means this has no effect, identical to before.
 #' @return A list of integer vectors covering `seq_len(ntag)` exactly once.
 #' @noRd
 combat_row_chunks <- function(ntag, workers = 4L, chunks = NULL, interleave = TRUE,
-                              min_rows = 1L) {
+                              min_rows = 1L, ncol = NULL) {
   ntag <- as.integer(ntag)
   if (ntag < 1L) stop("no rows to split", call. = FALSE)
   # An unusable `chunks` clamps to one chunk rather than erroring: results stay correct and
@@ -165,6 +176,18 @@ combat_row_chunks <- function(ntag, workers = 4L, chunks = NULL, interleave = TR
   # Measured: 4080 of 16000 one-gene blocks not identical() to serial. At min_rows = 1
   # this reduces to the old clamp exactly, so ComBat-seq callers are unaffected.
   nch <- max(1L, min(nch, ntag %/% min_rows))
+  # A chunk-count FLOOR, raised past whatever was requested, never lowered below it: more
+  # chunks at the same concurrency changes only how the SAME work is split, never which rows
+  # go where or in what order they come back, so this cannot change a single output value --
+  # combat_row_order() restores original order regardless of nch, and the test suite asserts
+  # identical() output across a range of explicit chunk counts already. Verified against
+  # min_rows the same way: floored again by ntag %/% min_rows so the exactness constraint
+  # above still wins if the two ever conflict.
+  budget <- suppressWarnings(as.numeric(getOption("combat.mem.chunk.cells", NA_real_)))
+  if (!is.na(budget) && budget > 0 && !is.null(ncol) && is.finite(ncol) && ncol > 0) {
+    need <- ceiling((ntag * ncol) / budget)
+    nch <- as.integer(max(1L, min(max(nch, need), ntag %/% min_rows)))
+  }
   if (nch == 1L) return(list(seq_len(ntag)))
   # `rep_len(seq_len(nch), ntag)` puts chunk k at positions k, k + nch, k + 2*nch, ..., and
   # split() returns those groups in sorted key order, so group k IS seq.int(k, ntag, by = nch).
@@ -399,6 +422,151 @@ combat_default_backend <- function() {
 
 
 
+# ---- memory guard -------------------------------------------------------------
+
+#' This process's own parent PID, or NA when nothing on this build can read it
+#'
+#' `Sys.getppid()` is not a base R function on every build: it does not exist at all on the
+#' R 4.6.1 UCRT Windows build this package is verified against (`exists("Sys.getppid")` is
+#' FALSE there, not merely unimplemented for one caller), so calling it unconditionally
+#' crashed every dispatch on that build rather than skipping cleanly. Falls back to
+#' `ps::ps_ppid()` when that package is installed and `Sys.getppid()` is not present; NA
+#' otherwise, and NA is treated by every caller as "cannot tell, skip the check", the same
+#' convention as the rest of the memory-guard readers in this file.
+#' @noRd
+rp_getppid <- function() {
+  if (exists("Sys.getppid", where = baseenv(), mode = "function")) {
+    return(tryCatch(get("Sys.getppid", envir = baseenv())(), error = function(e) NA_integer_))
+  }
+  if (requireNamespace("ps", quietly = TRUE)) {
+    return(tryCatch(as.integer(ps::ps_ppid()), error = function(e) NA_integer_))
+  }
+  NA_integer_
+}
+
+#' Bytes of RAM the kernel thinks are actually obtainable right now
+#'
+#' MemAvailable, not MemFree: free excludes reclaimable page cache and reads far
+#' lower than what a fork can really have. `/proc/meminfo` on Linux; the `ps` package's
+#' `ps_system_memory()$avail` as a cross-platform fallback when installed, so the guard
+#' this branch is named for is not inert everywhere the package is actually developed
+#' (Windows and macOS both lack `/proc`). NA when neither source is available, which
+#' every caller treats as "cannot tell, proceed".
+#' @noRd
+rp_mem_available <- function() {
+  if (file.exists("/proc/meminfo")) {
+    l <- tryCatch(readLines("/proc/meminfo", n = 64L), error = function(e) character())
+    m <- grep("^MemAvailable:", l, value = TRUE)
+    if (length(m)) return(as.numeric(gsub("\\D", "", m[1L])) * 1024)
+    return(NA_real_)
+  }
+  if (requireNamespace("ps", quietly = TRUE)) {
+    v <- tryCatch(ps::ps_system_memory()$avail, error = function(e) NA_real_)
+    if (!is.na(v)) return(as.numeric(v))
+  }
+  NA_real_
+}
+
+#' Total installed bytes of RAM, not what is currently free
+#'
+#' MemTotal from /proc/meminfo on Linux; `Get-CimInstance Win32_ComputerSystem` via
+#' PowerShell on Windows, since R_MAX_VSIZE is meaningful there too and
+#' rnaparallel_set_mem_limit() needs a number to halve on any platform a caller runs on.
+#' `wmic` was tried first and dropped: it no longer exists on current Windows builds
+#' (removed from Windows 11 24H2 onward), so it returned "command not found" rather than a
+#' number and rnaparallel_set_mem_limit() read that as "cannot tell" on every affected
+#' machine. NA when neither source is readable, which callers treat as "ask the user".
+#' @noRd
+rp_mem_total <- function() {
+  if (file.exists("/proc/meminfo")) {
+    l <- tryCatch(readLines("/proc/meminfo", n = 64L), error = function(e) character())
+    m <- grep("^MemTotal:", l, value = TRUE)
+    if (length(m)) return(as.numeric(gsub("\\D", "", m[1L])) * 1024)
+    return(NA_real_)
+  }
+  if (identical(.Platform$OS.type, "windows")) {
+    out <- tryCatch(
+      system2("powershell", c("-NoProfile", "-Command",
+              "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory"),
+              stdout = TRUE, stderr = FALSE),
+      error = function(e) character())
+    val <- suppressWarnings(as.numeric(trimws(out)))
+    val <- val[!is.na(val) & val > 0]
+    if (length(val)) return(val[1L])
+  }
+  NA_real_
+}
+
+
+#' Resident bytes of this process
+#'
+#' Field 24 of /proc/self/stat is RSS in pages on Linux. `ps::ps_memory_info()$wset` (the
+#' working set, RSS's Windows/macOS equivalent) as a cross-platform fallback, same reason
+#' `rp_mem_available()` above has one: the guard cannot cap anything on a platform where
+#' this always reads NA.
+#' @noRd
+rp_mem_rss <- function() {
+  if (file.exists("/proc/self/stat")) {
+    v <- tryCatch(strsplit(readLines("/proc/self/stat", n = 1L), " ", fixed = TRUE)[[1L]],
+                  error = function(e) character())
+    if (length(v) >= 24L) return(suppressWarnings(as.numeric(v[24L])) * 4096)
+    return(NA_real_)
+  }
+  if (requireNamespace("ps", quietly = TRUE)) {
+    v <- tryCatch(ps::ps_memory_info()[["wset"]], error = function(e) NA_real_)
+    if (!is.null(v) && !is.na(v)) return(as.numeric(v))
+  }
+  NA_real_
+}
+
+#' Cap workers at what the machine can actually hold
+#'
+#' Forking is copy-on-write, so N workers do not cost N times the parent. They cost
+#' whatever each one writes to, and for a row-split fit over a large matrix that is a
+#' real fraction of it. When the total exceeds what is available the kernel does not
+#' return an allocation error to R: it SIGKILLs the process. There is no condition to
+#' catch, no traceback, and mclapply reports nothing, so the run simply disappears.
+#' Measured on a 40,609 x 9,493 matrix with 125 GB and no swap: 16 workers off a 50 GB
+#' parent died, 8 off 100 GB died, 4 off 23 GB died at 111 GB, 2 off 23 GB survived.
+#'
+#' So refuse at the door instead. Degrading to fewer workers finishes late; being
+#' killed loses the whole run and says nothing about why.
+#'
+#' combat.mem.divergence is the fraction of the parent each worker is assumed to
+#' dirty. It is workload-dependent, not a constant, which is why it is an option: a
+#' row-split GLM fit dirties far more than a per-column trimmed mean.
+#'
+#' Default is 1 (assume a worker can dirty the WHOLE parent), not a smaller number. The
+#' PR that added this guard measured 4 workers off a 23 GB parent growing to 111 GB before
+#' dying, a real per-worker divergence of about 0.96 -- close enough to 1 to have needed a
+#' default at least that high to catch the exact case the guard exists for. A default of
+#' 0.25 (the guard's own first draft) computes only 23 GB needed against that same parent
+#' and would have let all 4 workers through unwarned, straight into the same kill. Lower
+#' `combat.mem.divergence` explicitly for a workload known to dirty less, e.g. a per-column
+#' fit; the safe default has to assume the worse case it was built to prevent, not the best.
+#' @noRd
+rp_mem_cap <- function(workers) {
+  if (!isTRUE(rp_opt_flag("combat.mem.guard", default = TRUE))) return(workers)
+  if (workers <= 1L) return(workers)
+  avail <- rp_mem_available(); rss <- rp_mem_rss()
+  if (is.na(avail) || is.na(rss) || rss <= 0) return(workers)   # cannot tell, do not interfere
+  frac <- rp_opt_num("combat.mem.divergence", 1)
+  if (frac <= 0) return(workers)
+  headroom <- avail * 0.8            # leave a fifth for everything that is not this fit
+  need <- rss * frac * workers
+  if (need <= headroom) return(workers)
+  fit <- max(1L, as.integer(floor(headroom / (rss * frac))))
+  if (fit >= workers) return(workers)
+  warning(sprintf(
+    paste0("rnaparallel: %d workers need ~%.0f GB on top of a %.0f GB parent and only ",
+           "%.0f GB is available, which on a machine without swap is a kernel kill, not ",
+           "an R error. Using %d instead. Set options(combat.mem.divergence=) if this ",
+           "workload dirties less, or options(combat.mem.guard=FALSE) to disable."),
+    workers, need / 2^30, rss / 2^30, avail / 2^30, fit), call. = FALSE)
+  fit
+}
+
+
 # ---- entry-point prologue -----------------------------------------------------
 
 #' Validate the four shared controls once, identically, for every entry point
@@ -427,7 +595,7 @@ rp_prologue <- function(workers) {
       }
     }
   }
-  w
+  rp_mem_cap(w)
 }
 
 
@@ -1068,6 +1236,30 @@ combat_parallel_lapply <- function(idx, f, workers,
   # output at serial pace and is indistinguishable from one that forked, unless something says so
   if (isTRUE(cells < mc)) { rp_count(FALSE); return(lapply(idx, f)) }
 
+  # A dispatch already running inside one of this package's workers must not open a second
+  # pool. ComBat-seq dispatches the tagwise loop ACROSS BATCHES and ships the original closure,
+  # whose environment still carries the rebound `estimateGLMTagwiseDisp`; inside the worker
+  # that symbol dispatches AGAIN over gene rows. The result is workers + workers^2 processes:
+  # measured 2 outer and 4 inner for `workers = 2L` on Windows, which extrapolates to 272 at
+  # the 16-worker arm, each one a fresh R process with edgeR and limma loaded.
+  #
+  # This used to be handled by `mc.allow.recursive = FALSE`, but that is an argument to
+  # parallel::mclapply and guards the fork branch alone. On Windows mclapply is serial and
+  # foreach/PSOCK is the only backend that runs workers at all, so the one platform that
+  # needed the guard was the one platform without it. The flag is process-local and set by
+  # `f_tagged` below, so this covers every backend, custom executors included.
+  #
+  # A caller's OWN parallel loop is unaffected: nothing marks their workers, so a companion
+  # called once per cohort inside their loop still parallelises, which is the nesting pattern
+  # the documentation recommends. Checked BEFORE tagging is built (moved ahead of it): this
+  # gate, like forced-serial/degenerate below, returns lapply(idx, f) untagged, so building
+  # idx_tagged/f_tagged/untag before it paid a full idx duplicate plus a closure alloc on
+  # every nested-worker call for nothing.
+  if (nzchar(Sys.getenv("RNAPARALLEL_IN_WORKER"))) {
+    rp_count(FALSE)
+    return(lapply(idx, f))
+  }
+
   # Every job carries its chunk number, and the number comes back with the result. Checking
   # only the LENGTH of what a backend returns cannot tell a correct answer from the same
   # chunks in the wrong order, and binding a reordered list scrambles genes silently rather
@@ -1086,6 +1278,7 @@ combat_parallel_lapply <- function(idx, f, workers,
   # options() unless told to, and rp_progress_dir()/the stage label would silently read as
   # unset there. mclapply's forked children do inherit a copy, but capturing here keeps one
   # code path for all four backends instead of a fork-only shortcut that quietly breaks PSOCK.
+  .lean_tag$master_pid     <- Sys.getpid()
   .lean_tag$progress_dir   <- rp_progress_dir()
   .lean_tag$progress_stage <- .rp_dispatch$progress_label %||% "dispatch"
   f_tagged <- function(ii) {
@@ -1114,6 +1307,28 @@ combat_parallel_lapply <- function(idx, f, workers,
       rp_progress_file_write(progress_dir, progress_stage, k, "start")
       on.exit(rp_progress_file_write(progress_dir, progress_stage, k, "done"), add = TRUE)
     }
+    # A fork whose master was killed is reparented to init and keeps running, holding its
+    # share of the matrix for as long as the machine is up. Nothing collects its result and
+    # nothing reaps it, so the memory the master died for stays gone: measured at 111 GB and
+    # 116 GB held by such orphans on two separate runs. SIGTERM does not clear them either,
+    # because R installs a handler and the worker is blocked, so only SIGKILL works and only
+    # if somebody notices. getppid() == 1 is the one signal a fork can read for itself.
+    #
+    # Sys.getppid() is not a base R function on every build: it does not exist at all on the
+    # R 4.6.1 UCRT Windows build this was verified against (`exists("Sys.getppid")` is FALSE,
+    # not merely unavailable to a worker), and the original code called it unconditionally,
+    # which crashed every single dispatch under a real future::multisession run with "could
+    # not find function Sys.getppid" -- not a worker-only failure, the whole mechanism assumed
+    # a base function that is not universally present. rp_getppid() below fails to NA rather
+    # than erroring, and NA skips the check exactly like the platforms that never had
+    # Sys.getppid to begin with: on Windows there is no fork at all for this to protect
+    # against, so skipping is correct there regardless.
+    #
+    # Guarded on the pid differing from the master's: f_tagged also runs IN the master under a
+    # serial or custom backend, and quitting there would take the caller's whole session down.
+    # A master launched with setsid (any nohup/detached render) legitimately has ppid 1.
+    if (Sys.getpid() != master_pid && isTRUE(rp_getppid() == 1L))
+      quit(save = "no", status = 0L, runLast = FALSE)
     list(combat_chunk = k, value = f(ii))
   }
   environment(f_tagged) <- .lean_tag
@@ -1157,27 +1372,6 @@ combat_parallel_lapply <- function(idx, f, workers,
     spare <- which(!filled)
     for (j in which(!ok)) if (length(spare)) { res[spare[1]] <- list(out[[j]]); spare <- spare[-1] }
     res
-  }
-
-  # A dispatch already running inside one of this package's workers must not open a second
-  # pool. ComBat-seq dispatches the tagwise loop ACROSS BATCHES and ships the original closure,
-  # whose environment still carries the rebound `estimateGLMTagwiseDisp`; inside the worker
-  # that symbol dispatches AGAIN over gene rows. The result is workers + workers^2 processes:
-  # measured 2 outer and 4 inner for `workers = 2L` on Windows, which extrapolates to 272 at
-  # the 16-worker arm, each one a fresh R process with edgeR and limma loaded.
-  #
-  # This used to be handled by `mc.allow.recursive = FALSE`, but that is an argument to
-  # parallel::mclapply and guards the fork branch alone. On Windows mclapply is serial and
-  # foreach/PSOCK is the only backend that runs workers at all, so the one platform that
-  # needed the guard was the one platform without it. The flag is process-local and set by
-  # `f_tagged` above, so this covers every backend, custom executors included.
-  #
-  # A caller's OWN parallel loop is unaffected: nothing marks their workers, so a companion
-  # called once per cohort inside their loop still parallelises, which is the nesting pattern
-  # the documentation recommends.
-  if (nzchar(Sys.getenv("RNAPARALLEL_IN_WORKER"))) {
-    rp_count(FALSE)
-    return(lapply(idx, f))
   }
 
   if (custom) {
@@ -1254,20 +1448,20 @@ combat_parallel_lapply <- function(idx, f, workers,
     mclapply = {
       # fork only. Windows has no fork, so fall back rather than error.
       if (.Platform$OS.type == "windows") {
-    # a silent serial run looks identical to a parallel one until you time it
-    if (is.null(.combat_clusters$warned_windows)) {
-      # Not foreach. Measured on Windows, foreach fell 1.18x, 0.94x, 0.57x, 0.28x at 2, 4, 8
-      # and 16 workers while future held 2.92x on the cohort of the day, and combat_default_backend()
-      # picks future itself once a plan exists. Sending people to the slower one at the exact
-      # moment they discover the problem is the opposite of helping.
-      message("mclapply cannot fork on Windows, so this ran serially. ",
-              "Set future::plan(future::multisession, workers = N) and this will use the ",
-              "future backend automatically.")
-      .combat_clusters$warned_windows <- TRUE
+      # a silent serial run looks identical to a parallel one until you time it
+      if (is.null(.combat_clusters$warned_windows)) {
+        # Not foreach. Measured on Windows, foreach fell 1.18x, 0.94x, 0.57x, 0.28x at 2, 4, 8
+        # and 16 workers while future held 2.92x on the cohort of the day, and combat_default_backend()
+        # picks future itself once a plan exists. Sending people to the slower one at the exact
+        # moment they discover the problem is the opposite of helping.
+        message("mclapply cannot fork on Windows, so this ran serially. ",
+                "Set future::plan(future::multisession, workers = N) and this will use the ",
+                "future backend automatically.")
+        .combat_clusters$warned_windows <- TRUE
+      }
+      rp_count_serial_after_all()   # it did not fork; the line must not claim it did
+      return(lapply(idx, f))
     }
-    rp_count_serial_after_all()   # it did not fork; the line must not claim it did
-    return(lapply(idx, f))
-  }
       # mc.allow.recursive = FALSE, or a caller who wraps this in their own
       # mclapply/future_lapply over cohorts multiplies the worker count instead of
       # reusing it: 3 cohorts x 4 workers measured 12 concurrent grandchildren.
@@ -1533,7 +1727,7 @@ glmFit_rows_parallel <- function(y, design, dispersion, offset, weights = NULL,
                                  workers = 4L, chunks = NULL,
                                  parallel_backend = getOption("combat.backend", combat_default_backend())) {
   y <- as.matrix(y)
-  idx <- combat_row_chunks(nrow(y), workers = workers, chunks = chunks)
+  idx <- combat_row_chunks(nrow(y), workers = workers, chunks = chunks, ncol = ncol(y))
 
   # Without an explicit offset each worker rebuilds library sizes from its own genes, which
   # moved coefficients by 1.8 in testing and raises nothing. Refuse rather than guess.
@@ -1609,22 +1803,50 @@ glmFit_rows_parallel <- function(y, design, dispersion, offset, weights = NULL,
 
   # chunks are interleaved, so every gene-indexed result comes back permuted
   ord <- combat_row_order(idx)
-  # `ord` is a permutation of seq_len(nrow(y)), and the only sorted permutation of 1:n is 1:n,
-  # so an unsorted test decides exactly whether the gather moves anything. At one chunk both
-  # the rbind and the gather are no-ops on the values and pure copies in cost: measured on an
-  # 18,270 x 1,500 field, 136 ms for the rbind and 53 ms for the permute, both removed. That is
-  # the documented `workers = 1` and `chunks = 1` path, which paid for two full copies of every
-  # bound field to return what it was given. is.matrix guards the single-chunk shortcut so a
-  # vector field still goes through rbind, which would legitimately promote it to one row.
+  # Fused bind+reorder: scatter each chunk directly into a single preallocated matrix at its
+  # final row positions (`m[idx[[k]], ] <- pieces[[k]]`) instead of `do.call(rbind, pieces)`
+  # (one full allocation) followed by `m[ord, , drop = FALSE]` (a second full allocation to
+  # undo the interleaving) -- same fusion as match_quantiles_parallel's bind, applied here with
+  # extra care because these fields carry real gene names. A preallocated matrix() starts with
+  # NULL dimnames, and `m[rows, ] <- piece` copies VALUES only, never names, so dimnames must
+  # be set explicitly afterward -- but that turns out to be simpler than rbind's own collapse
+  # behaviour, not harder: rbind() with any piece missing rownames collapses the whole result
+  # to unnamed rows (measured in rp_bind_rows, helper_limma_parallel.R), and a preallocated
+  # matrix already starts unnamed, so "only set rownames if pieces HAD them" reproduces that
+  # collapse exactly with no special-casing. Rownames set from `y` itself (not the pieces)
+  # since the scatter places each gene at its own original row position by construction --
+  # y[ii, ] already keeps y's own rownames for that slice, so the two are the same value.
   bind <- function(nm) {
     pieces <- lapply(fits, function(f) f[[nm]])
-    m <- if (length(pieces) == 1L && is.matrix(pieces[[1L]])) pieces[[1L]]
-         else do.call(rbind, pieces)
+    if (length(pieces) == 1L && is.matrix(pieces[[1L]])) {
+      m <- pieces[[1L]]
+    } else {
+      p1 <- pieces[[1L]]
+      m <- matrix(vector(typeof(p1), nrow(y) * ncol(p1)), nrow(y), ncol(p1))
+      # Checked per chunk BEFORE the scatter, not after: `m[idx[[k]], ] <- pieces[[k]]` with a
+      # too-long piece recycles across rows silently (R's own assignment recycling, not an
+      # error) and a too-short one errors with base R's own "number of items to replace is
+      # not a multiple of replacement length" rather than this function's own "bound to"
+      # message. rbind() caught the same corruption differently: an over-long chunk changed
+      # the TOTAL row count post-bind, which the check after this loop compared against
+      # nrow(y). A per-chunk check here is strictly earlier and covers the recycle case that
+      # comparing only the final total would miss (two chunks off by +1/-1 could recycle-hide
+      # a wrong total by coincidence in a way this loop's per-chunk check cannot).
+      for (k in seq_along(pieces)) {
+        if (nrow(pieces[[k]]) != length(idx[[k]])) {
+          stop("glmFit_rows_parallel: field '", nm, "' bound to ", nrow(pieces[[k]]),
+               " rows where ", nrow(y), " were dispatched", call. = FALSE)
+        }
+        m[idx[[k]], ] <- pieces[[k]]
+      }
+      if (!is.null(rownames(p1))) rownames(m) <- rownames(y)
+      if (!is.null(colnames(p1))) colnames(m) <- colnames(p1)
+    }
     if (nrow(m) != nrow(y)) {
       stop("glmFit_rows_parallel: field '", nm, "' bound to ", nrow(m), " rows where ",
            nrow(y), " were dispatched", call. = FALSE)
     }
-    if (is.unsorted(ord)) m[ord, , drop = FALSE] else m
+    m
   }
   vec <- function(nm) {
     v <- unlist(lapply(fits, function(f) f[[nm]]), use.names = FALSE)
@@ -1709,8 +1931,14 @@ glmFit_rows_parallel <- function(y, design, dispersion, offset, weights = NULL,
 #' Reached only through `combat_mq_dispatch()`.
 #' @noRd
 match_quantiles_rows <- function(counts_sub, old_mu, old_phi, new_mu, new_phi) {
-  out <- matrix(NA, nrow = nrow(counts_sub), ncol = ncol(counts_sub))
-  out[] <- counts_sub
+  # One copy, not two: `matrix(NA, ...)` (logical alloc) then `out[] <- counts_sub`
+  # (type-promoting realloc) paid the same result as `counts_sub` itself already IS, minus
+  # its dimnames. `out <- counts_sub; dimnames(out) <- NULL` keeps the identical type/value
+  # (no promotion needed -- counts_sub already has its final storage mode) and strips
+  # dimnames in place, matching sva::match_quantiles's dimnames-absent output the same way
+  # the old two-step did, in one allocation instead of two.
+  out <- counts_sub
+  dimnames(out) <- NULL
   big <- which(counts_sub > 1)
   if (length(big)) {
     r <- ((big - 1L) %% nrow(counts_sub)) + 1L        # gene each selected cell belongs to
@@ -1809,7 +2037,8 @@ combat_mq_dispatch <- function(mq, counts_sub, old_mu, old_phi) {
 match_quantiles_parallel <- function(mq, counts_sub, old_mu, old_phi, new_mu, new_phi,
                                      workers = 4L, chunks = NULL,
                                      parallel_backend = getOption("combat.backend", combat_default_backend())) {
-  idx <- combat_row_chunks(nrow(counts_sub), workers = workers, chunks = chunks)
+  idx <- combat_row_chunks(nrow(counts_sub), workers = workers, chunks = chunks,
+                           ncol = ncol(counts_sub))
 
   # gate resolved once, before the fork, so a worker inherits the decision rather than
   # re-deparsing the backend body once per chunk
@@ -1841,12 +2070,25 @@ match_quantiles_parallel <- function(mq, counts_sub, old_mu, old_phi, new_mu, ne
   parts <- combat_parallel_check(
     combat_parallel_lapply(idx, do_rows, workers, parallel_backend, cells = length(counts_sub)),
     "match_quantiles_parallel", idx)
-  # Same argument as glmFit_rows_parallel's bind(): one chunk makes both the rbind and the
-  # gather no-ops on the values, and a sorted `ord` makes the gather one too.
-  m <- if (length(parts) == 1L && is.matrix(parts[[1L]])) parts[[1L]]
-       else do.call(rbind, parts)
-  ord <- combat_row_order(idx)
-  if (is.unsorted(ord)) m[ord, , drop = FALSE] else m
+  # Fused bind+reorder: preallocate the output once and scatter each chunk straight into its
+  # final row positions (`m[idx[[k]], ] <- parts[[k]]`), instead of `do.call(rbind, parts)`
+  # (one full allocation) followed by `m[ord, , drop = FALSE]` (a second full allocation to
+  # undo the interleaving). Safe here specifically because match_quantiles_rows() already
+  # strips dimnames from every chunk (dimnames(out) <- NULL), so there is no rowname parity
+  # to reconstruct across the scatter -- unlike glmFit_rows_parallel's bind()/rp_bind_rows(),
+  # which carry real gene names and are left on the rbind+permute path pending that separate
+  # verification. Type-promotes to double if any chunk did (match_quantiles_rows returns
+  # integer when every cell in that chunk stayed <= 1, double the moment one took the
+  # qnbinom branch), matching what rbind() would have promoted to across all chunks combined.
+  ncol_out <- ncol(parts[[1L]])
+  if (length(parts) == 1L) {
+    m <- parts[[1L]]
+  } else {
+    ty <- if (any(vapply(parts, typeof, character(1)) == "double")) "double" else "integer"
+    m <- matrix(vector(ty, nrow(counts_sub) * ncol_out), nrow(counts_sub), ncol_out)
+    for (k in seq_along(parts)) m[idx[[k]], ] <- parts[[k]]
+  }
+  m
 }
 
 #' Row-parallel tagwise dispersion estimation
@@ -1946,7 +2188,7 @@ estimateGLMTagwiseDisp_rows_parallel <- function(y, design = NULL, dispersion = 
   if (is.null(span)) span <- if (ntag > 10) (10 / ntag)^0.23 else 1
   if (is.null(AveLogCPM)) AveLogCPM <- edgeR::aveLogCPM(y, offset = offset, weights = weights)
 
-  idx <- combat_row_chunks(ntag, workers = workers, chunks = chunks)
+  idx <- combat_row_chunks(ntag, workers = workers, chunks = chunks, ncol = ncol(y))
 
   # Rebuilt against an environment holding only what the body reads. A closure is serialised
   # WITH its defining environment, so on a socket backend this frame's live bindings and its

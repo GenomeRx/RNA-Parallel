@@ -57,7 +57,15 @@ four. The default resolved to 6 there and was optimal; raising it by hand made i
 
 \item{chunks}{Row chunks per parallel step. Defaults to \code{workers}, which is almost always
 what you want -- passing \code{chunks = workers} explicitly is redundant. Raise it above
-\code{workers} only to cut peak memory per worker, at slightly more fork overhead.}
+\code{workers} only to cut peak memory per worker, at slightly more fork overhead.
+\code{options(combat.mem.chunk.cells = N)} does this automatically: it raises the chunk count
+past whatever \code{chunks}/\code{workers} asked for so no single chunk exceeds \code{N} cells
+(\code{rows_in_chunk * ncol(counts)}), never lowers it, and never changes which rows are in
+which chunk beyond the count -- output is bit-identical regardless. Off (\code{NULL}) by
+default: unlike the worker-count guard (\code{rp_mem_cap()}), which reads live available RAM,
+this option has no auto-derivation from RAM, because a chunk's real byte cost beyond its
+raw cell count is workload-dependent across the companions and this package has no
+measured multiplier to convert cells to bytes safely for every one of them at once.}
 
 \item{parallel_backend}{One of \code{\link[=combat_backends]{combat_backends()}}, or a function
 \verb{function(idx, f, workers)} returning a list in the order of \code{idx}. The

@@ -246,8 +246,13 @@ rp_rank_once <- function(rank0) {
 #' @noRd
 rp_norm_cols <- function(ncols, cells, f, workers, chunks, parallel_backend, min_cells,
                          what) {
-  # the two-row floor is an lm.fit row-axis hazard; columns have no analogue
-  idx <- combat_row_chunks(ncols, workers = workers, chunks = chunks)
+  # the two-row floor is an lm.fit row-axis hazard; columns have no analogue.
+  # `ncol` here means "cells per column", the OTHER axis of the real matrix, since
+  # combat_row_chunks() is splitting columns and needs the per-chunk cell count to bound
+  # combat.mem.chunk.cells the same way the row-splitting callers do. cells / ncols is
+  # exactly that: total cells over columns being split leaves rows per column.
+  idx <- combat_row_chunks(ncols, workers = workers, chunks = chunks,
+                           ncol = if (ncols > 0) cells / ncols else NULL)
   parts <- combat_parallel_check(
     combat_parallel_lapply(idx, f, workers, parallel_backend, cells = cells,
                            min_cells = min_cells),
@@ -440,10 +445,31 @@ rp_apply_shim <- function(apply0, workers, chunks, parallel_backend) {
     }
     # FUN is carried over UNCHANGED and deliberately: it closes over the original's frame, which
     # is where the pooled `gm` lives, and that is the one thing each block must still read.
-    # Only X and apply0 are leaned.
+    # `X` is NOT also stored in `lean`: X here and `data` in FUN's own captured frame
+    # (.calcFactorRLE's frame, since this is always called as apply(data, 2, ...)) are the
+    # SAME matrix SEXP reached via two different environments. R's serializer dedups repeated
+    # objects within one environment chain, not across two independent ones, so storing X a
+    # second time in `lean` had a socket/future task write the whole matrix twice and a worker
+    # unserialize two separate copies of it. Reading `data` back out of FUN's own environment
+    # inside per_chunk keeps exactly one path to the matrix, so it serializes once.
     lean <- new.env(parent = rp_home())
-    lean$apply0 <- apply0; lean$X <- X; lean$FUN <- FUN
-    per_chunk <- function(jj) apply0(X[, jj, drop = FALSE], 2, FUN)
+    lean$apply0 <- apply0; lean$FUN <- FUN
+    # Confirmed at call time, not merely assumed: `data` is edgeR's own local variable name
+    # inside `.calcFactorRLE`'s body (`apply(data, 2, ...)`), so it is present in FUN's frame
+    # on every edgeR release this package supports. Falls back to shipping X the old way if a
+    # future edgeR release renames it, rather than erroring on a missing variable.
+    has_data <- tryCatch(
+      identical(get("data", envir = environment(FUN), inherits = FALSE), X),
+      error = function(e) FALSE)
+    if (has_data) {
+      per_chunk <- function(jj) {
+        X <- get("data", envir = environment(FUN), inherits = FALSE)
+        apply0(X[, jj, drop = FALSE], 2, FUN)
+      }
+    } else {
+      lean$X <- X
+      per_chunk <- function(jj) apply0(X[, jj, drop = FALSE], 2, FUN)
+    }
     environment(per_chunk) <- lean
     rp_norm_cols(ncol(X), length(X), per_chunk,
                  workers, chunks, parallel_backend,
@@ -527,8 +553,13 @@ rp_apply_shim <- function(apply0, workers, chunks, parallel_backend) {
 #'   `normLibSizes.default` when available, with the older name as a fallback.
 #'
 #' @param label Optional name for this call in the timing line, when
-#'   `options(combat.timing = TRUE)` is set. Defaults to the companion and the matrix shape,
-#'   e.g. `TMM 12,000 x 700`; pass a cohort name to tell calls apart in a loop.
+#'   `options(combat.timing = TRUE)` is set. Defaults to `calcNormFactors` plus the resolved
+#'   method and matrix shape, e.g. `calcNormFactors TMM 12,000 x 700` -- unlike the other four
+#'   companions (whose default is just their own name, e.g. `lmFit 18,270 x 1,500`), this one
+#'   also names the method, since `calcNormFactors_parallel(method = "TMM")` and `method =
+#'   "RLE"` take genuinely different code paths worth telling apart in a multi-call log or a
+#'   shared `combat.progress.dir` (`rnaparallel_progress()` groups TSV rows by this string).
+#'   Pass a cohort name to tell calls apart in a loop.
 #' @return For a matrix, the named numeric vector edgeR returns. For a
 #'   `DGEList`, the object with `$samples$norm.factors` replaced, exactly as
 #'   edgeR returns it.
@@ -566,7 +597,8 @@ calcNormFactors_parallel <- function(object, lib.size = NULL,
   # timing and quieting are on.exit hooks, so an error unwinds the sink and still reports the
   # elapsed line: a failed run says where it failed instead of vanishing. Placed after the
   # prologue because that is what resolves `workers` from NULL to a number worth printing.
-  .rp <- rp_step_begin(label, match.arg(method), object, parallel_backend, workers)
+  .rp <- rp_step_begin(label, paste("calcNormFactors", match.arg(method)), object,
+                       parallel_backend, workers)
   on.exit(rp_step_end(.rp), add = TRUE)
   if (!is.function(parallel_backend)) {
     parallel_backend <- match.arg(parallel_backend, combat_backends())
