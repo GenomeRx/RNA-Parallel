@@ -65,6 +65,9 @@ removeBatchEffect_parallel <- function(x, batch = NULL, batch2 = NULL, covariate
 
   workers <- rp_prologue(workers)
 
+  # timing and quieting are on.exit hooks, so an error unwinds the sink and still reports the
+  # elapsed line: a failed run says where it failed instead of vanishing. Placed after the
+  # prologue because that is what resolves `workers` from NULL to a number worth printing.
   .rp <- rp_step_begin(label, "removeBatchEffect", x, parallel_backend, workers)
   on.exit(rp_step_end(.rp), add = TRUE)
 

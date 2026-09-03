@@ -67,7 +67,7 @@ Clamped so no chunk holds one gene.}
 
 \item{label}{Optional name for this call in the timing line, when
 \code{options(combat.timing = TRUE)} is set. Defaults to the companion and the matrix shape,
-e.g. \verb{ComBat-seq 18,270 x 1,500}; pass a cohort name to tell calls apart in a loop.}
+e.g. \verb{lmFit 18,270 x 1,500}; pass a cohort name to tell calls apart in a loop.}
 }
 \value{
 An \code{MArrayLM}, \code{identical()} to what the backend's own \code{lmFit} returns for the
