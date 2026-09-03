@@ -235,7 +235,8 @@ rp_tail_decomposes <- function(fn, ndups, max_block) {
 #'
 #' @param label Optional name for this call in the timing line, when
 #'   `options(combat.timing = TRUE)` is set. Defaults to the companion and the matrix shape,
-#'   e.g. `ComBat-seq 18,270 x 1,500`; pass a cohort name to tell calls apart in a loop.
+#'   e.g. `duplicateCorrelation 18,270 x 1,500`; pass a cohort name to tell calls apart in a
+#'   loop.
 #' @return `list(consensus.correlation, cor, atanh.correlations)`, `identical()` to what the
 #'   backend returns for the same input.
 #'
@@ -353,7 +354,8 @@ duplicateCorrelation_parallel <- function(object, design = NULL, ndups = 2L, spa
   ngenes <- nrow(M)
   # min_rows = 1: hazard 3 is an lm.fit effect and duplicateCorrelation never reaches
   # lm.fit, so clamping to 2 here only cost parallelism on tiny inputs.
-  idx <- combat_row_chunks(ngenes, workers = workers, chunks = chunks, min_rows = 1L)
+  idx <- combat_row_chunks(ngenes, workers = workers, chunks = chunks, min_rows = 1L,
+                           ncol = ncol(M))
 
   # Rebuilt against an environment holding only what the body reads. A closure is serialised
   # WITH its defining environment, so on a socket backend this frame's live bindings and its

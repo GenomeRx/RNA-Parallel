@@ -199,8 +199,81 @@ mean anything and read `NA` until then. Off unless a directory is set; every wri
 per chunk, not per gene, so the cost is immaterial next to the compute itself even at hundreds
 of chunks over hours.
 
+**A live bar**, `data.table::fread()` style, from the same directory, from that same SEPARATE
+session:
+
+```r
+rnaparallel_progress("some/writable/path", watch = TRUE)
+#> |==================================================| 62%  ComBat-seq 40,609 x 9,493  79/128  ETA 16:42
+```
+
+Redraws every `interval` seconds (default 1) on one line, overwritten in place, same mechanism
+as the console tick above but drawn from the WATCHING process rather than the one blocked
+inside the parallel call, since only the watcher is free to keep redrawing. Stops on its own
+once `started` stops growing for `stall_after` seconds (default 600), whether that means the
+run finished or nobody is writing to `dir` at all. Each poll only reads the bytes appended
+since the last one, not the whole file again: verified against a real run, 32 of 34 polls
+either skipped a file that had not changed or only read its new bytes.
+
 `rnaparallel_stale()` returns TRUE if the package was reinstalled under a running session. The
 fix is to restart R.
+
+## Memory
+
+Forking is copy-on-write, so N workers do not cost N times the parent process. They cost
+whatever each one writes to, and for a row-split fit over a large matrix that is a real
+fraction of it. When the total exceeds what the machine has, the kernel does not hand R an
+allocation error: on a box without swap it SIGKILLs the process outright, with no condition to
+catch, no traceback, and `mclapply` reporting nothing. `future` says only that a future was
+interrupted. From outside, R vanishes.
+
+Measured on a 40,609 x 9,493 matrix, 125 GB, no swap:
+
+| workers | parent RSS | outcome |
+|---|---|---|
+| 16 | 50 GB | killed |
+| 8 | 100.8 GB | killed, 0 GB free at the fork |
+| 4 | 23 GB | killed, 23 -> 111 GB in 30s |
+| 2 | 23 GB | survived, 102 GB peak |
+
+**`rp_mem_cap()`** runs automatically before every dispatch, reading `MemAvailable` and the
+caller's own RSS from `/proc`. When the requested worker count would need more than 80% of
+what is available, it degrades to a smaller count instead and warns with all three numbers:
+
+```
+rnaparallel: 16 workers need ~40 GB on top of a 5 GB parent and only 10 GB is
+available, which on a machine without swap is a kernel kill, not an R error.
+Using 3 instead. Set options(combat.mem.divergence=) if this workload dirties
+less, or options(combat.mem.guard=FALSE) to disable.
+```
+
+`NA` off Linux (or anywhere `/proc` is missing) means proceed unchanged; the guard never blocks
+what it cannot measure. `combat.mem.divergence` (default 1, assume a worker can dirty the whole
+parent) is the fraction of the parent each worker is assumed to dirty, workload-dependent, not
+a constant; lower it explicitly for a workload known to dirty less, e.g. a per-column trimmed
+mean. `combat.mem.guard = FALSE` disables the whole check.
+
+A fork whose master was killed is reparented to init and keeps running, holding its share of
+the matrix for as long as the machine stays up; `SIGTERM` does not clear it, because R installs
+a handler and the worker is blocked mid-computation. Every worker now checks
+`Sys.getppid() == 1` and exits on its own if its master is gone.
+
+**`rnaparallel_set_mem_limit()`** is a second, independent net against the same failure.
+`rp_mem_cap()` degrades the worker count based on a live reading before a fork; this instead
+sets `R_MAX_VSIZE`, R's own vector-heap ceiling checked on every allocation, to a fixed value
+for every future session:
+
+```r
+rnaparallel_set_mem_limit(dry_run = TRUE)   # see the computed value, write nothing
+rnaparallel_set_mem_limit()                 # write it to ~/.Renviron
+```
+
+Reads total RAM, halves it by default (`fraction =`), and rounds to the nearest of
+8/16/32/64/128/256/512/1024 GB. Writes to `~/.Renviron` (or a `path` passed explicitly, which
+is also how to test this without touching a real file); the write only takes effect on the
+NEXT R session, since `.Renviron` is read once at startup. On Windows, `path.expand("~")`
+resolves via `USERPROFILE`, not the `HOME` environment variable, which matters if you were
+planning to redirect it by setting `HOME`.
 
 ## Full self-check
 
