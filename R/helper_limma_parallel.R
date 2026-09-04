@@ -183,11 +183,24 @@ rp_invariant <- function(parts, fields, what) {
 #' wrong: limma's fast path names `sigma` from `colnames(t(M))`, so dropping names makes
 #' identical() FALSE while every value is bit-equal. Reported as a divergence once already.
 #' @noRd
-rp_bind_rows <- function(parts, ord, nm, ngenes, what) {
+rp_bind_rows <- function(parts, ord, nm, ngenes, what, chunk_lens = NULL) {
   pieces <- lapply(parts, function(p) p[[nm]])
   if (is.null(pieces[[1L]])) return(NULL)
   if (is.matrix(pieces[[1L]])) {
     dn <- dimnames(pieces[[1L]])
+    # Checked per chunk BEFORE rbind when the caller can tell us the expected length per
+    # chunk: rbind()'s own row count only catches a wrong TOTAL, so two chunks off by +1/-1
+    # in opposite directions pass this check by coincidence while genes are already bound
+    # into the wrong rows. glmFit_rows_parallel's own bind() carries this same per-chunk
+    # check; this sibling (limma's lm.series/gls.series path) did not until now.
+    if (!is.null(chunk_lens)) {
+      bad <- vapply(pieces, nrow, integer(1)) != chunk_lens
+      if (any(bad)) {
+        k <- which(bad)[1]
+        stop(what, ": field '", nm, "' chunk ", k, " bound to ", nrow(pieces[[k]]),
+             " rows where ", chunk_lens[k], " were dispatched", call. = FALSE)
+      }
+    }
     m <- do.call(rbind, pieces)
     if (nrow(m) != ngenes) {
       stop(what, ": field '", nm, "' bound to ", nrow(m), " rows where ", ngenes,

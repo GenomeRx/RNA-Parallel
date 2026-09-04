@@ -135,9 +135,10 @@ rp_row_blocks <- function(M, weights, env, workers, chunks, parallel_backend, wh
                what)
 
   ord <- combat_row_order(idx)
+  chunk_lens <- lengths(idx)
   out <- parts[[1L]]
   for (nm in c("coefficients", "stdev.unscaled", "sigma", "df.residual")) {
-    out[[nm]] <- rp_bind_rows(parts, ord, nm, nrow(M), what)
+    out[[nm]] <- rp_bind_rows(parts, ord, nm, nrow(M), what, chunk_lens = chunk_lens)
   }
   out
 }
