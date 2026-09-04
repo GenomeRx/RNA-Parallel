@@ -153,6 +153,9 @@ rp_progress_tick <- function() {
   # for the whole lifetime of a worker process (see f_tagged in helper_seq_parallel.R), so
   # this is a correct "am I the master" check, not a proxy for it.
   if (nzchar(Sys.getenv("RNAPARALLEL_IN_WORKER"))) return(invisible(NULL))
+  # A reporter is rendering the bar on this same line with its own carriage returns. Two writers
+  # on one line interleave into unreadable output, so the counter stands down while it runs.
+  if (isTRUE(.rp_dispatch$reporter)) return(invisible(NULL))
   # Throttled to 4/sec: enough to prove the run is alive, not enough to slow it down or
   # flood a log file that doesn't understand a bare carriage return (each tick still costs
   # a Sys.time() read).
@@ -217,7 +220,13 @@ rp_progress_done <- function() {
 #' @noRd
 rp_progress_dir <- function() {
   d <- getOption("combat.progress.dir", NA_character_)
-  if (is.na(d) || !nzchar(d)) return(NULL)
+  if (is.na(d) || !nzchar(d)) {
+    # Default on: with no dir the run is silent for its whole duration, which is the state this
+    # package exists to fix. Under tempdir(), so it never lands in a repo.
+    d <- file.path(tempdir(), "rnaparallel-progress")
+  }
+  if (!dir.exists(d)) dir.create(d, showWarnings = FALSE, recursive = TRUE)
+  if (!dir.exists(d)) return(NULL)
   d
 }
 
@@ -431,6 +440,42 @@ rp_progress_once <- function(dir) {
 #' a different problem from printing your own progress once. A two-line redraw would need
 #' ANSI cursor-up escapes that not every terminal honours identically, so one line keeps the
 #' `|===---|` look without that risk.
+#' Render the progress bar from a process that is not blocked
+#'
+#' The console tick is emitted by the master and silenced in workers on purpose, since sixteen
+#' processes interleaving carriage returns on one line is unreadable. That leaves nobody able to
+#' report during a dispatch: the master is inside mclapply until the last chunk returns. Forking a
+#' reporter gives the bar a writer that is neither blocked nor competing, reading the same per
+#' worker files rnaparallel_progress(watch=TRUE) reads.
+#'
+#' Started and stopped inside combat_parallel_lapply so it never reaches combat_reap's snapshot.
+#' @noRd
+rp_reporter_start <- function(dir) {
+  if (is.null(dir) || .Platform$OS.type != "unix") return(NULL)
+  if (nzchar(Sys.getenv("RNAPARALLEL_IN_WORKER"))) return(NULL)   # nested dispatch, master already has one
+  if (!isTRUE(getOption("combat.fork", TRUE))) return(NULL)
+  # Quarter second before the first frame, then twice a second. Long enough that a dispatch
+  # finishing instantly never paints and erases, short enough that every call doing real work
+  # shows a bar.
+  h <- tryCatch(parallel::mcparallel({ Sys.sleep(0.25); rp_progress_watch(dir, 0.5, .Machine$integer.max) }),
+                error = function(e) NULL)
+  if (!is.null(h)) .rp_dispatch$reporter <- TRUE
+  h
+}
+
+#' @noRd
+rp_reporter_stop <- function(h) {
+  .rp_dispatch$reporter <- FALSE
+  if (is.null(h)) return(invisible(NULL))
+  try(tools::pskill(h$pid, tools::SIGKILL), silent = TRUE)
+  try(suppressWarnings(parallel::mccollect(h, wait = FALSE)), silent = TRUE)
+  # Erase the bar rather than newline past it. The reporter dies mid-frame, so whatever it had
+  # painted stays on the terminal and reads as belonging to whichever call prints next: a TMM bar
+  # sitting under an lmFit heading is worse than no bar. rp_step_end prints the real summary.
+  cat("\r", strrep(" ", 120L), "\r", sep = "", file = stderr())
+  invisible(NULL)
+}
+
 #' @noRd
 rp_progress_watch <- function(dir, interval, stall_after) {
   last_activity <- Sys.time()
