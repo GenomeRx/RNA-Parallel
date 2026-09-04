@@ -185,7 +185,14 @@ combat_row_chunks <- function(ntag, workers = 4L, chunks = NULL, interleave = TR
   # above still wins if the two ever conflict.
   budget <- suppressWarnings(as.numeric(getOption("combat.mem.chunk.cells", NA_real_)))
   if (!is.na(budget) && budget > 0 && !is.null(ncol) && is.finite(ncol) && ncol > 0) {
-    need <- ceiling((ntag * ncol) / budget)
+    # as.numeric(ntag), not bare ntag: ntag is an integer and ncol can be too (from a caller
+    # passing ncol(y) directly), so ntag * ncol is integer arithmetic that silently overflows
+    # to NA past 2^31 cells -- a real matrix size for this package's own stated audience
+    # (18,270 genes is already 40k+ cells/column at moderate sample counts; a 50k-gene x
+    # 50k-sample cohort is 2.5e9, well past the boundary). NA then propagates through `need`,
+    # `nch` and the `if (nch == 1L)` check below raises `missing value where TRUE/FALSE
+    # needed` for the exact large-matrix case this whole option exists to help.
+    need <- ceiling((as.numeric(ntag) * ncol) / budget)
     nch <- as.integer(max(1L, min(max(nch, need), ntag %/% min_rows)))
   }
   if (nch == 1L) return(list(seq_len(ntag)))
@@ -1327,8 +1334,28 @@ combat_parallel_lapply <- function(idx, f, workers,
     # Guarded on the pid differing from the master's: f_tagged also runs IN the master under a
     # serial or custom backend, and quitting there would take the caller's whole session down.
     # A master launched with setsid (any nohup/detached render) legitimately has ppid 1.
-    if (Sys.getpid() != master_pid && isTRUE(rp_getppid() == 1L))
-      quit(save = "no", status = 0L, runLast = FALSE)
+    #
+    # ppid == 1 alone is NOT "the master died": every Unix PSOCK worker is launched via
+    # `system(cmd, wait = FALSE)` (`sh -c "... &"`, confirmed in both base `parallel` and
+    # `parallelly`), which is an orphan from the moment it starts, long before any master
+    # dies -- so is any mclapply fork inside a container where R itself is PID 1. Checking
+    # ppid alone would `quit()` every one of those workers on its very first chunk, on a
+    # perfectly healthy run, and the caller would see "the worker process died ... kernel
+    # killing it for memory" for a fit that was never in trouble. The actual signal this
+    # guard needs is "the recorded master_pid is no longer alive", independent of what this
+    # worker's OWN ppid happens to be (a worker that got reparented can still ask directly
+    # whether ITS master specifically is gone). `ps::ps_handle()` throws when the pid does
+    # not exist and is silent otherwise; that liveness check works identically across every
+    # platform `ps` supports, unlike a raw `tools::pskill(pid, 0L)` "does it exist" probe,
+    # which crashes the R session outright on Windows (confirmed: signal 0 is not a
+    # supported no-op there, `pskill` calls `TerminateProcess` unconditionally).
+    if (Sys.getpid() != master_pid) {
+      master_alive <- if (requireNamespace("ps", quietly = TRUE)) {
+        tryCatch({ ps::ps_handle(master_pid); TRUE }, error = function(e) FALSE)
+      } else TRUE   # cannot check without ps: assume alive, same "cannot tell, proceed"
+                    # convention every other memory-guard reader in this file uses on NA.
+      if (!master_alive) quit(save = "no", status = 0L, runLast = FALSE)
+    }
     list(combat_chunk = k, value = f(ii))
   }
   environment(f_tagged) <- .lean_tag
@@ -1822,7 +1849,7 @@ glmFit_rows_parallel <- function(y, design, dispersion, offset, weights = NULL,
       m <- pieces[[1L]]
     } else {
       p1 <- pieces[[1L]]
-      m <- matrix(vector(typeof(p1), nrow(y) * ncol(p1)), nrow(y), ncol(p1))
+      m <- matrix(vector(typeof(p1), as.numeric(nrow(y)) * ncol(p1)), nrow(y), ncol(p1))
       # Checked per chunk BEFORE the scatter, not after: `m[idx[[k]], ] <- pieces[[k]]` with a
       # too-long piece recycles across rows silently (R's own assignment recycling, not an
       # error) and a too-short one errors with base R's own "number of items to replace is
@@ -2085,7 +2112,11 @@ match_quantiles_parallel <- function(mq, counts_sub, old_mu, old_phi, new_mu, ne
     m <- parts[[1L]]
   } else {
     ty <- if (any(vapply(parts, typeof, character(1)) == "double")) "double" else "integer"
-    m <- matrix(vector(ty, nrow(counts_sub) * ncol_out), nrow(counts_sub), ncol_out)
+    # as.numeric(nrow(counts_sub)), not bare: same integer-overflow hazard as
+    # combat_row_chunks' own budget arithmetic above -- nrow * ncol_out is integer*integer
+    # and silently becomes NA past 2^31 cells on a real large matrix, which vector(ty, NA)
+    # then errors on outright rather than allocating.
+    m <- matrix(vector(ty, as.numeric(nrow(counts_sub)) * ncol_out), nrow(counts_sub), ncol_out)
     for (k in seq_along(parts)) m[idx[[k]], ] <- parts[[k]]
   }
   m

@@ -144,6 +144,15 @@ rp_or0 <- function(x) if (is.null(x)) 0L else x
 #' @noRd
 rp_progress_tick <- function() {
   if (!rp_opt_flag("combat.progress", default = TRUE)) return(invisible(NULL))
+  # Only the MASTER should ever draw this tick. The two size/nested-worker gates in
+  # combat_parallel_lapply() that fall through to a plain lapply() call rp_count(FALSE),
+  # which calls this, from INSIDE a forked child on a recursive dispatch (ComBat-seq's
+  # tagwise loop across batches, dispatched again per-batch inside an outer worker) --
+  # printing that worker's own stale "N dispatched" to the shared stderr, contradicting
+  # whatever the real master is drawing at the same moment. RNAPARALLEL_IN_WORKER is set
+  # for the whole lifetime of a worker process (see f_tagged in helper_seq_parallel.R), so
+  # this is a correct "am I the master" check, not a proxy for it.
+  if (nzchar(Sys.getenv("RNAPARALLEL_IN_WORKER"))) return(invisible(NULL))
   # Throttled to 4/sec: enough to prove the run is alive, not enough to slow it down or
   # flood a log file that doesn't understand a bare carriage return (each tick still costs
   # a Sys.time() read).
@@ -409,8 +418,8 @@ rp_progress_once <- function(dir) {
   invisible(s[c("done", "started", "stalled", "eta")])
 }
 
-#' A live `|====------|` bar, matching data.table's `fread()` style, drawn in the WATCHING
-#' process, not the blocked one
+#' A live `|====------|` bar, this package's own format, drawn in the WATCHING process, not
+#' the blocked one
 #'
 #' This is the process that can actually keep redrawing: the running session is synchronously
 #' blocked inside its parallel call and cannot. Stops on its own once `started` chunks stop
@@ -418,11 +427,10 @@ rp_progress_once <- function(dir) {
 #' so a call left running does not poll an abandoned directory forever.
 #'
 #' Single line, overwritten in place with a carriage return, same mechanism as the console
-#' tick: `fread()` itself prints a static two-line bar once per file, not a redrawn one, since
-#' it only ever reports its OWN progress from its OWN process. This is a genuinely live bar
-#' polling a SEPARATE process's progress files, which is a different problem; a two-line
-#' redraw would need ANSI cursor-up escapes that not every terminal honours identically, so
-#' one line keeps the same `|===---|` look without that risk.
+#' tick: a redraw needs a live process polling a SEPARATE process's progress files, which is
+#' a different problem from printing your own progress once. A two-line redraw would need
+#' ANSI cursor-up escapes that not every terminal honours identically, so one line keeps the
+#' `|===---|` look without that risk.
 #' @noRd
 rp_progress_watch <- function(dir, interval, stall_after) {
   last_activity <- Sys.time()
@@ -430,7 +438,7 @@ rp_progress_watch <- function(dir, interval, stall_after) {
   last_done <- -1L
   last_summary <- NULL
   cr <- "\r"
-  width <- 50L    # fread()'s own bar width
+  width <- 50L    # this package's own bar width
   # One cache across every poll in this watch call: the whole reason to tail is to stop
   # re-reading and re-parsing lines already seen, which only pays off across REPEATED reads
   # of the same files. A fresh cache per poll would tail nothing and cost the same as none.
@@ -513,7 +521,30 @@ rp_step_begin <- function(label, what, x, backend, workers) {
   # tick is pointless) still needs .rp_dispatch$progress_label set below to something other
   # than the generic "dispatch" fallback, or every stage's TSV rows read identically and
   # rnaparallel_progress() cannot tell a ComBat-seq run from an lmFit run in the same dir.
-  file_progress <- !is.null(rp_progress_dir())
+  pdir <- rp_progress_dir()
+  file_progress <- !is.null(pdir)
+  # Created here, once, in the MASTER, rather than left to the first worker's own
+  # rp_progress_file_write(): that function's `cat(..., append = TRUE)` does not create
+  # missing directories and wraps everything in `try(silent = TRUE)`, so a typo'd or
+  # unwritable combat.progress.dir used to fail completely silently -- every worker's write
+  # dropped on the floor, and rnaparallel_progress() reported "no files yet" for the entire
+  # run with no indication anything was ever wrong. Failing loudly here, once, before any
+  # work starts, is strictly better than a run that "worked" with a progress feature quietly
+  # doing nothing for its whole duration.
+  if (file_progress) {
+    ok <- dir.create(pdir, recursive = TRUE, showWarnings = FALSE) || dir.exists(pdir)
+    if (!ok) {
+      stop("combat.progress.dir (", pdir, ") could not be created. Check the path and ",
+           "permissions, or unset the option to run without file progress.", call. = FALSE)
+    }
+    probe <- file.path(pdir, sprintf(".rp_write_test_%d", Sys.getpid()))
+    writable <- isTRUE(tryCatch({ cat("", file = probe); file.remove(probe); TRUE },
+                                error = function(e) FALSE))
+    if (!writable) {
+      stop("combat.progress.dir (", pdir, ") exists but is not writable. Every worker's ",
+           "progress write would silently do nothing for the whole run.", call. = FALSE)
+    }
+  }
   if (!timing && !quiet && !progress && !file_progress) return(NULL)
   # NOT reentrant, on purpose. calcNormFactors_parallel on a DGEList reaches the original's
   # DGEList method, which calls the companion again on the counts matrix, so one user-facing

@@ -199,7 +199,7 @@ mean anything and read `NA` until then. Off unless a directory is set; every wri
 per chunk, not per gene, so the cost is immaterial next to the compute itself even at hundreds
 of chunks over hours.
 
-**A live bar**, `data.table::fread()` style, from the same directory, from that same SEPARATE
+**A live bar**, this package's own format, from the same directory, from that same SEPARATE
 session:
 
 ```r

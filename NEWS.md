@@ -3,6 +3,54 @@
 Windows is a supported platform, the socket backends work, and the companions no longer pay for
 work they throw away.
 
+- **`combat.progress.dir` now fails loudly on a bad path, instead of every worker write
+  silently doing nothing for the whole run.** `rp_progress_file_write()`'s `cat(..., append =
+  TRUE)` does not create missing directories and wraps everything in `try(silent = TRUE)`, so
+  a typo'd or unwritable path used to produce a run that "worked" while `rnaparallel_progress()`
+  reported "no files yet" forever, with no indication anything was ever wrong. `rp_step_begin()`
+  now creates the directory up front (once, in the master, before any work starts) and refuses
+  to start if it cannot be created or is not writable.
+
+- **The console progress tick no longer fires from inside a worker.** Two dispatch gates
+  (a call under the size floor, or a nested dispatch re-entering from inside one of this
+  package's own workers) fall through to a plain `lapply()`, which still calls `rp_count(FALSE)`
+  -- and when that happens INSIDE a forked child on a recursive dispatch (ComBat-seq's tagwise
+  loop across batches, dispatched again per-batch inside an outer worker), the child printed
+  its own stale "N dispatched" over the real master's line on the shared stderr. Now a no-op
+  whenever `RNAPARALLEL_IN_WORKER` is set.
+
+- **Real correctness bug, HIGH severity: the orphan-fork exit check quit()d healthy workers.**
+  Found by a full-package Fable review, not the unit suite. The check that quits a worker
+  whose master died read `Sys.getppid() == 1` (via `rp_getppid()`) as its signal. That is
+  wrong on more than the missing-`Sys.getppid` case it was written to fall back for: on Unix,
+  ppid is 1 from the moment a worker STARTS for reasons that have nothing to do with a master
+  dying. Both `parallel`'s and `parallelly`'s own Unix PSOCK launchers spawn workers via
+  `system(cmd, wait = FALSE)` (`sh -c "... &"`), which orphans them at birth, and any
+  `mclapply` fork inside a container where R itself is PID 1 has ppid 1 the same way. The old
+  check would have `quit()`d every such worker on its very first chunk of a perfectly healthy
+  run, with the caller told "the worker process died ... kernel killing it for memory" for a
+  fit that was never in trouble. Now checks whether the specific recorded `master_pid` is
+  still alive, via `ps::ps_handle()` (throws when a pid does not exist, silent otherwise;
+  falls back to "assume alive" when `ps` is not installed, the package's existing "cannot
+  tell, proceed" convention). `rp_getppid()` itself is unchanged and still used elsewhere.
+  New regression test dispatches a real ComBat-seq correction through every installed
+  backend (mclapply, future/multisession, BiocParallel, foreach) and asserts identical output,
+  since the bug only manifests inside a genuinely spawned worker process.
+
+- **Integer overflow past 2^31 cells in three chunk-sizing/allocation sites.** Also from the
+  full-package review. `combat_row_chunks()`'s `combat.mem.chunk.cells` budget arithmetic
+  (`ntag * ncol`), `match_quantiles_parallel`'s scatter preallocation, and
+  `glmFit_rows_parallel`'s scatter preallocation all multiplied two integers, which silently
+  becomes `NA` past 2^31 on a real large matrix -- exactly the scale these features exist for.
+  All three now force the multiplication to double via `as.numeric()` on one operand.
+
+- **`rp_bind_rows()` (limma's row-bind path) gained the same per-chunk length check
+  `glmFit_rows_parallel`'s bind already had.** A total-row-count check alone cannot catch two
+  chunks off by +1/-1 in opposite directions, which pass with a correct total while genes are
+  already bound into the wrong rows. `lmFit_parallel` now passes `chunk_lens = lengths(idx)`
+  through; the check is opt-in (`chunk_lens = NULL` keeps old behaviour) so
+  `duplicateCorrelation_parallel`'s vector-field call is unaffected.
+
 - **`lmFit_parallel()` (both `lm.series` and `gls.series`) now replays worker warnings/messages,
   matching `duplicateCorrelation_parallel()`'s existing behaviour.** Real per-gene warnings a
   block raises (limma's own "Partial NA coefficients", non-finite-value notices) were silently
@@ -131,8 +179,8 @@ work they throw away.
   returns `NA` (skip the check) otherwise, rather than crashing every single dispatch on a
   build that lacks it.
 
-- **`rnaparallel_progress(dir, watch = TRUE)` now renders a live `|====------|` bar**, matching
-  `data.table::fread()`'s own style: `|==================================================| 62%
+- **`rnaparallel_progress(dir, watch = TRUE)` now renders a live `|====------|` bar**, this
+  package's own format: `|==================================================| 62%
   ComBat-seq 40,609 x 9,493 79/128 ETA 16:42`. Same mechanism as before, watched from a SEPARATE
   process/terminal while the running session is blocked inside its parallel call.
   Redraws now TAIL each worker's file rather than re-reading it whole every poll:

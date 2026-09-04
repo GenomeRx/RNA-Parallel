@@ -81,3 +81,49 @@ test_that("watch mode uses one cache across its own polls, not a fresh one per p
   expect_identical(r1, r2)
   expect_identical(cache[[path]]$size, file.size(path))
 })
+
+## rp_step_begin() creates combat.progress.dir up front and refuses to start if it cannot,
+## rather than the old silent-drop behaviour where every worker write vanished for the
+## whole run and rnaparallel_progress() reported "no files yet" forever.
+
+test_that("rp_step_begin creates a missing combat.progress.dir rather than failing silently", {
+  base <- withr::local_tempdir()
+  target <- file.path(base, "nested", "progress")
+  expect_false(dir.exists(target))
+  withr::local_options(combat.progress.dir = target)
+  h <- rnaparallel:::rp_step_begin(NULL, "unit", matrix(1, 2, 2), "serial", 1L)
+  expect_true(dir.exists(target))
+  rnaparallel:::rp_step_end(h)
+})
+
+test_that("rp_step_begin refuses an unwritable combat.progress.dir loudly", {
+  skip_on_os("windows")   # file.access()-style permission bits are not meaningful on Windows
+  base <- withr::local_tempdir()
+  target <- file.path(base, "locked")
+  dir.create(target)
+  Sys.chmod(target, mode = "0500")   # read+execute, no write
+  withr::local_options(combat.progress.dir = target)
+  withr::defer(Sys.chmod(target, mode = "0700"))   # let the tempdir cleanup remove it
+  expect_error(rnaparallel:::rp_step_begin(NULL, "unit", matrix(1, 2, 2), "serial", 1L),
+              "not writable")
+})
+
+## rp_progress_tick() must not draw from inside a worker: regression for a real bug where a
+## nested/recursive dispatch (or any size-gated call, since both paths call rp_count(FALSE)
+## from a forked child) printed that child's own stale count over the master's line.
+
+test_that("rp_progress_tick is a no-op inside a marked worker", {
+  withr::local_options(combat.progress = TRUE)
+  prev <- Sys.getenv("RNAPARALLEL_IN_WORKER", unset = NA_character_)
+  Sys.setenv(RNAPARALLEL_IN_WORKER = "1")
+  withr::defer(if (is.na(prev)) Sys.unsetenv("RNAPARALLEL_IN_WORKER")
+              else Sys.setenv(RNAPARALLEL_IN_WORKER = prev))
+  # A no-op tick never reaches the throttle-timestamp write, so `.rp_dispatch$progress_last`
+  # (an environment binding, checkable directly rather than trying to intercept a raw
+  # `cat(..., file = stderr())` write, which is not a captureable R condition/output stream)
+  # stays whatever it was before the call -- here, unset.
+  rnaparallel:::rp_count_reset()
+  expect_null(rnaparallel:::.rp_dispatch$progress_last)
+  expect_no_error(rnaparallel:::rp_progress_tick())
+  expect_null(rnaparallel:::.rp_dispatch$progress_last)
+})

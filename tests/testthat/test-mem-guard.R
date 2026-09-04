@@ -174,11 +174,42 @@ test_that("the mem-guard warning names all three numbers, not just the outcome",
                 regexp = "16 workers.*GB.*GB.*GB", perl = TRUE)
 })
 
-## rp_getppid(): the orphan-fork exit check reads this. It does not exist as a base R
-## function on every build (confirmed FALSE via exists() on the R 4.6.1 UCRT Windows build
-## this package is tested on), which crashed every single dispatch under a real
-## future::multisession run before this fallback existed -- caught fixing the bar, not a
-## hypothetical.
+test_that("worker survives dispatch on a healthy run even when its own ppid is 1", {
+  # Regression test for a real bug: an earlier version of the orphan-fork exit check quit()d
+  # any worker whose OWN ppid was 1, which is true from birth for every Unix PSOCK worker
+  # (parallel/parallelly launch them via `sh -c "... &"`) and any mclapply fork inside a
+  # container where R itself is PID 1 -- neither has anything to do with the master dying.
+  # Exercised here against every REAL installed backend, not a mock, because the bug only
+  # manifests inside a genuinely spawned worker process; mocking rp_getppid()/ps::ps_handle()
+  # in the test process proves nothing about what a real forked/socket child observes.
+  d <- make_counts(22, G = 60, n_per_batch = c(4, 4))
+  ref <- quietly(sva::ComBat_seq(d$counts, d$batch, group = NULL))
+  needs <- c(mclapply = "parallel", future = "future.apply",
+             BiocParallel = "BiocParallel", foreach = "doParallel")
+  exercised <- 0L
+  for (be in setdiff(combat_backends(), "serial")) {
+    pkg <- needs[[be]]
+    if (!requireNamespace(pkg, quietly = TRUE)) next
+    exercised <- exercised + 1L
+    if (be == "future") {
+      old <- future::plan(future::multisession, workers = 2)
+      on.exit(future::plan(old), add = TRUE)
+    }
+    got <- quietly(ComBat_seq_parallel(d$counts, d$batch, group = NULL,
+                                       workers = 2L, parallel_backend = be))
+    expect_identical(got, ref, info = be)
+  }
+  skip_if(exercised == 0L, "no real multi-process backend installed to exercise this on")
+})
+
+## rp_getppid(): a general-purpose cross-platform ppid reader kept for anything else that
+## wants it. It does not exist as a base R function on every build (confirmed FALSE via
+## exists() on the R 4.6.1 UCRT Windows build this package is tested on). NOT read by the
+## orphan-fork exit check any more (see test-parallel.R's "worker survives on a healthy run
+## even when its own ppid is 1" for that): ppid alone is 1 for reasons that have nothing to
+## do with the master dying (every Unix PSOCK worker launches via `sh -c "... &"`, orphaned
+## from birth), so the exit check now asks whether the recorded master_pid specifically is
+## still alive via `ps::ps_handle()`, not what this worker's own ppid happens to be.
 
 test_that("rp_getppid never errors, even when Sys.getppid does not exist on this build", {
   expect_no_error(v <- rnaparallel:::rp_getppid())
