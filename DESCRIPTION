@@ -10,13 +10,13 @@ Authors@R: c(
            comment = "author of ComBat-seq, accelerated but not modified by this package"),
     person("Giovanni", "Parmigiani", role = "ctb", comment = "author of ComBat-seq"),
     person("W. Evan", "Johnson", role = "ctb", comment = "author of ComBat-seq"))
-Description: Parallel companions for RNA-seq tools. Each calls the original
-    function unmodified, with hot paths rebound to row-parallel versions in a
-    child of that function's own environment, so the result is identical()
-    to a serial run rather than merely close to it. Covers ComBat-seq
-    (against Bioconductor sva or a sourced upstream copy), limma lmFit and
-    duplicateCorrelation, and edgeR normLibSizes. Dispatches through
-    mclapply, future, BiocParallel, foreach or serial.
+Description: Parallel companions for RNA-seq tools. Each one calls the original
+    function unmodified, with its slow internal steps swapped for row-parallel
+    versions in a private copy of that function's own environment, so the
+    result is identical() to a serial run rather than merely close to it.
+    Covers ComBat-seq (against Bioconductor sva or a sourced upstream copy),
+    limma lmFit and duplicateCorrelation, and edgeR normLibSizes. Dispatches
+    through mclapply, future, BiocParallel, foreach or serial.
 License: MIT + file LICENSE
 Encoding: UTF-8
 Depends: R (>= 4.1)

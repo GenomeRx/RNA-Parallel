@@ -4,8 +4,9 @@
 [![R](https://img.shields.io/badge/R-%E2%89%A5%204.1-blue)](DESCRIPTION)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE.md)
 
-Parallel companions for RNA-seq tools. Each calls the original function unmodified and returns
-output `identical()` to it, bit for bit. Same arguments, same defaults, same result, faster.
+Parallel companions for RNA-seq tools. Each one calls the original function unmodified and
+returns output `identical()` to it, bit for bit. Same arguments, same defaults, same result,
+faster.
 
 Rendered analysis: [macOS](https://genomerx.github.io/RNA-Parallel/) ·
 [Linux](https://genomerx.github.io/RNA-Parallel/linux.html) ·
@@ -29,8 +30,9 @@ only 6 of 16 cores are performance cores), which caps its scaling; `lmFit`/`remo
 there are parity, not speedups. Full breakdown and every wall-clock number in
 [REFERENCE.md](REFERENCE.md#cross-platform).
 
-Nothing is reimplemented: the original function runs, called with hot paths rebound in a child of
-its own environment. `identical()` is asserted, not a tolerance.
+Nothing here is reimplemented. The original function runs, with only its slow internal steps
+swapped for parallel versions in a private copy of its own environment. `identical()` is checked
+directly, not a tolerance.
 
 ## Install
 
@@ -82,7 +84,7 @@ overwritten in place, so a long ComBat-seq run against hundreds of batches never
 `options(combat.timing = TRUE)` adds the real engine per call once it finishes, `serial` vs
 `mclapply x6`, etc. For a call that blocks inside the parallel backend for hours, set
 `options(combat.progress.dir = "some/path")` and call `rnaparallel_progress(dir, watch = TRUE)`
-from a SEPARATE session for a live `|====------|` bar, `data.table::fread()` style, with chunks
+from a SEPARATE session for a live `|====------|` bar, in this package's own format, with chunks
 done and an ETA. See [REFERENCE.md](REFERENCE.md#seeing-what-is-running).
 
 **Memory:** forking a large matrix can exceed a machine's RAM even when the parent alone fits,
