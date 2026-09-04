@@ -1360,6 +1360,12 @@ combat_parallel_lapply <- function(idx, f, workers,
   }
   environment(f_tagged) <- .lean_tag
 
+  # The bar has to be rendered by something that is not the master, because from here to the end
+  # of the dispatch the master is inside the backend and runs no R code. Started and stopped in
+  # this function so it never survives into combat_reap's view of stray children.
+  .rp_rep <- rp_reporter_start(.lean_tag$progress_dir)
+  on.exit(rp_reporter_stop(.rp_rep), add = TRUE)
+
   # Put results back in dispatch order and strip the wrapper. Anything that is not a tagged
   # result (a try-error, a NULL from a killed worker, a condition from foreach) is passed
   # through untouched at its own position for combat_parallel_check() to report on.
