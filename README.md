@@ -52,16 +52,17 @@ remotes::install_github("GenomeRx/RNA-Parallel",
 Keep `upgrade = "never"`. Without it the installer offers to rebuild every outdated
 package in your library, most of which have nothing to do with this one.
 
-Add an optional package when you reach for the companion that needs it:
+That is four packages on a clean library: `edgeR`, plus `limma`, `locfit` and `statmod`,
+which `edgeR` and `limma` require themselves. `lattice` and the rest ship with R.
+
+Only one companion asks for anything beyond that:
 
 | Companion | Also install |
 |---|---|
 | `ComBat_seq_parallel()` | `sva` |
-| `lmFit_parallel()`, `removeBatchEffect_parallel()` | `limma` |
-| `duplicateCorrelation_parallel()` | `limma`, `statmod` |
-| `calcNormFactors_parallel()` | nothing |
+| the other four | nothing |
 
-Backends are optional the same way. `mclapply` and `serial` need nothing, and `future`,
+Backends work the same way. `mclapply` and `serial` need nothing, and `future`,
 `BiocParallel` and `foreach` each need their own package. Install `ps` if you want the
 memory guard to read real numbers rather than assume the machine can hold the fork.
 
