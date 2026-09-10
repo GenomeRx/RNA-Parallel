@@ -36,13 +36,34 @@ directly, not a tolerance.
 
 ## Install
 
+The package needs `edgeR` and nothing else. Every other package below is optional, and
+only for the companion you actually call.
+
 ```r
 if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
-BiocManager::install(c("sva", "edgeR", "limma"))
+BiocManager::install("edgeR")
 
 if (!requireNamespace("remotes", quietly = TRUE)) install.packages("remotes")
-remotes::install_github("GenomeRx/RNA-Parallel")
+remotes::install_github("GenomeRx/RNA-Parallel",
+                        dependencies = c("Depends", "Imports"),
+                        upgrade = "never")
 ```
+
+Keep `upgrade = "never"`. Without it the installer offers to rebuild every outdated
+package in your library, most of which have nothing to do with this one.
+
+Add an optional package when you reach for the companion that needs it:
+
+| Companion | Also install |
+|---|---|
+| `ComBat_seq_parallel()` | `sva` |
+| `lmFit_parallel()`, `removeBatchEffect_parallel()` | `limma` |
+| `duplicateCorrelation_parallel()` | `limma`, `statmod` |
+| `calcNormFactors_parallel()` | nothing |
+
+Backends are optional the same way. `mclapply` and `serial` need nothing, and `future`,
+`BiocParallel` and `foreach` each need their own package. Install `ps` if you want the
+memory guard to read real numbers rather than assume the machine can hold the fork.
 
 ## Use
 
