@@ -1,5 +1,4 @@
-## skip_if_no_limma() and sim() are defined per test file rather than in a helper, so this
-## file carries its own rather than depending on another file's load order.
+# This file defines its own skip_if_no_limma() and sim(), so it does not depend on another file's load order.
 skip_if_no_limma <- function() {
   testthat::skip_if_not_installed("limma")
   testthat::skip_if_not_installed("edgeR")
@@ -15,8 +14,7 @@ sim <- function(G = 200L, S = 12L, seed = 1L) {
   list(counts = cts)
 }
 
-## resolved here rather than taken from helper-counts.R, so this file does not depend on
-## another file's load order for the original it compares against
+# Resolved here, not taken from helper-counts.R, so the original this file compares against does not depend on load order.
 vendor_norm <- function(object, ...) {
   ns <- asNamespace("edgeR")
   nm <- if (exists("normLibSizes.default", envir = ns, inherits = FALSE)) "normLibSizes"
@@ -54,8 +52,7 @@ test_that("one user-facing call prints one line, not one per nested call", {
   skip_if_no_limma()
   d <- sim()
   withr::local_options(list(combat.timing = TRUE))
-  # calcNormFactors_parallel on a DGEList reaches edgeR's DGEList method, which calls the
-  # companion again on the counts matrix. Before the reentrancy guard that printed twice.
+# calcNormFactors_parallel on a DGEList reaches edgeR's DGEList method, which calls the companion again on the counts matrix.
   msgs <- testthat::capture_messages(
     calcNormFactors_parallel(edgeR::DGEList(d$counts), workers = 2L))
   expect_length(grep("TMM", msgs), 1L)
@@ -65,8 +62,7 @@ test_that("the timing line names what actually ran, not what was asked for", {
   skip_if_no_limma()
   d <- sim()
   withr::local_options(list(combat.timing = TRUE, combat.fork = FALSE))
-  # every stage gated to serial: reporting "mclapply x2" here would be a lie, and the
-  # indistinguishable-from-serial case is exactly the one a reader needs told about
+# Every stage is gated to serial here, so the line must say serial and never "mclapply x2".
   msgs <- testthat::capture_messages(calcNormFactors_parallel(d$counts, workers = 2L))
   expect_match(paste(msgs, collapse = ""), "serial")
   expect_match(paste(msgs, collapse = ""), "gated")
@@ -86,8 +82,7 @@ test_that("quieting swallows the original's cat() but never a warning or an erro
   cts <- matrix(rnbinom(1600, mu = 50, size = 5), nrow = 200)
   bt  <- rep(1:2, each = 4)
   withr::local_options(list(combat.quiet = TRUE))
-  # sva announces itself with cat(), which suppressMessages() cannot touch; only a stdout
-  # sink can. stderr is deliberately left alone so a warning about the data still lands.
+# sva announces itself with cat(), which only a stdout sink silences, and stderr stays open so a warning about the data still lands.
   out <- utils::capture.output(
     got <- ComBat_seq_parallel(cts, batch = bt, group = NULL, workers = 2L))
   expect_length(out, 0L)
@@ -98,8 +93,7 @@ test_that("a failed call unwinds the sink instead of silencing the session", {
   skip_if_no_limma()
   withr::local_options(list(combat.timing = TRUE, combat.quiet = TRUE))
   before <- sink.number()
-  # the hazard this guards: a dangling sink would swallow every later print in the caller's
-  # session, turning one failed step into a notebook that has silently stopped reporting
+# A dangling sink would swallow every later print in the caller's session.
   expect_error(suppressMessages(calcNormFactors_parallel("not a matrix", workers = 2L)))
   expect_identical(sink.number(), before)
   expect_identical(rnaparallel:::rp_or0(rnaparallel:::.rp_dispatch$depth), 0L)
@@ -122,8 +116,7 @@ test_that("label overrides the derived name", {
 })
 
 test_that("rnaparallel_stale reports on the build, not on nothing", {
-  # It cannot be TRUE for a package loaded from source by load_all(), which has no Built
-  # field, so NA is the honest answer there; against a real install it must be FALSE.
+# A package loaded by load_all() has no Built field, so NA is the answer there, and against a real install it must be FALSE.
   v <- rnaparallel_stale()
   expect_true(is.logical(v) && length(v) == 1L)
   expect_false(isTRUE(v))
@@ -136,10 +129,7 @@ test_that("a backend that falls back to serial is not reported as parallel", {
   d <- sim()
   withr::local_options(list(combat.timing = TRUE, combat.min.norm.cols = 0,
                             combat.min.norm.cells = 0))
-  # A future plan that resolves in one process is detected and warned about, and used to be
-  # counted as a parallel dispatch anyway: the line read "future x2  1 par" directly beside the
-  # package's own warning that it had just run serially. The engine column exists precisely so
-  # that a serial run cannot be mistaken for a fork, so this is the one thing it must not do.
+# A future plan that resolves in one process must be counted serial, never as "future x2" beside the warning that it ran serially.
   future::plan(future::sequential)
   withr::defer(future::plan(future::sequential))
   msgs <- testthat::capture_messages(suppressWarnings(
@@ -161,7 +151,7 @@ test_that("every backend produces a timing line and the same answer", {
     expect_identical(got, ref, info = b)
     expect_match(paste(msgs, collapse = ""), "TMM", info = b)
   }
-  # a function backend is labelled "custom", not by a name it does not have
+  # a function backend is labeled "custom", not by a name it does not have
   msgs <- testthat::capture_messages(
     got <- calcNormFactors_parallel(d$counts, workers = 2L,
                                     parallel_backend = function(idx, f, w) lapply(idx, f)))
@@ -182,9 +172,7 @@ test_that("a pinned original excerpt standing down is reported, not silent", {
     a <- ComBat_seq_parallel(cts, batch = bt, group = NULL, workers = 2L))
   expect_false(grepl("stood down", paste(clean, collapse = "")))
 
-  # An sva whose match_quantiles body merely REFORMATS defeats the byte-exact gate. The gate
-  # doing that is correct (it is what keeps the numbers right), but a run that quietly got
-  # 1.4-1.7x slower with identical output is the one regression nobody ever reports.
+# An sva whose match_quantiles body only reformats shuts the byte-exact gate, and that slower run with identical output must be reported.
   ns <- asNamespace("sva")
   orig <- get("match_quantiles", envir = ns)
   drift <- orig
@@ -200,10 +188,7 @@ test_that("a pinned original excerpt standing down is reported, not silent", {
 
 test_that("rnaparallel_stale catches a namespace/disk version mismatch", {
   skip_on_cran()
-  # The version comparison exists because it needs NOTHING recorded at load: a session whose
-  # namespace predates this function still has a version, and packageVersion() reads the NEW
-  # one off disk. Comparing them is what makes the answer available without the old namespace
-  # having to cooperate.
+# The comparison needs nothing recorded at load, because an old namespace still has a version and packageVersion() reads the new one off disk.
   expect_false(isTRUE(rnaparallel_stale()))
 
   ns <- asNamespace("rnaparallel")
@@ -216,10 +201,11 @@ test_that("rnaparallel_stale catches a namespace/disk version mismatch", {
   expect_identical(real(ns), getNamespaceVersion("rnaparallel"))   # nothing was mutated
 })
 
-test_that("the documented defensive call survives a namespace without the function", {
-  # A reinstall that crosses the release introducing rnaparallel_stale leaves a namespace where
-  # the function does not exist, so the naive call raises rather than returning TRUE. The
-  # documented pattern turns that error into the answer it actually represents.
-  gone <- function() stop("could not find function \"rnaparallel_stale\"")
-  expect_true(isTRUE(tryCatch(gone(), error = function(e) TRUE)))
+test_that("the help page shows the defensive call, and it reads FALSE on a current session", {
+  documented <- quote(isTRUE(tryCatch(rnaparallel_stale(), error = function(e) TRUE)))
+  root <- rp_dev_root()
+  db <- if (nzchar(root)) tools::Rd_db(dir = root) else tools::Rd_db("rnaparallel")
+  rd <- paste(as.character(db[["rnaparallel_stale.Rd"]]), collapse = "")
+  expect_true(grepl(paste(deparse(documented), collapse = ""), rd, fixed = TRUE))
+  expect_false(eval(documented, new.env(parent = asNamespace("rnaparallel"))))
 })

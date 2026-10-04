@@ -67,10 +67,47 @@ quietly <- function(expr) {
 }
 
 ## R CMD check sets _R_CHECK_LIMIT_CORES_ and then errors above two cores. The package
-## honours that itself, but a test that builds its OWN executor bypasses the package's
-## clamp, so the custom executors below have to honour it too. This only started
+## honors that itself, but a test that builds its OWN executor bypasses the package's
+## clamp, so the custom executors below have to honor it too. This only started
 ## mattering once setup-parallel.R made the suite actually fork.
 test_max_cores <- function() {
   chk <- Sys.getenv("_R_CHECK_LIMIT_CORES_", "")
   if (nzchar(chk) && !identical(tolower(chk), "false")) 2L else max(1L, parallel::detectCores(), na.rm = TRUE)
+}
+
+# A socket worker or Rscript child loads the INSTALLED rnaparallel unless it is told to load the source tree a load_all() run is testing, so this returns that tree or "" when the installed copy is the package under test.
+rp_dev_root <- function() {
+  if (!isTRUE(requireNamespace("pkgload", quietly = TRUE) &&
+              pkgload::is_dev_package("rnaparallel"))) return("")
+  getNamespaceInfo("rnaparallel", "path")
+}
+
+rp_load_line <- function() {
+  root <- rp_dev_root()
+  if (nzchar(root)) sprintf("suppressMessages(pkgload::load_all(%s, quiet = TRUE))", deparse(root))
+  else "suppressMessages(library(rnaparallel))"
+}
+
+rp_cluster_load <- function(cl) {
+  root <- rp_dev_root()
+  if (nzchar(root)) {
+    load <- function(r) {
+      suppressMessages(pkgload::load_all(r, quiet = TRUE, export_all = FALSE, helpers = FALSE,
+                                         attach_testthat = FALSE))
+      invisible(TRUE)
+    }
+# A closure left on this file's environment drags package:rnaparallel into serialize() under devtools::test, which warns on every send.
+    environment(load) <- globalenv()
+    parallel::clusterCall(cl, load, root)
+  }
+  invisible(cl)
+}
+
+local_socket_plan <- function(workers = 2L, .env = parent.frame()) {
+  cl <- parallel::makeCluster(workers, type = "PSOCK")
+  withr::defer(parallel::stopCluster(cl), envir = .env)
+  rp_cluster_load(cl)
+  old <- future::plan(future::cluster, workers = cl)
+  withr::defer(future::plan(old), envir = .env)
+  invisible(cl)
 }

@@ -73,4 +73,26 @@ test_that("a real companion call is bit-identical with the budget forcing extra 
   withr::local_options(combat.mem.chunk.cells = 1)   # forces maximum chunking
   got <- calcNormFactors_parallel(cts, workers = 2L, chunks = 1L)
   expect_identical(got, ref)
+
+  sizes <- list()
+  spy <- function(idx, f, workers) { sizes[[length(sizes) + 1L]] <<- lengths(idx); lapply(idx, f) }
+  expect_identical(calcNormFactors_parallel(cts, workers = 2L, chunks = 1L, parallel_backend = spy),
+                   ref)
+  expect_identical(sizes, list(rep(1L, S), rep(1L, S)))
+
+  M <- matrix(stats::rnorm(G * S), G, S)
+  des <- cbind(1, rep(0:1, each = S / 2))
+  sizes <- list()
+  withr::local_options(combat.mem.chunk.cells = 600)
+  expect_identical(lmFit_parallel(M, des, workers = 2L, chunks = 1L, parallel_backend = spy),
+                   limma::lmFit(M, des))
+  expect_identical(sizes, list(rep(50L, 4L)))
+})
+
+test_that("the cell budget arithmetic survives a matrix past 2^31 cells", {
+  withr::local_options(combat.mem.chunk.cells = 1e8)
+  idx <- rnaparallel:::combat_row_chunks(60000L, chunks = 4L, ncol = 40000L)
+  expect_length(idx, 24L)
+  expect_identical(max(lengths(idx)), 2500L)
+  expect_identical(sort(unlist(idx)), seq_len(60000L))
 })

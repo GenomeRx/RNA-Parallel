@@ -14,25 +14,26 @@
 #' slice of the once-expanded weights. `serial_fn` is the untouched whole-matrix original
 #' call, taken whenever a split cannot be proved exact or cannot pay for itself.
 #'
-#' Only four fields vary by gene. Everything else either comes from the design alone or is
-#' an argument echoed back, so it is lifted from the first block and then asserted across
-#' all of them.
+#' Only four fields vary by gene and are bound back together. Nine more come from the design
+#' alone or are an argument echoed back, so they are lifted from the first block and asserted
+#' identical across all of them. A field outside both lists is one this package was not
+#' written against, so the split stands down to one plain original call rather than lift it
+#' unchecked.
 #'
 #' @noRd
 rp_row_blocks <- function(M, weights, env, workers, chunks, parallel_backend, what,
                           block_fn, serial_fn, punch = "lm") {
   M <- as.matrix(M)
-  w <- rp_weights_matrix(weights, dim(M), env)
 
-  # SIZE GATE FIRST. `fast` reads only is.null(w) and attr(w, "arrayweights"), neither of
-  # which rp_branch_stable touches, so it is the same value in either order; and both guards
-  # return the same expression, serial_fn(). What changes is that a call destined for the
-  # original no longer pays a full-matrix scan to get there. It was paying enough to lose:
-  # measured on array-weighted input under the gate, the companion was SLOWER than the
+  # SIZE GATE FIRST, and before the weights are expanded. `fast` is read off the weights'
+  # shape (rp_weights_fast), so a call destined for the original pays neither the full-matrix
+  # scan in rp_branch_stable nor the full weight matrix asMatrixWeights builds from a vector,
+  # and both guards return the same expression, serial_fn(). The scan alone was enough to
+  # lose: measured on array-weighted input under the gate, the companion was SLOWER than the
   # function it wraps: 20,000 x 24 original 10.8 ms against 14.8 ms, 60,000 x 48 original
   # 89.3 ms against 138.4 ms. On a platform where the gate is shut this scan ran on every
   # call and the split never followed it.
-  fast <- is.null(w) || !is.null(attr(w, "arrayweights"))
+  fast <- rp_weights_fast(weights, dim(M))
   # Each branch consults its OWN option, and both close where the payload would be copied.
   # Routing both through one option let a raised combat.min.ls.cells silently switch off the
   # weighted branch's split as well; see rp_ls_min_cells().
@@ -51,6 +52,8 @@ rp_row_blocks <- function(M, weights, env, workers, chunks, parallel_backend, wh
   if (!fast && isTRUE(nrow(M) < suppressWarnings(as.numeric(rp_wt_min_genes())))) {
     return(serial_fn())
   }
+
+  w <- rp_weights_matrix(weights, dim(M), env)
 
   # A block landing on the other side of NoProbeWts returns a different component SET, not
   # merely different numbers, so there would be nothing to reassemble. lm.series and
@@ -116,6 +119,15 @@ rp_row_blocks <- function(M, weights, env, workers, chunks, parallel_backend, wh
       workers, parallel_backend, cells = length(M), min_cells = min_cells),
     what, idx)
 
+# Before the replay below, so a stand-down leaves serial_fn() the only source of conditions.
+  bound <- c("coefficients", "stdev.unscaled", "sigma", "df.residual")
+  lifted <- c("qr", "assign", "rank", "pivot", "cov.coefficients",
+              "ndups", "spacing", "block", "correlation")
+  if (length(setdiff(unique(unlist(lapply(parts, names))), c(bound, lifted)))) {
+    rp_note_fallback(what)
+    return(serial_fn())
+  }
+
   # Replay each distinct condition once, from the master, same as dupcor's own replay below.
   cnds <- unlist(lapply(parts, function(p) attr(p, "rp_conds")), recursive = FALSE)
   for (cnd in cnds[!duplicated(vapply(cnds, conditionMessage, ""))]) {
@@ -128,16 +140,12 @@ rp_row_blocks <- function(M, weights, env, workers, chunks, parallel_backend, wh
   # worker and this replay loop, not part of the documented return shape.
   for (k in seq_along(parts)) attr(parts[[k]], "rp_conds") <- NULL
 
-  rp_invariant(parts,
-               intersect(c("qr", "assign", "rank", "pivot", "cov.coefficients",
-                           "ndups", "spacing", "block", "correlation"),
-                         names(parts[[1L]])),
-               what)
+  rp_invariant(parts, intersect(lifted, names(parts[[1L]])), what)
 
   ord <- combat_row_order(idx)
   chunk_lens <- lengths(idx)
   out <- parts[[1L]]
-  for (nm in c("coefficients", "stdev.unscaled", "sigma", "df.residual")) {
+  for (nm in bound) {
     out[[nm]] <- rp_bind_rows(parts, ord, nm, nrow(M), what, chunk_lens = chunk_lens)
   }
   out
@@ -186,14 +194,21 @@ rp_row_blocks <- function(M, weights, env, workers, chunks, parallel_backend, wh
 #' explicit `correlation = NULL` does reach `gls.series`, which then calls
 #' `duplicateCorrelation` itself, a trimmed mean over whatever genes it was given. Per
 #' block that is a different consensus for every block. It is resolved once here, on the
-#' full matrix, and the resulting scalar is what the blocks see.
+#' full matrix, by [duplicateCorrelation_parallel()] with the same arguments and the backend's
+#' own `duplicateCorrelation`, which returns `identical()` output, and the resulting scalar is
+#' what the blocks see. When [duplicateCorrelation_parallel()] refuses to split that limma, the
+#' backend's own `duplicateCorrelation` runs whole instead; any other error is raised as is.
 #'
 #' @section Dispatches too small to be worth a fork:
 #' The two branches of `lm.series` are not the same job. With probe weights, or an `EList`
 #' from [limma::voom()], limma runs an R loop over genes, and that forks well: measured
-#' 2.52x unblocked and 2.85x blocked on 20,000 genes by 24 samples, 2.96x and 3.39x on
-#' 60,000 by 48, against 0.95x at 20,000 cells. `getOption("combat.min.cells", 20000)`, the
-#' same gate ComBat-seq uses, lands on that break-even and is what this branch takes.
+#' 3.70x unblocked and 4.35x blocked on 60,000 genes by 48 samples at the default 6 workers on
+#' an M3 (`tools/bench_lmfit.R` in the GitHub repository,
+#' <https://github.com/GenomeRx/RNA-Parallel>),
+#' against 0.95x at 20,000 cells. This branch takes two gates:
+#' `getOption("combat.min.cells", 20000)` cells, the gate ComBat-seq uses, and
+#' `getOption("combat.min.wt.genes", 2000)` genes, because the loop's cost is per gene and it
+#' is genes per worker that pay for a fork. A call below either one is one plain original call.
 #'
 #' Without probe weights limma fits every gene in one vectorised `lm.fit`, which costs
 #' milliseconds and is mostly not worth handing to another process. That branch measured
@@ -201,22 +216,33 @@ rp_row_blocks <- function(M, weights, env, workers, chunks, parallel_backend, wh
 #' and 1.71x at 20 million. It gets its own, much higher
 #' `getOption("combat.min.ls.cells", 6e6)`; sharing one gate made it four times slower than
 #' calling limma directly. Cells is only a proxy, since the cost rises with array count
-#' too, so the gate sits at the smallest size measured to win. Set either option to 0 to
-#' dispatch unconditionally; output is identical either way.
+#' too, so the gate sits at the smallest size measured to win.
+#'
+#' On a backend that copies the payload to its workers (`"serial"`, `future` without a
+#' multicore plan, `foreach` without a forking `doParallel` or `doMC` registration,
+#' `options(combat.fork = FALSE)`, and every backend on Windows), an unset
+#' `combat.min.cells` or `combat.min.ls.cells` closes entirely, so the call is one original
+#' call there unless the option is set. To dispatch unconditionally, set `combat.min.cells`
+#' and `combat.min.wt.genes` to 0 for the weighted branch and `combat.min.ls.cells` to 0 for
+#' the unweighted one; output is identical either way.
 #'
 #' @section Configurations this refuses:
 #' `method = "robust"` goes to `mrlm`, and `ndups >= 2` makes `unwrapdups` reshape rows so
 #' that a gene no longer occupies one row. Neither is split, and both stop with an error
-#' rather than returning a serial result that looks parallel.
+#' rather than returning a serial result that looks parallel. Each is checked on the value the
+#' backend will use: the one passed, or else the backend's own default.
 #'
 #' @section When this is worth reaching for:
 #' It depends entirely on which branch your call takes, and the two are not close.
 #'
 #' With voom or probe weights limma runs an R loop over genes, which forks well but has a
-#' floor. Measured on an M3 at the default worker count, companion against original, every arm
-#' `identical()`: 0.59x at 1,000 genes by 24 arrays, 0.87x at 2,000 x 24, 1.29x at 4,000 x 24,
-#' 1.76x at 8,000 x 24, and 2.79x at 60,000 x 48. The crossover tracks gene count rather than
-#' cells, and sits near four thousand genes.
+#' floor, and the floor is counted in genes rather than cells. Below
+#' `getOption("combat.min.wt.genes", 2000)` genes the companion is one plain original call, so
+#' it runs at parity. At and above it the split runs. That default sits where two measurement
+#' runs on an M3 at the default worker count agreed, with the gate forced open at 8, 24 and 48
+#' arrays: both put 2,000 genes and up ahead of the original, and they disagreed at 1,000
+#' genes, one ahead and one behind. The large-input figures are under "Dispatches too small to
+#' be worth a fork" above.
 #'
 #' Without probe weights limma fits every gene in one vectorised `lm.fit`, which costs
 #' milliseconds, so the companion declines to split until the matrix is very large and is
@@ -250,6 +276,10 @@ rp_row_blocks <- function(M, weights, env, workers, chunks, parallel_backend, wh
 #'   Measured on an 8-core machine with 4 performance cores, TMM on 15,000 genes by 9,000
 #'   specimens: 4 workers 10.74 s, 6 workers 7.26 s, 8 workers 11.60 s. Eight was slower than
 #'   four. The default resolved to 6 there and was optimal; raising it by hand made it worse.
+#'
+#'   With `parallel_backend = "foreach"` and a backend you registered yourself, `workers` sets
+#'   only the default chunk count, and that backend's width bounds concurrency; see
+#'   [combat_backends()].
 #' @param chunks Row chunks. Defaults to `workers`; passing `chunks = workers` explicitly is redundant.
 #'   Clamped so no chunk holds one gene.
 #' @param parallel_backend One of [combat_backends()], or a function
@@ -257,13 +287,19 @@ rp_row_blocks <- function(M, weights, env, workers, chunks, parallel_backend, wh
 #'   `getOption("combat.backend", combat_default_backend())`.
 #' @param backend Optional `lmFit` to wrap. Defaults to `limma::lmFit`.
 #'
-#' @param label Optional name for this call in the timing line, when
+#' @param label Optional name for this call. It is the stage name on the progress bar, which
+#'   draws by default on macOS and Linux in an interactive session or on a terminal
+#'   (`options(combat.progress = FALSE)` turns it off), and in the timing line when
 #'   `options(combat.timing = TRUE)` is set. Defaults to the companion and the matrix shape,
 #'   e.g. `lmFit 18,270 x 1,500`; pass a cohort name to tell calls apart in a loop.
 #' @return An `MArrayLM`, `identical()` to what the backend's own `lmFit` returns for the
-#'   same input. Under either size gate, on a branch a block would flip, or at
-#'   `workers = 1`, that is literally what it is: one plain call to the backend with a
-#'   dispatch wrapper around it and no parallelism added.
+#'   same input. Under either size gate, or on a branch a block would flip, that is literally
+#'   what it is: one plain call to the backend with a dispatch wrapper around it and no
+#'   parallelism added. `workers = 1` with the default `chunks` is the same; a larger `chunks`,
+#'   or `options(combat.mem.chunk.cells = N)`, walks the blocks in this process instead, with
+#'   identical output. A `correlation = NULL` consensus is still resolved through
+#'   [duplicateCorrelation_parallel()]. `options(combat.fork = FALSE)` rules out every fork,
+#'   the progress reporter's included.
 #'
 #' @examples
 #' \donttest{
@@ -298,6 +334,16 @@ lmFit_parallel <- function(object, design = NULL, ndups = NULL, spacing = NULL,
     parallel_backend <- match.arg(parallel_backend, combat_backends())
   }
 
+  be <- limma_backend(backend,
+                      need_args = c("object", "design", "ndups", "spacing", "block",
+                                    "correlation", "weights", "method"),
+                      rebound = c("lm.series", "gls.series"))
+
+# Only supplied arguments are forwarded, and the refusals read the backend's own default for the rest.
+  given <- intersect(c("design", "ndups", "spacing", "block", "weights", "method"),
+                     names(match.call()))
+  if (!("method" %in% given)) method <- eval(formals(be$fn)$method, be$env)
+  if (!("ndups" %in% given)) ndups <- eval(formals(be$fn)$ndups, be$env)
   method <- match.arg(method, c("ls", "robust"))
   if (method == "robust") {
     stop("method = \"robust\" fits through mrlm, which rnaparallel does not split. Use ",
@@ -308,16 +354,10 @@ lmFit_parallel <- function(object, design = NULL, ndups = NULL, spacing = NULL,
          "one row and a row split would cut genes in half. Use limma::lmFit directly.",
          call. = FALSE)
   }
-
-  be <- limma_backend(backend,
-                      need_args = c("object", "design", "ndups", "spacing", "block",
-                                    "correlation", "weights", "method"),
-                      rebound = c("lm.series", "gls.series"))
   vendor_lm <- get("lm.series", envir = be$env, inherits = TRUE)
   vendor_gls <- get("gls.series", envir = be$env, inherits = TRUE)
 
-  # ndups is also reachable from y$printer, which lmFit resolves after the check above has
-  # already run, so the refusal is repeated where the resolved value arrives.
+# ndups also arrives from an MAList printer after the check above, and limma sends ndups >= 2 only to gls.series, so that is where the refusal fires.
   refuse_ndups <- function(ndups) {
     if (isTRUE(ndups > 1)) {
       stop("ndups = ", ndups, " came from the data object's printer layout. unwrapdups ",
@@ -353,8 +393,18 @@ lmFit_parallel <- function(object, design = NULL, ndups = NULL, spacing = NULL,
     # it. Left to the blocks it would be a trimmed mean over each block's genes alone.
     if (is.null(correlation)) {
       dupcor <- get("duplicateCorrelation", envir = be$env, inherits = TRUE)
-      correlation <- dupcor(M, design = design, ndups = ndups, spacing = spacing,
-                            block = block, weights = weights, ...)$consensus.correlation
+# Its own controls are passed by name, so an argument in `...` can never partially match one.
+      correlation <- tryCatch(
+        rp_uncapped(duplicateCorrelation_parallel(
+          M, design = design, ndups = ndups, spacing = spacing, block = block,
+          weights = weights, ..., workers = workers, chunks = chunks,
+          parallel_backend = parallel_backend, backend = dupcor,
+          label = NULL)),
+# Only a refusal hands the call to the backend's own duplicateCorrelation whole; any other error surfaces.
+        rnaparallel_refusal = function(e) {
+          dupcor(M, design = design, ndups = ndups, spacing = spacing, block = block,
+                 weights = weights, ...)
+        })$consensus.correlation
     }
     # Same lean rebuild as lm.series. `...` cannot live in a detached environment, so the
     # dots are captured as a list and spliced back in the same position they occupied, which
@@ -378,8 +428,7 @@ lmFit_parallel <- function(object, design = NULL, ndups = NULL, spacing = NULL,
 
   f <- be$fn
   environment(f) <- env
-  args <- list(object = object, design = design, ndups = ndups, spacing = spacing,
-               block = block, weights = weights, method = method, ...)
+  args <- c(list(object = object), mget(given, envir = environment()), list(...))
   # single-bracket with a list(), or an explicit correlation = NULL would add nothing and
   # arrive as missing, which is a different branch of lmFit
   if (!missing(correlation)) args["correlation"] <- list(correlation)

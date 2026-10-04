@@ -6,7 +6,7 @@
 ## The core function is still the original. This file does not contain a copy of
 ## ComBat-seq; it calls the original ComBat-seq function with six symbols rebound.
 
-#' ComBat-seq with its hot paths parallelised
+#' sva's ComBat_seq with its hot paths parallelized
 #'
 #' Runs ComBat-seq itself. The algorithm is not reimplemented and not copied: the
 #' original ComBat-seq function is called with six symbols rebound in a child of its own
@@ -17,11 +17,23 @@
 #' body, `vec2mat`, `estimateGLMCommonDisp`, `getOffset`, `monte_carlo_int_NB`, still
 #' resolves to the backend's own. Output is
 #' `identical()` to what `sva::ComBat_seq` returns for the same input, not merely
-#' close to it.
+#' close to it. An argument left out of the call is left out of the backend call too,
+#' so it takes the backend's own default rather than the copy shown in the usage line.
+#'
+#' The `glmFit` and tagwise row splits do not always run. edgeR fits a one-way design, one
+#' whose columns are exactly the levels of one factor, with a kernel whose result for a gene
+#' that does not converge depends on which other genes share the matrix, so neither split
+#' runs on one. The `glmFit` split runs only when `group` or `covar_mod` makes the design more
+#' than one-way; with `group = NULL` and no `covar_mod` the fit runs whole. The tagwise row
+#' split runs only when `covar_mod` makes a batch's own design more than one-way. With `group`
+#' alone or no covariates every batch's design is one-way, so the tagwise estimate is
+#' dispatched across batches and never split by rows. Where the tagwise split does run, it
+#' dispatches in parallel only when the dispatch across batches runs in this process; inside a
+#' worker of that dispatch it runs serially.
 #'
 #' @section Why a rebind and not a rewrite:
 #' An earlier version transcribed the algorithm by hand so the loop could be
-#' parallelised, and drifted from the original ComBat-seq twice in ways synthetic test data
+#' parallelized, and drifted from the original ComBat-seq twice in ways synthetic test data
 #' could not expose. The gene filter was written `!all(x <= 1) && var(x) > 0`
 #' against the original ComBat-seq's per-batch `all(x == 0)`, which returned 258 genes
 #' uncorrected and shifted `lib.size` for every surviving gene as well. And the
@@ -37,7 +49,8 @@
 #' from the backend's own environment, so the two can never be mixed.
 #'
 #' @section Backends for the parallelism:
-#' `parallel_backend` selects the framework: `"mclapply"` (default, forks),
+#' `parallel_backend` selects the framework: `"mclapply"` (forks; the default except
+#' on Windows with a multi-worker future plan, where the default is `"future"`),
 #' `"future"`, `"BiocParallel"`, `"foreach"`, or `"serial"`. All of them return
 #' bit-identical results, because each row chunk is a pure function of its own
 #' genes and every backend preserves chunk order. See [combat_backends()].
@@ -48,37 +61,41 @@
 #'
 #' `options(combat.fork = FALSE)` forces a serial run on any backend, with
 #' identical output. That is the escape hatch if forking upsets an IDE. Windows
-#' cannot fork and falls back to serial automatically, so results are correct there
-#' and not faster.
+#' cannot fork. With no future plan the default mclapply backend runs serially there
+#' and says so once; set `future::plan(future::multisession, workers = N)` and the
+#' default switches to the future backend, measured 3.57x at 6 workers.
 #'
 #' @section Dispatches too small to be worth a fork:
 #' ComBat-seq calls the quantile match and the dispersion estimate once per batch, not
 #' once per run, so batch count sets how thin each dispatch is. A 100-batch design hands
 #' over a hundredth of the samples at a time, and on a small matrix that is not worth it:
 #' measured 0.50x at 5,000 cells, 0.92x at 10,000 and 1.39x at 20,000.
-#' Dispatches below `getOption("combat.min.cells", 20000)` therefore run serially.
-#' Without that gate 500 genes by 1,000 samples across 100 batches ran at 0.80x,
-#' slower than not parallelising at all. Set the option to 0 to restore the old
-#' unconditional behaviour; output is identical either way.
+#' The quantile match below `getOption("combat.min.cells", 20000)` therefore runs
+#' serially; in ComBat-seq that option gates the quantile match and nothing else. Without that gate
+#' 500 genes by 1,000 samples across 100 batches ran at 0.80x, slower than not
+#' parallelizing at all.
 #'
 #' The threshold is per path, because the paths do not cost the same per cell.
 #' `qnbinom` in the quantile match earns a fork at 20,000 cells; dispersion
 #' estimation is cheaper and does not break even below 30,000, measuring
 #' 0.65x at 10,000 and 0.79x at 20,000, so it has its own
 #' `getOption("combat.min.disp.cells", 30000)`, and the GLM fit its own
-#' `getOption("combat.min.glm.cells", 1e5)`. One shared threshold made the
-#' dispersion split a net loss on small matrices with many batches.
+#' `getOption("combat.min.glm.cells", 1e5)`. The two dispatches across batches, the
+#' common and the tagwise dispersion, have `getOption("combat.min.batch.cells", 20000)`,
+#' counted over the whole filtered matrix. One shared threshold made the
+#' dispersion split a net loss on small matrices with many batches. Set
+#' `combat.min.cells`, `combat.min.disp.cells`, `combat.min.glm.cells` and
+#' `combat.min.batch.cells` all to 0 to dispatch unconditionally; output is identical
+#' either way.
 #'
 #' @section When this is worth reaching for:
 #' Almost always, and it is the companion with the most to win: the original is measured in
-#' minutes on a real cohort. It does have a floor. Measured on an M3 at the default worker
-#' count, companion against original, every arm `identical()`: 0.69x at 300 genes by 20 samples,
-#' 0.89x at 500 x 20, 1.19x at 1,000 x 20, 1.45x at 2,000 x 20, and 4.63x at 6,000 x 120.
-#' Below about a thousand genes call `sva::ComBat_seq` directly.
+#' minutes on a real cohort. Measured on an M3 at the default worker count, companion against
+#' original, every arm `identical()`: 4.63x at 6,000 genes by 120 samples.
 #'
-#' The row-split gates already decline on an input that small; what still dispatches there is
-#' the per-batch work, which carries no size gate because one whole-matrix estimate per batch
-#' is worth a fork at any realistic scale and is not worth one at three hundred genes.
+#' On a small input the four gates above send every dispatch serial, and the companion still
+#' runs faster than the original there, because its row-vectorized quantile match is a serial
+#' win: 1.20x at 300 genes by 20 samples with nothing dispatched.
 #'
 #' @param counts Raw count matrix, genes in rows, samples in columns.
 #' @param batch Batch vector, one entry per column of `counts`. Call
@@ -105,6 +122,10 @@
 #'   Measured on an 8-core machine with 4 performance cores, TMM on 15,000 genes by 9,000
 #'   specimens: 4 workers 10.74 s, 6 workers 7.26 s, 8 workers 11.60 s. Eight was slower than
 #'   four. The default resolved to 6 there and was optimal; raising it by hand made it worse.
+#'
+#'   With `parallel_backend = "foreach"` and a backend you registered yourself, `workers` sets
+#'   only the default chunk count, and that backend's width bounds concurrency; see
+#'   [combat_backends()].
 #' @param chunks Row chunks per parallel step. Defaults to `workers`, which is almost always
 #'   what you want. Passing `chunks = workers` explicitly is redundant. Raise it above
 #'   `workers` only to cut peak memory per worker, at slightly more fork overhead.
@@ -125,13 +146,19 @@
 #' @param backend Optional ComBat-seq function to wrap. Defaults to
 #'   `sva::ComBat_seq`, falling back to a visible top-level `ComBat_seq`.
 #'
-#' @param label Optional name for this call in the timing line, when
-#'   `options(combat.timing = TRUE)` is set. Defaults to the companion and the matrix shape,
-#'   e.g. `ComBat-seq 18,270 x 1,500`; pass a cohort name to tell calls apart in a loop.
+#' @param label Optional name for this call. It labels the progress bar, which draws by
+#'   default on macOS and Linux in an interactive session or on a terminal (`options(combat.progress = FALSE)`
+#'   turns it off), the stage column of the progress files, and the timing line under
+#'   `options(combat.timing = TRUE)`. Defaults to
+#'   the companion and the matrix shape, e.g. `ComBat-seq 18,270 x 1,500`; pass a cohort name
+#'   to tell calls apart in a loop.
 #' @return A gene-by-sample matrix of adjusted counts, `identical()` to what the
-#'   backend's own `ComBat_seq` returns for the same input. `workers = 1` takes a
-#'   plain `lapply` and adds no parallelism, so it is the backend function itself
-#'   with a thin dispatch wrapper.
+#'   backend's own `ComBat_seq` returns for the same input. `workers = 1` runs every
+#'   chunk in this process through `lapply`, but the quantile match still uses this
+#'   package's row-vectorized form rather than the backend's own cell loop whenever the
+#'   backend's `match_quantiles` is the text it was verified against; output is identical
+#'   either way. `options(combat.fork = FALSE)` rules out every fork, the progress
+#'   reporter's included.
 #'
 #' @examples
 #' \donttest{
@@ -198,7 +225,7 @@ ComBat_seq_parallel <- function(counts, batch, group = NULL, covar_mod = NULL,
                            workers = workers, chunks = chunks,
                            parallel_backend = parallel_backend)
     } else {
-      # An offset in the dots is exactly what makes a matrix call splittable, so honour it.
+      # An offset in the dots is exactly what makes a matrix call splittable, so honor it.
       # Without one each worker rebuilds lib.size from its own slice of genes, which moved
       # coefficients by 1.7 in testing and raises nothing, so that case is refused rather
       # than guessed. Unreachable from sva::ComBat_seq, which only calls glmFit on a DGEList.
@@ -220,9 +247,9 @@ ComBat_seq_parallel <- function(counts, batch, group = NULL, covar_mod = NULL,
                                  lib.size = NULL, weights = NULL,
                                  prior.count = 0.125, start = NULL, ...) {
     # accepted by the signature, so refuse it rather than discard it: a row split cannot
-    # honour a whole-matrix lib.size, and silently dropping it changes every fitted value
+    # honor a whole-matrix lib.size, and silently dropping it changes every fitted value
     if (!is.null(lib.size)) {
-      stop("pass offset, not lib.size: rnaparallel splits by row and cannot honour ",
+      stop("pass offset, not lib.size: rnaparallel splits by row and cannot honor ",
            "a whole-matrix lib.size", call. = FALSE)
     }
     glmFit_rows_parallel(y, design = design, dispersion = dispersion, offset = offset,
@@ -243,6 +270,13 @@ ComBat_seq_parallel <- function(counts, batch, group = NULL, covar_mod = NULL,
   env$estimateGLMTagwiseDisp <- function(y, design = NULL, offset = NULL, dispersion = NULL,
                                          prior.df = 10, trend = TRUE, span = NULL,
                                          AveLogCPM = NULL, weights = NULL, ...) {
+# edgeR forwards extra arguments into its tagwise interpolation and the row split is proven exact only without them, so the backend's own call runs instead.
+    if (...length()) {
+      rp_note_fallback("tagwise rows")
+      cl <- sys.call()
+      cl[[1L]] <- get("estimateGLMTagwiseDisp", envir = parent.env(env))
+      return(eval(cl, parent.frame()))
+    }
     estimateGLMTagwiseDisp_rows_parallel(y, design = design, dispersion = dispersion,
                                          offset = offset, prior.df = prior.df, trend = trend,
                                          span = span, AveLogCPM = AveLogCPM, weights = weights,
@@ -263,17 +297,14 @@ ComBat_seq_parallel <- function(counts, batch, group = NULL, covar_mod = NULL,
   # The backend body contains exactly two sapply calls: `sapply(batches_ind, length)`, whose
   # FUN is the primitive `length`, and the disp_common call, whose FUN is a closure mentioning
   # estimateGLMCommonDisp. The predicate below selects the second and only the second, and
-  # anything it does not recognise falls through to base::sapply untouched. It never sees the
+  # anything it does not recognize falls through to base::sapply untouched. It never sees the
   # lapply that drives monte_carlo_int_NB, whose sample() draws depend on the RNG state the
   # previous batch left behind and which therefore must stay sequential.
   env$sapply <- function(X, FUN, ..., simplify = TRUE, USE.NAMES = TRUE) {
-    targeted <- tryCatch(
-      is.function(FUN) && !is.primitive(FUN) &&
-        "estimateGLMCommonDisp" %in% all.names(body(FUN)),
-      error = function(e) FALSE)
+    targeted <- rp_batch_fun(FUN, "sapply")
 
     # installed under a base-R name, so anything this shim does not reproduce exactly goes
-    # back to base: it neither honours simplify = FALSE nor sets names on the result
+    # back to base: it neither honors simplify = FALSE nor sets names on the result
     if (!targeted || length(X) < 2L || !isTRUE(simplify) ||
         !is.null(names(X)) || is.character(X)) {
       return(base::sapply(X, FUN, ..., simplify = simplify, USE.NAMES = USE.NAMES))
@@ -290,21 +321,23 @@ ComBat_seq_parallel <- function(counts, batch, group = NULL, covar_mod = NULL,
     .cells <- tryCatch(length(get("counts", envir = environment(FUN), inherits = FALSE)),
                        error = function(e) Inf)
     parts <- combat_parallel_check(
-      combat_parallel_lapply(as.list(X), function(i) FUN(i, ...), workers,
+      combat_parallel_lapply(as.list(X), batch_job(lean_fun(FUN), ...), workers,
                              parallel_backend, cells = .cells,
                              min_cells = getOption("combat.min.batch.cells", 2e4),
                              # one scalar per batch, and batch counts exceed worker counts on
                              # real designs, so one fork per worker beats one fork per batch.
                              # Measured at 100 batches: 1428 ms to 1063 ms.
-                             preschedule = TRUE),
+                             preschedule = TRUE, relay = FALSE),
       "estimateGLMCommonDisp across batches", as.list(X))
 
     out <- unlist(parts, use.names = FALSE)
     # a batch returning anything but one number means the assumption above is wrong for this
     # input, so hand the whole call back to R rather than assemble something unverified
     if (length(out) != length(X) || !is.numeric(out)) {
+      rp_note_fallback("estimateGLMCommonDisp across batches")
       return(base::sapply(X, FUN, ..., simplify = simplify, USE.NAMES = USE.NAMES))
     }
+    rp_relay(parts)
     out
   }
 
@@ -326,12 +359,7 @@ ComBat_seq_parallel <- function(counts, batch, group = NULL, covar_mod = NULL,
   # by name as well as by the absence of the tagwise call, because getting this wrong is
   # silent.
   env$lapply <- function(X, FUN, ...) {
-    targeted <- tryCatch({
-      nm <- all.names(body(FUN))
-      is.function(FUN) && !is.primitive(FUN) &&
-        "estimateGLMTagwiseDisp" %in% nm &&
-        !any(c("mcint_fun", "monte_carlo_int_NB", "sample", "rnorm", "runif") %in% nm)
-    }, error = function(e) FALSE)
+    targeted <- rp_batch_fun(FUN, "lapply")
 
     # installed under a base-R name, so anything this shim does not reproduce exactly goes
     # straight back to base
@@ -339,23 +367,14 @@ ComBat_seq_parallel <- function(counts, batch, group = NULL, covar_mod = NULL,
       return(base::lapply(X, FUN, ...))
     }
 
-    # Each element is one whole-matrix estimate over every gene, so it always earns a
-    # dispatch. Nesting is prevented by combat_parallel_lapply, which marks the worker
-    # process it dispatches into and runs serially when it finds itself already inside one,
-    # so a rebound tagwise in the worker does not open a second pool. That guard used to be
-    # `mc.allow.recursive = FALSE`, which is an mclapply argument and covered the fork branch
-    # only; on Windows, where foreach/PSOCK is the sole working backend, this nested to
-    # workers + workers^2 processes until the flag replaced it.
-    # idx is deliberately not passed: its row check compares a chunk's returned rows against
-    # the indices it was given, and here one index returns a dispersion per gene. Dead workers
-    # and thrown errors are still caught, and the shape is checked below instead.
-    # Same floor as the common-dispersion dispatch above, and the same reason.
+# Gated by combat.min.batch.cells over the filtered matrix, the same floor as the common-dispersion dispatch above.
     .cells <- tryCatch(length(get("counts", envir = environment(FUN), inherits = FALSE)),
                        error = function(e) Inf)
     parts <- combat_parallel_check(
-      combat_parallel_lapply(as.list(X), function(i) FUN(i, ...), workers,
+      combat_parallel_lapply(as.list(X), batch_job(lean_fun(FUN), ...), workers,
                              parallel_backend, cells = .cells,
-                             min_cells = getOption("combat.min.batch.cells", 2e4)),
+                             min_cells = getOption("combat.min.batch.cells", 2e4), relay = FALSE),
+# No idx, because one batch returns a dispersion per gene rather than per index, so the shape is checked below instead.
       "estimateGLMTagwiseDisp across batches")
 
     # Compared against the matrix FUN actually operates on, not the entry-point argument:
@@ -366,13 +385,52 @@ ComBat_seq_parallel <- function(counts, batch, group = NULL, covar_mod = NULL,
                          error = function(e) NA_integer_)
     ok_shape <- !is.na(expected) && length(parts) == length(X) &&
       all(vapply(parts, function(z) is.numeric(z) && length(z) == expected, logical(1)))
-    if (!ok_shape) return(base::lapply(X, FUN, ...))
-    parts
+# A mismatch throws the parallel result away and recomputes the dominant stage serially, so the timing line has to say so.
+    if (!ok_shape) {
+      rp_note_fallback("tagwise across batches")
+      return(base::lapply(X, FUN, ...))
+    }
+    rp_relay(parts)
   }
+
+# A per-batch job reaches these rebinds through `env`, and left on this frame they would ship the raw `counts` to every socket worker.
+  .lean <- new.env(parent = rp_home())
+  .lean$workers <- workers; .lean$chunks <- chunks; .lean$parallel_backend <- parallel_backend
+  .lean$mq <- mq; .lean$env <- env
+
+  lean_fun <- function(FUN) {
+    src <- environment(FUN)
+    reads <- unique(c(all.names(body(FUN)), all.names(as.call(c(quote(list), formals(FUN))))))
+    keep <- intersect(reads, ls(src, all.names = TRUE))
+    touches <- c("<<-", "assign", "delayedAssign", "eval", "evalq", "parse", "get", "get0",
+                 "mget", "exists", "environment", "parent.frame", "parent.env",
+                 "sys.function", "sys.frame", "sys.call", "do.call", "match.fun")
+# A copy is exact only for a closure made in the original's own frame that neither resolves names at run time nor writes outside itself, so anything else ships unchanged.
+    if (!identical(parent.env(src), env) || "..." %in% keep || any(touches %in% reads)) {
+      return(FUN)
+    }
+    lean <- new.env(parent = env)
+    list2env(mget(keep, envir = src), envir = lean)
+    environment(FUN) <- lean
+    FUN
+  }
+  batch_job <- function(FUN, ...) {
+    force(FUN)
+    function(i) FUN(i, ...)
+  }
+  .lean$lean_fun <- lean_fun; .lean$batch_job <- batch_job
+
+  for (nm in ls(env)) environment(env[[nm]]) <- .lean
+  environment(.lean$lean_fun) <- .lean
+  environment(.lean$batch_job) <- .lean
 
   f <- be$fn
   environment(f) <- env
-  f(counts = counts, batch = batch, group = group, covar_mod = covar_mod,
-    full_mod = full_mod, shrink = shrink, shrink.disp = shrink.disp,
-    gene.subset.n = gene.subset.n)
+# An argument the caller left out stays out of the backend call, so it takes the backend's own default and not this signature's copy of it.
+  cl <- quote(f(counts = counts, batch = batch))
+  for (a in intersect(c("group", "covar_mod", "full_mod", "shrink", "shrink.disp", "gene.subset.n"),
+                      names(match.call()))) {
+    cl[[a]] <- as.name(a)
+  }
+  eval(cl)
 }

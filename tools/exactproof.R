@@ -2,17 +2,25 @@ suppressMessages({library(sva); library(edgeR); library(limma); library(statmod)
 suppressMessages(pkgload::load_all(".", quiet = TRUE))
 if (requireNamespace("RhpcBLASctl", quietly = TRUE)) RhpcBLASctl::blas_set_num_threads(1)
 
-# Without this the harness runs at production defaults, every fixture here falls under a size
-# gate, and the checks pass through the serial fallback while reporting the parallel path green.
-# Same list as tests/testthat/setup-parallel.R, and it has to move with it.
-options(combat.min.cells = 0, combat.min.disp.cells = 0, combat.min.ls.cells = 0,
-        combat.min.norm.cells = 0, combat.min.order.cells = 0,
-        combat.min.dupcor.cells = 0, combat.min.glm.cells = 0)
-pass <- 0L; fail <- 0L
+src <- unlist(lapply(list.files("R", pattern = "\\.R$", full.names = TRUE), readLines, warn = FALSE))
+gates <- sort(unique(unlist(regmatches(src, gregexpr("combat\\.min\\.[a-z]+(\\.[a-z]+)*", src)))))
+if (!length(gates)) stop("no combat.min.* gate found in R/; run this from the repository root", call. = FALSE)
+
+# Every size gate the code reads is zeroed, because a fixture under any one of them runs the serial fallback and still passes identical().
+options(setNames(rep(list(0), length(gates)), gates))
+cat("gates zeroed:", paste(gates, collapse = ", "), "\n\n")
+pass <- 0L; fail <- 0L; skipped <- 0L
 chk <- function(lbl, ok) {
   if (isTRUE(ok)) { pass <<- pass + 1L } else { fail <<- fail + 1L; cat(sprintf("  *** FAIL: %s\n", lbl)) }
 }
 q <- function(e) suppressMessages(e)
+n <- 0L
+spy <- function(idx, f, workers) { n <<- n + 1L; lapply(idx, f) }
+reach <- function(lbl, want, expr) {
+  n <<- 0L
+  q(expr)
+  chk(sprintf("%s reached the parallel layer %d times, want %d", lbl, n, want), n == want)
+}
 
 cat("=== ComBat_seq_parallel against sva::ComBat_seq ===\n")
 mk <- function(G, nb, per, seed, mu = 200, size = 5, outlier = 0) {
@@ -48,10 +56,36 @@ cv <- model.matrix(~ factor(rep(rep(c("x","y","z"), length.out = 12), 3)))
 ref <- q(sva::ComBat_seq(d$counts, batch = d$batch, group = NULL, covar_mod = cv))
 for (w in c(2L,4L,8L)) chk(sprintf("covar_mod w=%d", w),
   identical(ref, q(ComBat_seq_parallel(d$counts, batch = d$batch, group = NULL, covar_mod = cv, workers = w))))
-# every backend
-for (bk in c("mclapply","serial")) chk(sprintf("backend %s", bk),
-  identical(ref, q(ComBat_seq_parallel(d$counts, batch = d$batch, group = NULL, covar_mod = cv,
-                                       workers = 4L, parallel_backend = bk))))
+
+# The memory guard is off for the backend and reach checks, because on a loaded machine it can cut workers to one and send a dispatch serial for a reason unrelated to the code.
+guard <- options(combat.mem.guard = FALSE)
+fork <- .Platform$OS.type != "windows"
+arms <- c(setNames(as.list(combat_backends()), combat_backends()),
+          list(custom = function(idx, f, workers) parallel::mclapply(idx, f, mc.cores = if (fork) workers else 1L)))
+if (!fork) cat("  note: no fork() on Windows, so the backend arms check identity only\n")
+for (bk in names(arms)) {
+  plan0 <- if (bk == "future" && requireNamespace("future", quietly = TRUE)) future::plan(future::multicore, workers = 2L)
+  rnaparallel:::rp_count_reset()
+  p <- tryCatch(q(ComBat_seq_parallel(d$counts, batch = d$batch, group = NULL, covar_mod = cv,
+                                      workers = 4L, parallel_backend = arms[[bk]])), error = identity)
+  if (!is.null(plan0)) future::plan(plan0)
+  if (inherits(p, "error") && grepl(" needs ", conditionMessage(p))) {
+    skipped <- skipped + 1L
+    cat(sprintf("  SKIP backend %s: %s\n", bk, conditionMessage(p)))
+    next
+  }
+  par <- rnaparallel:::.rp_dispatch$par; ser <- rnaparallel:::.rp_dispatch$ser
+  chk(sprintf("backend %s", bk), identical(ref, p))
+  if (fork) chk(sprintf("backend %s ran every dispatch on workers (par=%d ser=%d)", bk, par, ser),
+                if (bk == "serial") par == 0L && ser > 0L else par > 0L && ser == 0L)
+}
+for (cf in cfgs) reach(paste("ComBat", cf$lbl), 2L + nlevels(cf$d$batch),
+  ComBat_seq_parallel(cf$d$counts, batch = cf$d$batch, group = cf$grp, workers = 2L, parallel_backend = spy))
+reach("ComBat group supplied", 7L,
+      ComBat_seq_parallel(d$counts, batch = d$batch, group = g, workers = 4L, parallel_backend = spy))
+reach("ComBat covar_mod", 7L,
+      ComBat_seq_parallel(d$counts, batch = d$batch, group = NULL, covar_mod = cv, workers = 4L, parallel_backend = spy))
+options(guard)
 cat(sprintf("  ComBat: %d checks\n", pass + fail))
 
 cat("\n=== limma and edgeR companions ===\n")
@@ -91,6 +125,17 @@ chk("removeBatchEffect design", identical(removeBatchEffect(v$E, batch = bch, de
 for (k in c(1L,3L,7L)) chk(paste("removeBatchEffect chunks", k),
   identical(rbe_ref, removeBatchEffect_parallel(v$E, batch = bch, workers = 4L, chunks = k)))
 chk("END TO END final gene list", identical(ref_tt, par_tt))
+guard <- options(combat.mem.guard = FALSE)
+for (m in c("TMM", "TMMwsp", "RLE", "upperquartile"))
+  reach(paste("normLibSizes", m), if (m == "TMM") 2L else 1L,
+        calcNormFactors_parallel(y, method = m, workers = 4L, parallel_backend = spy))
+reach("lmFit chunks 2", 1L, lmFit_parallel(v, des, workers = 4L, chunks = 2L, parallel_backend = spy))
+reach("lmFit array weights", 1L, lmFit_parallel(v$E, des, weights = aw, workers = 4L, parallel_backend = spy))
+reach("lmFit blocked", 1L, lmFit_parallel(v, des, block = blk, correlation = dcr$consensus.correlation,
+                                          workers = 4L, parallel_backend = spy))
+reach("dupcor", 1L, duplicateCorrelation_parallel(v, des, block = blk, workers = 4L, parallel_backend = spy))
+reach("removeBatchEffect batch", 1L, removeBatchEffect_parallel(v$E, batch = bch, workers = 4L, parallel_backend = spy))
+options(guard)
 
-cat(sprintf("\n==== %d checks, %d passed, %d failed ====\n", pass + fail, pass, fail))
+cat(sprintf("\n==== %d checks, %d passed, %d failed, %d skipped ====\n", pass + fail, pass, fail, skipped))
 if (fail > 0) quit(status = 1)

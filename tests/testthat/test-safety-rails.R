@@ -154,8 +154,8 @@ test_that("each least-squares branch reads its own size gate", {
   # The `fork_default` path this test exercises when the option is unset goes through
   # rp_copy_free(), which is intentionally OS-gated: mclapply cannot fork on Windows, so a
   # Windows caller correctly reads Inf (the split never runs) rather than the fork_default
-  # value a Unix caller would get. Same reason the neighbouring
-  # "the break-even gates follow the backend's copy behaviour, not the OS" test skips on
+  # value a Unix caller would get. Same reason the neighboring
+  # "the break-even gates follow the backend's copy behavior, not the OS" test skips on
   # Windows for this exact code path; this test asserts the OS-correct value on each platform
   # instead of skipping outright, since the option-set branch (the actual regression this
   # test exists to catch) is identical on every OS.
@@ -172,11 +172,11 @@ test_that("each least-squares branch reads its own size gate", {
   })
 })
 
-test_that("the break-even gates follow the backend's copy behaviour, not the OS", {
+test_that("the break-even gates follow the backend's copy behavior, not the OS", {
   # These thresholds were tuned where a worker INHERITS the matrix. Keyed to the OS, a macOS
   # caller on foreach got the inherited gate and lmFit measured 0.24x against the original.
   # The question is the COPY, not fork(): foreach builds a FORK cluster on Unix and is still
-  # slow, because doParallel's cluster form serialises every task. So foreach is asked rather
+  # slow, because doParallel's cluster form serializes every task. So foreach is asked rather
   # than assumed: doParallelMC drives mclapply and copies nothing, doParallelSNOW does not.
   fk <- rnaparallel:::rp_copy_free
   skip_on_os("windows")
@@ -195,7 +195,7 @@ test_that("the break-even gates follow the backend's copy behaviour, not the OS"
     expect_true(fk("foreach"))               # doParallelMC drives mclapply, nothing is copied
     cl <- parallel::makeCluster(2, type = "PSOCK")
     doParallel::registerDoParallel(cl)
-    expect_false(fk("foreach"))              # doParallelSNOW serialises every task
+    expect_false(fk("foreach"))              # doParallelSNOW serializes every task
     parallel::stopCluster(cl)
     foreach::registerDoSEQ()
   })
@@ -215,4 +215,118 @@ test_that("the break-even gates follow the backend's copy behaviour, not the OS"
     expect_identical(rnaparallel:::rp_order_min_cells("mclapply"), 4e6)
     expect_identical(rnaparallel:::rp_order_min_cells("foreach"), 4e7)
   })
+})
+
+gate_count <- function(option, run) {
+  withr::local_options(structure(list(NULL), names = option))
+  withr::local_options(combat.mem.guard = FALSE)
+  n <- 0L
+  run(function(idx, f, workers) { n <<- n + 1L; lapply(idx, f) })
+  n
+}
+
+test_that("combat.min.cells opens at its default on the quantile match and the weighted lmFit", {
+  skip_if_not_installed("sva")
+  skip_if_not_installed("limma")
+  mq <- function(G, n) {
+    set.seed(1)
+    cs <- matrix(rnbinom(G * n, mu = 50, size = 2), G, n)
+    om <- matrix(runif(G * n, 20, 80), G, n)
+    op <- runif(G, 0.05, 0.5)
+    function(b) rnaparallel:::match_quantiles_parallel(sva:::match_quantiles, cs, om, op, om, op,
+                                                       workers = 2L, chunks = 2L,
+                                                       parallel_backend = b)
+  }
+  expect_identical(gate_count("combat.min.cells", mq(2000L, 10L)), 1L)
+  expect_identical(gate_count("combat.min.cells", mq(1999L, 10L)), 0L)
+  wls <- function(G, n) {
+    set.seed(2)
+    M <- matrix(rnorm(G * n), G, n)
+    W <- matrix(runif(G * n, 0.5, 2), G, n)
+    des <- cbind(1, rep(0:1, length.out = n))
+    function(b) lmFit_parallel(M, des, weights = W, workers = 2L, chunks = 2L, parallel_backend = b)
+  }
+  expect_identical(gate_count("combat.min.cells", wls(1000L, 20L)), 1L)
+  expect_identical(gate_count("combat.min.cells", wls(999L, 20L)), 0L)
+})
+
+test_that("combat.min.wt.genes opens at its default of 2000 genes", {
+  skip_if_not_installed("limma")
+  wls <- function(G) {
+    set.seed(2)
+    M <- matrix(rnorm(G * 12), G, 12)
+    W <- matrix(runif(G * 12, 0.5, 2), G, 12)
+    des <- cbind(1, rep(0:1, 6))
+    function(b) lmFit_parallel(M, des, weights = W, workers = 2L, chunks = 2L, parallel_backend = b)
+  }
+  expect_identical(gate_count("combat.min.wt.genes", wls(2000L)), 1L)
+  expect_identical(gate_count("combat.min.wt.genes", wls(1999L)), 0L)
+})
+
+test_that("unweighted and array-weighted lmFit stay shut under combat.min.ls.cells at default combat.min.cells", {
+  skip_if_not_installed("limma")
+  fit <- function(w) {
+    set.seed(2)
+    M <- matrix(rnorm(1000 * 24), 1000, 24)
+    des <- cbind(1, rep(0:1, 12))
+    function(b) lmFit_parallel(M, des, weights = w, workers = 2L, chunks = 2L, parallel_backend = b)
+  }
+  withr::local_options(combat.min.ls.cells = NULL, combat.min.wt.genes = 0)
+  expect_identical(gate_count("combat.min.cells", fit(NULL)), 0L)
+  expect_identical(gate_count("combat.min.cells", fit(runif(24, 0.5, 2))), 0L)
+  expect_identical(gate_count("combat.min.cells", fit(matrix(runif(1000 * 24, 0.5, 2), 1000, 24))), 1L)
+})
+
+test_that("combat.min.disp.cells opens at its default on the tagwise row split", {
+  skip_if_not_installed("edgeR")
+  tw <- function(G) {
+    set.seed(3)
+    y <- matrix(rnbinom(G * 30, mu = 50, size = 4), G, 30)
+    des <- cbind(1, as.numeric(scale(seq_len(30))))
+    function(b) rnaparallel:::estimateGLMTagwiseDisp_rows_parallel(
+      y, design = des, dispersion = 0.2, prior.df = 0, workers = 2L, chunks = 2L,
+      parallel_backend = b)
+  }
+  expect_identical(gate_count("combat.min.disp.cells", tw(1000L)), 1L)
+  expect_identical(gate_count("combat.min.disp.cells", tw(999L)), 0L)
+})
+
+test_that("combat.min.glm.cells opens at its default on the glmFit row split", {
+  skip_if_not_installed("edgeR")
+  gf <- function(G) {
+    set.seed(4)
+    y <- matrix(rnbinom(G * 20, mu = 50, size = 4), G, 20)
+    des <- cbind(1, rep(0:1, 10), rnorm(20))
+    off <- matrix(log(colSums(y)), G, 20, byrow = TRUE)
+    function(b) rnaparallel:::glmFit_rows_parallel(y, design = des, dispersion = 0.1, offset = off,
+                                                   workers = 2L, chunks = 2L, parallel_backend = b)
+  }
+  expect_identical(gate_count("combat.min.glm.cells", gf(5000L)), 1L)
+  expect_identical(gate_count("combat.min.glm.cells", gf(4999L)), 0L)
+})
+
+test_that("combat.min.dupcor.cells opens at its default", {
+  skip_if_not_installed("limma")
+  skip_if_not_installed("statmod")
+  dc <- function(G) {
+    set.seed(5)
+    M <- matrix(rnorm(G * 10), G, 10)
+    des <- cbind(1, rep(0:1, each = 5))
+    function(b) duplicateCorrelation_parallel(M, des, block = rep(1:5, each = 2), workers = 2L,
+                                              chunks = 2L, parallel_backend = b)
+  }
+  expect_identical(gate_count("combat.min.dupcor.cells", dc(500L)), 1L)
+  expect_identical(gate_count("combat.min.dupcor.cells", dc(499L)), 0L)
+})
+
+test_that("combat.min.batch.cells opens at its default on both across-batch dispatches", {
+  skip_if_not_installed("sva")
+  cb <- function(G) {
+    set.seed(6)
+    y <- matrix(rnbinom(G * 20, mu = 60, size = 4), G, 20)
+    function(b) quietly(ComBat_seq_parallel(y, batch = rep(1:2, each = 10), group = NULL,
+                                            workers = 2L, parallel_backend = b))
+  }
+  expect_identical(gate_count("combat.min.batch.cells", cb(1000L)), 4L)
+  expect_identical(gate_count("combat.min.batch.cells", cb(999L)), 2L)
 })

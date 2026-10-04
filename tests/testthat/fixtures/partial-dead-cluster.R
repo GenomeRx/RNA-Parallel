@@ -3,7 +3,10 @@
 # working tree. Breaking combat_cluster_teardown in the source and re-running left this green.
 local({
   src <- Sys.getenv("RNAPARALLEL_SRC", "")
-  if (nzchar(src) && requireNamespace("pkgload", quietly = TRUE)) {
+  if (nzchar(src)) {
+    if (!requireNamespace("pkgload", quietly = TRUE)) {
+      stop("RNAPARALLEL_SRC names a source tree but pkgload is not installed to load it")
+    }
     suppressMessages(pkgload::load_all(src, quiet = TRUE))
   } else {
     library(rnaparallel)

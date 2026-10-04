@@ -85,6 +85,56 @@ test_that("calcNormFactors_parallel actually dispatches", {
   expect_identical(spy2$count(), 2L)
 })
 
+test_that("every lmFit branch and removeBatchEffect dispatch exactly once", {
+  skip_if_no_limma()
+  d <- fixture()
+  aw <- limma::arrayWeights(d$v$E, d$design)
+  bch <- factor(rep(1:4, length.out = ncol(d$counts)))
+  cases <- list(
+    "fast, no weights" = list(function(b) lmFit_parallel(d$v$E, d$design, workers = 2L,
+                                                         chunks = 4L, parallel_backend = b),
+                              function() limma::lmFit(d$v$E, d$design)),
+    "fast, array weights" = list(function(b) lmFit_parallel(d$v$E, d$design, weights = aw,
+                                                            workers = 2L, chunks = 4L,
+                                                            parallel_backend = b),
+                                 function() limma::lmFit(d$v$E, d$design, weights = aw)),
+    "gls, voom weights" = list(function(b) lmFit_parallel(d$v, d$design, block = d$block,
+                                                          correlation = 0.3, workers = 2L,
+                                                          chunks = 4L, parallel_backend = b),
+                               function() limma::lmFit(d$v, d$design, block = d$block,
+                                                       correlation = 0.3)),
+    "gls, unweighted" = list(function(b) lmFit_parallel(d$v$E, d$design, block = d$block,
+                                                        correlation = 0.3, workers = 2L,
+                                                        chunks = 4L, parallel_backend = b),
+                             function() limma::lmFit(d$v$E, d$design, block = d$block,
+                                                     correlation = 0.3)),
+    "removeBatchEffect" = list(function(b) removeBatchEffect_parallel(d$v$E, batch = bch,
+                                                                      workers = 2L, chunks = 4L,
+                                                                      parallel_backend = b),
+                               function() limma::removeBatchEffect(d$v$E, batch = bch)))
+  for (nm in names(cases)) {
+    spy <- counting()
+    expect_identical(cases[[nm]][[1L]](spy$backend), cases[[nm]][[2L]](), info = nm)
+    expect_identical(spy$count(), 1L, info = nm)
+  }
+})
+
+test_that("every normalization method dispatches its own count on a DGEList too", {
+  skip_if_no_limma()
+  d <- fixture()
+  want <- c(TMM = 2L, TMMwsp = 1L, RLE = 1L, upperquartile = 1L, none = 0L)
+  for (m in names(want)) {
+    for (input in c("matrix", "DGEList")) {
+      x <- if (input == "matrix") d$counts else edgeR::DGEList(d$counts)
+      spy <- counting()
+      got <- calcNormFactors_parallel(x, method = m, workers = 2L, chunks = 4L,
+                                      parallel_backend = spy$backend)
+      expect_identical(got, edgeR_norm(x, method = m), info = paste(m, input))
+      expect_identical(spy$count(), want[[m]], info = paste(m, input))
+    }
+  }
+})
+
 test_that("the backend gate refuses a limma whose rebind target moved", {
   skip_if_no_limma()
   d <- fixture()
@@ -117,7 +167,7 @@ test_that("a backend returning the wrong number of chunks is refused, not reasse
   short <- function(idx, f, workers) lapply(idx, f)[-1L]
   expect_error(lmFit_parallel(d$v, d$design, workers = 2L, chunks = 4L,
                               parallel_backend = short),
-               "length|chunk|result")
+               "must return a list of length 4", fixed = TRUE)
 })
 
 test_that("blocks that took different branches are never assembled into one result", {

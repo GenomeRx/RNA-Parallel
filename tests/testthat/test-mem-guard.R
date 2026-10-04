@@ -1,12 +1,4 @@
-## The memory guard: rp_mem_available(), rp_mem_rss(), rp_mem_cap(), rp_mem_peak().
-##
-## /proc is the Linux source; the `ps` package is the cross-platform fallback (same pattern
-## as rp_getppid() below), so these are NA only when NEITHER is available, not simply "off
-## Linux". This suite runs on Windows too, and with `ps` installed (it is a Suggests
-## dependency) these now return real numbers there, which is the whole point of having the
-## fallback. Real arithmetic elsewhere in this file is exercised by mocking
-## rp_mem_available()/rp_mem_rss() rather than depending on actual system memory pressure,
-## which is not reproducible in CI.
+# The memory readers use /proc on Linux and ps elsewhere, so they are NA only with neither, and the cap arithmetic below mocks them.
 
 test_that("rp_mem_available and rp_mem_rss return NA only with neither /proc nor ps", {
   skip_if(file.exists("/proc/meminfo"), "this machine has /proc; not exercising the NA path")
@@ -40,8 +32,7 @@ test_that("rp_mem_peak returns a real number via ps off Linux", {
 })
 
 test_that("rp_mem_cap is a no-op when it cannot read memory (NA means proceed)", {
-  # Works on every platform: on Linux the mock stands in for a bad reading; off Linux
-  # rp_mem_available()/rp_mem_rss() already return NA on their own.
+  withr::local_options(combat.mem.guard = TRUE)
   testthat::local_mocked_bindings(
     rp_mem_available = function() NA_real_,
     rp_mem_rss = function() NA_real_,
@@ -51,6 +42,7 @@ test_that("rp_mem_cap is a no-op when it cannot read memory (NA means proceed)",
 })
 
 test_that("rp_mem_cap is a no-op for workers = 1 regardless of memory", {
+  withr::local_options(combat.mem.guard = TRUE)
   testthat::local_mocked_bindings(
     rp_mem_available = function() 1 * 2^30,   # 1 GB available
     rp_mem_rss = function() 100 * 2^30,       # a 100 GB parent
@@ -61,6 +53,7 @@ test_that("rp_mem_cap is a no-op for workers = 1 regardless of memory", {
 })
 
 test_that("rp_mem_cap passes workers through when the fit clears headroom", {
+  withr::local_options(combat.mem.guard = TRUE)
   testthat::local_mocked_bindings(
     rp_mem_available = function() 100 * 2^30,  # 100 GB available
     rp_mem_rss = function() 1 * 2^30,          # 1 GB parent
@@ -72,9 +65,8 @@ test_that("rp_mem_cap passes workers through when the fit clears headroom", {
 })
 
 test_that("default combat.mem.divergence is 1, not the guard's earlier 0.25", {
-  # The PR that added this guard measured 4 workers off a 23 GB parent needing 111 GB, a
-  # real per-worker divergence of about 0.96: at the old 0.25 default this exact case
-  # computed only 23 GB needed and would have proceeded unwarned into the same kill.
+  withr::local_options(combat.mem.guard = TRUE)
+# A measured run of 4 workers off a 23 GB parent needed 111 GB, a per-worker divergence of about 0.96.
   testthat::local_mocked_bindings(
     rp_mem_available = function() 30 * 2^30,   # 30 GB available (headroom 24 GB)
     rp_mem_rss = function() 23 * 2^30,         # the PR's own measured 23 GB parent
@@ -84,14 +76,13 @@ test_that("default combat.mem.divergence is 1, not the guard's earlier 0.25", {
   # at divergence = 1: 4 * 23 GB = 92 GB needed, far past 24 GB headroom -> must degrade
   expect_warning(fit <- rnaparallel:::rp_mem_cap(4L), "need")
   expect_true(fit < 4L)
-  # at the OLD 0.25 default this same case computed 4 * 23 * 0.25 = 23 GB needed, which is
-  # under 24 GB headroom and would NOT have degraded, confirming the default actually
-  # changed behavior on the case it exists to catch, not just the option's stated value
+# At divergence 0.25 the same case needs 4 * 23 * 0.25 = 23 GB, under the 24 GB headroom, so it must not degrade.
   withr::local_options(combat.mem.divergence = 0.25)
   expect_identical(rnaparallel:::rp_mem_cap(4L), 4L)
 })
 
 test_that("rp_mem_cap degrades workers instead of leaving a fit that would be killed", {
+  withr::local_options(combat.mem.guard = TRUE)
   testthat::local_mocked_bindings(
     rp_mem_available = function() 10 * 2^30,   # 10 GB available
     rp_mem_rss = function() 5 * 2^30,          # 5 GB parent
@@ -107,6 +98,7 @@ test_that("rp_mem_cap degrades workers instead of leaving a fit that would be ki
 })
 
 test_that("rp_mem_cap never degrades below 1 worker", {
+  withr::local_options(combat.mem.guard = TRUE)
   testthat::local_mocked_bindings(
     rp_mem_available = function() 1 * 2^20,    # 1 MB available: nothing fits
     rp_mem_rss = function() 50 * 2^30,         # 50 GB parent
@@ -138,6 +130,7 @@ test_that("combat.mem.divergence = 0 disables the cap", {
 })
 
 test_that("a garbage combat.mem.divergence is refused, not silently ignored", {
+  withr::local_options(combat.mem.guard = TRUE)
   testthat::local_mocked_bindings(
     rp_mem_available = function() 100 * 2^30,
     rp_mem_rss = function() 1 * 2^30,
@@ -153,6 +146,7 @@ test_that("a garbage combat.mem.guard is refused, not silently ignored", {
 })
 
 test_that("rp_mem_cap is reached from rp_prologue, not just directly", {
+  withr::local_options(combat.mem.guard = TRUE)
   testthat::local_mocked_bindings(
     rp_mem_available = function() 10 * 2^30,
     rp_mem_rss = function() 5 * 2^30,
@@ -164,6 +158,7 @@ test_that("rp_mem_cap is reached from rp_prologue, not just directly", {
 })
 
 test_that("the mem-guard warning names all three numbers, not just the outcome", {
+  withr::local_options(combat.mem.guard = TRUE)
   testthat::local_mocked_bindings(
     rp_mem_available = function() 10 * 2^30,
     rp_mem_rss = function() 5 * 2^30,
@@ -175,41 +170,30 @@ test_that("the mem-guard warning names all three numbers, not just the outcome",
 })
 
 test_that("worker survives dispatch on a healthy run even when its own ppid is 1", {
-  # Regression test for a real bug: an earlier version of the orphan-fork exit check quit()d
-  # any worker whose OWN ppid was 1, which is true from birth for every Unix PSOCK worker
-  # (parallel/parallelly launch them via `sh -c "... &"`) and any mclapply fork inside a
-  # container where R itself is PID 1. Neither has anything to do with the master dying.
-  # Exercised here against every REAL installed backend, not a mock, because the bug only
-  # manifests inside a genuinely spawned worker process; mocking rp_getppid()/ps::ps_handle()
-  # in the test process proves nothing about what a real forked/socket child observes.
+  skip_if_not_installed("sva")
+# Every Unix PSOCK worker has ppid 1 from birth, so this runs each real backend rather than a mock.
   d <- make_counts(22, G = 60, n_per_batch = c(4, 4))
   ref <- quietly(sva::ComBat_seq(d$counts, d$batch, group = NULL))
   needs <- c(mclapply = "parallel", future = "future.apply",
              BiocParallel = "BiocParallel", foreach = "doParallel")
-  exercised <- 0L
+  dropped <- character()
   for (be in setdiff(combat_backends(), "serial")) {
     pkg <- needs[[be]]
-    if (!requireNamespace(pkg, quietly = TRUE)) next
-    exercised <- exercised + 1L
-    if (be == "future") {
-      old <- future::plan(future::multisession, workers = 2)
-      on.exit(future::plan(old), add = TRUE)
+    if (!requireNamespace(pkg, quietly = TRUE)) {
+      dropped <- c(dropped, be)
+      next
     }
-    got <- quietly(ComBat_seq_parallel(d$counts, d$batch, group = NULL,
-                                       workers = 2L, parallel_backend = be))
+    got <- local({
+      if (be == "future") local_socket_plan(2L)
+      quietly(ComBat_seq_parallel(d$counts, d$batch, group = NULL,
+                                  workers = 2L, parallel_backend = be))
+    })
     expect_identical(got, ref, info = be)
   }
-  skip_if(exercised == 0L, "no real multi-process backend installed to exercise this on")
+  if (length(dropped)) skip(paste("not installed, so not exercised:", paste(dropped, collapse = ", ")))
 })
 
-## rp_getppid(): a general-purpose cross-platform ppid reader kept for anything else that
-## wants it. It does not exist as a base R function on every build (confirmed FALSE via
-## exists() on the R 4.6.1 UCRT Windows build this package is tested on). NOT read by the
-## orphan-fork exit check any more (see test-parallel.R's "worker survives on a healthy run
-## even when its own ppid is 1" for that): ppid alone is 1 for reasons that have nothing to
-## do with the master dying (every Unix PSOCK worker launches via `sh -c "... &"`, orphaned
-## from birth), so the exit check now asks whether the recorded master_pid specifically is
-## still alive via `ps::ps_handle()`, not what this worker's own ppid happens to be.
+# The orphan-fork exit check runs only in parallel's own forks (isChild()) and quits when rp_getppid() differs from master_pid, so an NA ppid skips it.
 
 test_that("rp_getppid never errors, even when Sys.getppid does not exist on this build", {
   expect_no_error(v <- rnaparallel:::rp_getppid())
@@ -231,4 +215,23 @@ test_that("rp_getppid returns NA, not an error, when both Sys.getppid and ps are
     .package = "base"
   )
   expect_true(is.na(rnaparallel:::rp_getppid()))
+})
+
+test_that("a fork whose ppid reads NA skips the orphan check and finishes its chunk", {
+  skip_on_os("windows")
+  withr::local_options(combat.progress = FALSE)
+  d <- withr::local_tempdir()
+  testthat::local_mocked_bindings(
+    rp_getppid = function() { file.create(file.path(d, Sys.getpid())); NA_integer_ },
+    .package = "rnaparallel"
+  )
+  exec <- function(idx, f, w) {
+    jobs <- lapply(idx, function(i) parallel::mcparallel(f(i)))
+    unname(parallel::mccollect(jobs))
+  }
+  idx <- rnaparallel:::combat_row_chunks(12L, chunks = 2L)
+  out <- rnaparallel:::combat_parallel_lapply(idx, function(i) sum(i), workers = 2L,
+                                              parallel_backend = exec, cells = Inf, min_cells = 0)
+  expect_identical(out, lapply(idx, sum))
+  expect_length(list.files(d), length(idx))
 })

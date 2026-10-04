@@ -7,20 +7,17 @@
 ## Nothing in the body reduces across genes, which is why a row split inside lmFit is exact
 ## here for the same reason it is exact in lmFit_parallel.
 
-#' limma's `removeBatchEffect` with its `lmFit` parallelised
+#' limma's `removeBatchEffect` with its `lmFit` parallelized
 #'
 #' Runs `limma::removeBatchEffect` itself. The one expensive call inside it, `lmFit`, is rebound
 #' to [lmFit_parallel()] in a child of limma's environment; every other symbol in the body still
 #' resolves to limma's own code, and the returned matrix is `identical()` to the original's.
 #'
 #' @section Why this one is worth having:
-#' It is called once per cohort in a batch-effect PCA and again on the pooled matrix, and its
-#' cost grows worse than linearly in samples. Measured against limma 3.62.2 on 22,000 genes:
-#' 8.5 s at 948 samples and 154 batches, 44.2 s at 3,000 samples and 250 batches, and it did not
-#' finish inside ten minutes at 9,493 samples. A pipeline that calls it six times a run pays
-#' that six times.
+#' In a batch-effect PCA it runs once per cohort and once more on the pooled matrix, so a
+#' five-cohort analysis calls it six times.
 #'
-#' @section What is not parallelised:
+#' @section What is not parallelized:
 #' The final `x - beta %*% t(X.batch)` is one BLAS call over the whole matrix. It is not split,
 #' because a matrix product is not row-associative in floating point once BLAS is threaded, and
 #' the whole product costs a fraction of the fit it follows.
@@ -33,13 +30,18 @@
 #' genes by 20 samples, 0.92x at 20,000 x 50, 0.98x at 20,000 x 200, then 1.91x at 20,000 x 500
 #' once the matrix is large enough for the split to run at all.
 #'
-#' A wide batch design is what makes it worth having: the original's cost grows worse than
-#' linearly in samples, measured 8.5 s at 948 samples and 154 batches against 44.2 s at 3,000
-#' samples and 250 batches.
-#'
 #' @param x,batch,batch2,covariates,design,group Passed to `limma::removeBatchEffect` unchanged.
+#'   One left out is not passed at all, so it takes the backend's own default.
 #' @param ... Passed through to the underlying `lmFit`. `method = "robust"` and `ndups >= 2`
 #'   are refused by [lmFit_parallel()] for the reasons given there, so they are refused here.
+#' @param backend Optional `removeBatchEffect` to wrap. Its `lmFit` is the one its own
+#'   environment resolves, so the two always come from the same copy of limma. Defaults to
+#'   `limma::removeBatchEffect`.
+#' @param label Optional name for this call. It is the stage name on the progress bar, which
+#'   draws by default on macOS and Linux in an interactive session or on a terminal
+#'   (`options(combat.progress = FALSE)` turns it off), and in the timing line when
+#'   `options(combat.timing = TRUE)` is set. Defaults to the companion and the matrix shape,
+#'   e.g. `removeBatchEffect 22,000 x 948`; pass a cohort name to tell calls apart in a loop.
 #' @inheritParams lmFit_parallel
 #' @return The batch-corrected matrix `limma::removeBatchEffect` returns, `identical()` to it.
 #'
@@ -53,7 +55,7 @@
 #' }
 #' @export
 removeBatchEffect_parallel <- function(x, batch = NULL, batch2 = NULL, covariates = NULL,
-                                       design = matrix(1, ncol(x), 1), group = NULL, ...,
+                                       design = NULL, group = NULL, ...,
                                        workers = NULL, chunks = NULL,
                                        parallel_backend = getOption("combat.backend", combat_default_backend()),
                                        backend = NULL, label = NULL) {
@@ -63,7 +65,8 @@ removeBatchEffect_parallel <- function(x, batch = NULL, batch2 = NULL, covariate
   .spare <- combat_children()
   on.exit(combat_reap(.spare), add = TRUE)
 
-  workers <- rp_prologue(workers)
+# Validated here but capped once, below, where memory is read after removeBatchEffect's own copies.
+  workers <- rp_uncapped(rp_prologue(workers))
 
   # timing and quieting are on.exit hooks, so an error unwinds the sink and still reports the
   # elapsed line: a failed run says where it failed instead of vanishing. Placed after the
@@ -88,12 +91,17 @@ removeBatchEffect_parallel <- function(x, batch = NULL, batch2 = NULL, covariate
   }
 
   renv <- new.env(parent = env)
-  renv$lmFit <- function(object, design = NULL, ndups = NULL, spacing = NULL, ...) {
-    lmFit_parallel(object, design = design, ndups = ndups, spacing = spacing, ...,
-                   workers = workers, chunks = chunks,
-                   parallel_backend = parallel_backend)
+  renv$lmFit <- function(...) {
+    capped <- rp_mem_cap(workers)
+# The lmFit the backend's own body would reach, so the pair never comes from two copies of limma.
+    lm_fn <- get("lmFit", envir = env, mode = "function", inherits = TRUE)
+    rp_uncapped(lmFit_parallel(..., workers = capped, chunks = chunks,
+                               parallel_backend = parallel_backend, backend = lm_fn))
   }
   environment(fn) <- renv
-  fn(x = x, batch = batch, batch2 = batch2, covariates = covariates,
-     design = design, group = group, ...)
+# Only the arguments the caller supplied are forwarded, so every default is the backend's own.
+  given <- intersect(c("batch", "batch2", "covariates", "design", "group"), names(match.call()))
+  fwd <- lapply(given, as.name)
+  names(fwd) <- given
+  eval(as.call(c(list(quote(fn), x = quote(x)), fwd, quote(...))))
 }

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Render the macOS verification report for rnaparallel.
 #
-# Accelerate is the system BLAS here and manages its own thread pool, so there is no
-# OPENBLAS_NUM_THREADS to pin as there is on Linux. What this guards is the other case: a
-# user-installed OpenBLAS or MKL build of R, where every forked worker would open its own
+# The published macOS report ran on R's single-threaded reference BLAS, which has no thread
+# pool to pin. What this guards is the other case: Accelerate (vecLib) or a user-installed
+# OpenBLAS or MKL build of R, where every forked worker would open its own
 # thread pool on top of the fork and oversubscribe the machine. A BLAS reads its thread count
 # when the library LOADS, so these have to be in the environment before R starts.
 # Sys.setenv() inside the session is too late, which is why render_linux.sh exports rather

@@ -43,6 +43,32 @@ test_that("calcNormFactors_parallel is identical for a DGEList and across chunk 
   }
 })
 
+test_that("calcNormFactors_parallel is identical with non-default arguments", {
+  skip_if_no_limma()
+  d <- sim()
+  ls0 <- colSums(d$counts) * 1.1
+  args <- list(
+    list(refColumn = 3),
+    list(lib.size = ls0),
+    list(logratioTrim = 0.2, doWeighting = FALSE),
+    list(Acutoff = -15, sumTrim = 0.1),
+    list(method = "upperquartile", p = 0.9),
+    list(method = "TMMwsp", refColumn = 3))
+  for (a in args) {
+    lbl <- paste(names(a), unlist(lapply(a, function(x) x[1L])), sep = "=", collapse = " ")
+    expect_identical(do.call(calcNormFactors_parallel, c(list(d$counts, workers = 2L, chunks = 4L), a)),
+                     do.call(edgeR_norm, c(list(d$counts), a)), info = lbl)
+  }
+  dge <- edgeR::DGEList(d$counts, lib.size = ls0)
+  for (m in c("TMM", "TMMwsp", "RLE", "upperquartile")) {
+    expect_identical(calcNormFactors_parallel(edgeR::DGEList(d$counts), method = m, workers = 2L,
+                                              chunks = 4L),
+                     edgeR_norm(edgeR::DGEList(d$counts), method = m), info = paste("DGEList", m))
+    expect_identical(calcNormFactors_parallel(dge, method = m, workers = 2L, chunks = 4L),
+                     edgeR_norm(dge, method = m), info = paste("DGEList own lib.size", m))
+  }
+})
+
 test_that("calcNormFactors_parallel survives all-zero gene rows", {
   skip_if_no_limma()
   d <- sim(); d$counts[c(3L, 17L, 88L), ] <- 0L
@@ -85,7 +111,7 @@ test_that("the edgeR generic is read off the resolved backend, not off which bra
   expect_identical(gen(), "normLibSizes")
   expect_identical(gen(get("normLibSizes.default", envir = ns, inherits = FALSE)),
                    "normLibSizes")
-  # an explicit backend must be labelled by what it IS, or every gate diagnostic names a
+  # an explicit backend must be labeled by what it IS, or every gate diagnostic names a
   # function the caller never passed and the DGEList rebind binds a name edgeR is not calling
   expect_identical(gen(get("calcNormFactors.default", envir = ns, inherits = FALSE)),
                    "calcNormFactors")
@@ -124,7 +150,7 @@ test_that("the class guard follows the S4 inheritance chain edgeR dispatches on"
 
   # class() on an S4 object gives only the concrete name, so a RangedSummarizedExperiment
   # (what tximeta and summarizeOverlaps hand back) walked past a class()-only guard and
-  # reached the original's as.matrix, which is the funnelling the refusal exists to prevent
+  # reached the original's as.matrix, which is the funneling the refusal exists to prevent
   skip_if_not_installed("GenomicRanges")
   rse <- SummarizedExperiment::SummarizedExperiment(
     assays = list(counts = d$counts),
@@ -147,6 +173,40 @@ test_that("lmFit_parallel is identical on both lm.series branches", {
   aw <- limma::arrayWeights(v$E, d$design)
   expect_identical(lmFit_parallel(v$E, d$design, weights = aw, workers = 2L),
                    limma::lmFit(v$E, d$design, weights = aw))
+})
+
+test_that("lmFit_parallel is identical with per-gene and per-array weight vectors", {
+  skip_if_no_limma()
+  d <- sim()
+  v <- limma::voom(edgeR_norm(edgeR::DGEList(d$counts)), d$design)
+  set.seed(4)
+  gw <- stats::runif(nrow(v$E), 0.5, 2)
+  expect_identical(lmFit_parallel(v$E, d$design, weights = gw, workers = 2L, chunks = 4L),
+                   limma::lmFit(v$E, d$design, weights = gw))
+  expect_identical(duplicateCorrelation_parallel(v$E, d$design, block = d$block, weights = gw,
+                                                 workers = 2L, chunks = 4L),
+                   limma::duplicateCorrelation(v$E, d$design, block = d$block, weights = gw))
+# Five chunks of 40 rows give 8-row blocks against 8 arrays, the shape where asMatrixWeights reads an array-weight vector as gene weights.
+  M <- matrix(stats::rnorm(320), 40, 8, dimnames = list(paste0("g", 1:40), paste0("s", 1:8)))
+  des8 <- cbind(1, rep(0:1, each = 4))
+  aw8 <- stats::runif(8, 0.3, 2)
+  blk8 <- rep(1:4, each = 2)
+  expect_identical(lmFit_parallel(M, des8, weights = aw8, workers = 2L, chunks = 5L),
+                   limma::lmFit(M, des8, weights = aw8))
+  expect_identical(duplicateCorrelation_parallel(M, des8, block = blk8, weights = aw8,
+                                                 workers = 2L, chunks = 5L),
+                   limma::duplicateCorrelation(M, des8, block = blk8, weights = aw8))
+})
+
+test_that("lmFit_parallel takes the design from an EList and refuses a printer's ndups", {
+  skip_if_no_limma()
+  d <- sim()
+  v <- limma::voom(edgeR_norm(edgeR::DGEList(d$counts)), d$design)
+  expect_identical(lmFit_parallel(v, workers = 2L, chunks = 4L), limma::lmFit(v))
+  ma <- methods::new("MAList", list(M = v$E, A = v$E, printer = list(ndups = 2L, spacing = 1L)))
+  expect_identical(limma::lmFit(ma, d$design, correlation = 0.5)$ndups, 2L)
+  expect_error(lmFit_parallel(ma, d$design, correlation = 0.5, workers = 2L, chunks = 4L),
+               "printer layout")
 })
 
 test_that("lmFit_parallel is identical across chunk layouts", {
@@ -215,6 +275,17 @@ test_that("duplicateCorrelation_parallel is identical, including the pooled cons
   }
 })
 
+test_that("duplicateCorrelation_parallel takes the design from an EList and honors trim", {
+  skip_if_no_limma()
+  d <- sim()
+  v <- limma::voom(edgeR_norm(edgeR::DGEList(d$counts)), d$design)
+  expect_identical(duplicateCorrelation_parallel(v, block = d$block, workers = 2L, chunks = 4L),
+                   limma::duplicateCorrelation(v, block = d$block))
+  expect_identical(duplicateCorrelation_parallel(v, d$design, block = d$block, trim = 0.3,
+                                                 workers = 2L, chunks = 4L),
+                   limma::duplicateCorrelation(v, d$design, block = d$block, trim = 0.3))
+})
+
 test_that("duplicateCorrelation_parallel refuses the ndups path", {
   skip_if_no_limma()
   d <- sim()
@@ -254,6 +325,28 @@ test_that("every backend gives the same answer", {
     expect_identical(lmFit_parallel(v, d$design, workers = 2L, parallel_backend = b), ref,
                      info = b)
   }
+})
+
+test_that("a base function shadowed in the global environment cannot reach a companion", {
+  skip_if_no_limma()
+  d <- sim()
+  v <- limma::voom(edgeR_norm(edgeR::DGEList(d$counts)), d$design)
+  ref <- list(tmm = edgeR_norm(d$counts), rle = edgeR_norm(d$counts, method = "RLE"),
+              fit = limma::lmFit(v, d$design),
+              cor = limma::duplicateCorrelation(v, d$design, block = d$block))
+  shadowed <- c("vapply", "unname", "do.call", "unlist", "lapply")
+  withr::defer(rm(list = intersect(shadowed, ls(globalenv(), all.names = TRUE)), envir = globalenv()))
+  for (nm in shadowed) {
+    assign(nm, function(...) stop("shadowed ", nm, " was called"), envir = globalenv())
+  }
+  got <- list(
+    tmm = calcNormFactors_parallel(d$counts, workers = 2L, chunks = 4L, parallel_backend = "serial"),
+    rle = calcNormFactors_parallel(d$counts, method = "RLE", workers = 2L, chunks = 4L,
+                                   parallel_backend = "serial"),
+    fit = lmFit_parallel(v, d$design, workers = 2L, chunks = 4L, parallel_backend = "serial"),
+    cor = duplicateCorrelation_parallel(v, d$design, block = d$block, workers = 2L, chunks = 4L,
+                                        parallel_backend = "serial"))
+  for (nm in names(ref)) expect_identical(got[[nm]], ref[[nm]], info = nm)
 })
 
 test_that("the final gene list is identical end to end", {

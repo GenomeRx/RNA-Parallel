@@ -54,7 +54,11 @@ Going past your PERFORMANCE core count can be slower than stopping at it, and th
 worst on the largest inputs, which is exactly where people reach for more workers.
 Measured on an 8-core machine with 4 performance cores, TMM on 15,000 genes by 9,000
 specimens: 4 workers 10.74 s, 6 workers 7.26 s, 8 workers 11.60 s. Eight was slower than
-four. The default resolved to 6 there and was optimal; raising it by hand made it worse.}
+four. The default resolved to 6 there and was optimal; raising it by hand made it worse.
+
+With \code{parallel_backend = "foreach"} and a backend you registered yourself, \code{workers} sets
+only the default chunk count, and that backend's width bounds concurrency; see
+\code{\link[=combat_backends]{combat_backends()}}.}
 
 \item{chunks}{Row chunks. Defaults to \code{workers}; passing \code{chunks = workers} explicitly is redundant.
 Clamped so no chunk holds one gene.}
@@ -65,15 +69,21 @@ Clamped so no chunk holds one gene.}
 
 \item{backend}{Optional \code{lmFit} to wrap. Defaults to \code{limma::lmFit}.}
 
-\item{label}{Optional name for this call in the timing line, when
+\item{label}{Optional name for this call. It is the stage name on the progress bar, which
+draws by default on macOS and Linux in an interactive session or on a terminal
+(\code{options(combat.progress = FALSE)} turns it off), and in the timing line when
 \code{options(combat.timing = TRUE)} is set. Defaults to the companion and the matrix shape,
 e.g. \verb{lmFit 18,270 x 1,500}; pass a cohort name to tell calls apart in a loop.}
 }
 \value{
 An \code{MArrayLM}, \code{identical()} to what the backend's own \code{lmFit} returns for the
-same input. Under either size gate, on a branch a block would flip, or at
-\code{workers = 1}, that is literally what it is: one plain call to the backend with a
-dispatch wrapper around it and no parallelism added.
+same input. Under either size gate, or on a branch a block would flip, that is literally
+what it is: one plain call to the backend with a dispatch wrapper around it and no
+parallelism added. \code{workers = 1} with the default \code{chunks} is the same; a larger \code{chunks},
+or \code{options(combat.mem.chunk.cells = N)}, walks the blocks in this process instead, with
+identical output. A \code{correlation = NULL} consensus is still resolved through
+\code{\link[=duplicateCorrelation_parallel]{duplicateCorrelation_parallel()}}. \code{options(combat.fork = FALSE)} rules out every fork,
+the progress reporter's included.
 }
 \description{
 Runs \code{\link[limma:lmFit]{limma::lmFit()}} itself. The algorithm is not reimplemented and not copied: limma's
@@ -119,16 +129,23 @@ different sigma and all 2000 lost the name. Every split here holds at least two 
 explicit \code{correlation = NULL} does reach \code{gls.series}, which then calls
 \code{duplicateCorrelation} itself, a trimmed mean over whatever genes it was given. Per
 block that is a different consensus for every block. It is resolved once here, on the
-full matrix, and the resulting scalar is what the blocks see.
+full matrix, by \code{\link[=duplicateCorrelation_parallel]{duplicateCorrelation_parallel()}} with the same arguments and the backend's
+own \code{duplicateCorrelation}, which returns \code{identical()} output, and the resulting scalar is
+what the blocks see. When \code{\link[=duplicateCorrelation_parallel]{duplicateCorrelation_parallel()}} refuses to split that limma, the
+backend's own \code{duplicateCorrelation} runs whole instead; any other error is raised as is.
 }
 
 \section{Dispatches too small to be worth a fork}{
 
 The two branches of \code{lm.series} are not the same job. With probe weights, or an \code{EList}
 from \code{\link[limma:voom]{limma::voom()}}, limma runs an R loop over genes, and that forks well: measured
-2.52x unblocked and 2.85x blocked on 20,000 genes by 24 samples, 2.96x and 3.39x on
-60,000 by 48, against 0.95x at 20,000 cells. \code{getOption("combat.min.cells", 20000)}, the
-same gate ComBat-seq uses, lands on that break-even and is what this branch takes.
+3.70x unblocked and 4.35x blocked on 60,000 genes by 48 samples at the default 6 workers on
+an M3 (\code{tools/bench_lmfit.R} in the GitHub repository,
+\url{https://github.com/GenomeRx/RNA-Parallel}),
+against 0.95x at 20,000 cells. This branch takes two gates:
+\code{getOption("combat.min.cells", 20000)} cells, the gate ComBat-seq uses, and
+\code{getOption("combat.min.wt.genes", 2000)} genes, because the loop's cost is per gene and it
+is genes per worker that pay for a fork. A call below either one is one plain original call.
 
 Without probe weights limma fits every gene in one vectorised \code{lm.fit}, which costs
 milliseconds and is mostly not worth handing to another process. That branch measured
@@ -136,15 +153,23 @@ milliseconds and is mostly not worth handing to another process. That branch mea
 and 1.71x at 20 million. It gets its own, much higher
 \code{getOption("combat.min.ls.cells", 6e6)}; sharing one gate made it four times slower than
 calling limma directly. Cells is only a proxy, since the cost rises with array count
-too, so the gate sits at the smallest size measured to win. Set either option to 0 to
-dispatch unconditionally; output is identical either way.
+too, so the gate sits at the smallest size measured to win.
+
+On a backend that copies the payload to its workers (\code{"serial"}, \code{future} without a
+multicore plan, \code{foreach} without a forking \code{doParallel} or \code{doMC} registration,
+\code{options(combat.fork = FALSE)}, and every backend on Windows), an unset
+\code{combat.min.cells} or \code{combat.min.ls.cells} closes entirely, so the call is one original
+call there unless the option is set. To dispatch unconditionally, set \code{combat.min.cells}
+and \code{combat.min.wt.genes} to 0 for the weighted branch and \code{combat.min.ls.cells} to 0 for
+the unweighted one; output is identical either way.
 }
 
 \section{Configurations this refuses}{
 
 \code{method = "robust"} goes to \code{mrlm}, and \code{ndups >= 2} makes \code{unwrapdups} reshape rows so
 that a gene no longer occupies one row. Neither is split, and both stop with an error
-rather than returning a serial result that looks parallel.
+rather than returning a serial result that looks parallel. Each is checked on the value the
+backend will use: the one passed, or else the backend's own default.
 }
 
 \section{When this is worth reaching for}{
@@ -152,10 +177,13 @@ rather than returning a serial result that looks parallel.
 It depends entirely on which branch your call takes, and the two are not close.
 
 With voom or probe weights limma runs an R loop over genes, which forks well but has a
-floor. Measured on an M3 at the default worker count, companion against original, every arm
-\code{identical()}: 0.59x at 1,000 genes by 24 arrays, 0.87x at 2,000 x 24, 1.29x at 4,000 x 24,
-1.76x at 8,000 x 24, and 2.79x at 60,000 x 48. The crossover tracks gene count rather than
-cells, and sits near four thousand genes.
+floor, and the floor is counted in genes rather than cells. Below
+\code{getOption("combat.min.wt.genes", 2000)} genes the companion is one plain original call, so
+it runs at parity. At and above it the split runs. That default sits where two measurement
+runs on an M3 at the default worker count agreed, with the gate forced open at 8, 24 and 48
+arrays: both put 2,000 genes and up ahead of the original, and they disagreed at 1,000
+genes, one ahead and one behind. The large-input figures are under "Dispatches too small to
+be worth a fork" above.
 
 Without probe weights limma fits every gene in one vectorised \code{lm.fit}, which costs
 milliseconds, so the companion declines to split until the matrix is very large and is

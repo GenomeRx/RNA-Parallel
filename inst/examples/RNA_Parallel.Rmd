@@ -57,12 +57,14 @@ which parallelism is worth measuring.
 # A. Setup
 
 ```{r install, eval = FALSE}
-if (!requireNamespace("remotes", quietly = TRUE)) install.packages("remotes")
-remotes::install_github("GenomeRx/RNA-Parallel")
-
 if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
 BiocManager::install(c("sva", "edgeR", "limma", "statmod", "SummarizedExperiment", "TCGAbiolinks",
                        "ComplexHeatmap"))
+
+if (!requireNamespace("remotes", quietly = TRUE)) install.packages("remotes")
+remotes::install_github("GenomeRx/RNA-Parallel",
+                        dependencies = c("Depends", "Imports"),
+                        upgrade = "never")
 
 cran <- c("ggplot2", "ggrepel", "patchwork", "callr", "gtsummary", "broom", "circlize", "RColorBrewer")
 need <- cran[!vapply(cran, requireNamespace, logical(1), quietly = TRUE)]
@@ -145,10 +147,8 @@ n_workers    <- max(tcga_workers)
 options(combat.backend = "mclapply")
 options(future.globals.maxSize = 8 * 1024^3)
 
-# Accelerate is the system BLAS here and manages its own thread pool, so there is no
-# OPENBLAS_NUM_THREADS to pin as there is on Linux. A user-installed OpenBLAS or MKL build is
-# multi-threaded and would open a pool inside every forked worker on top of the fork, so the
-# thread count is reported either way rather than assumed.
+# The published macOS report ran on R's single-threaded reference BLAS (libRblas.0.dylib); Accelerate (vecLib) or OpenBLAS would open a thread pool inside every forked worker, a setup REFERENCE.md marks as untested, so the thread count is reported rather than assumed.
+
 # sessionInfo()$BLAS is NULL on an R built against its own internal BLAS, and basename(NULL)
 # does not return character(0), it errors: "a character vector argument expected". That is in
 # this chunk, so such a machine would stop in the render's first seconds. All three reports
@@ -198,10 +198,10 @@ stopifnot(identical(demo_ref, demo_par))
 ```
 
 Fifty genes by eight samples sits far below `combat.min.cells`, so every row-split dispatch runs
-serially: a fork would cost more than the work. Only the common dispersion is handed out, one
-whole-matrix estimate per batch, which carries no size gate because it is always worth
-dispatching. Either way the output is the same matrix, which is the only thing the gate is
-allowed to leave alone.
+serially: a fork would cost more than the work. The dispatches across batches, one whole-matrix
+estimate per batch, are gated too, by `getOption("combat.min.batch.cells", 20000)` counted over
+the whole filtered matrix, so they run serially here as well. Either way the output is the same
+matrix, which is the only thing the gate is allowed to leave alone.
 
 # C. Simulated counts
 

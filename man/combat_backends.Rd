@@ -18,8 +18,9 @@ Every backend returns bit-identical results, because each row chunk is a pure
 function of its own genes and every backend listed preserves chunk order.
 
 \describe{
-\item{\code{mclapply}}{Default. Forks via \code{parallel::mclapply}. Unix only; falls
-back to serial on Windows.}
+\item{\code{mclapply}}{Default, except on Windows with a multi-worker future plan, where
+\code{future} is. Forks via \code{parallel::mclapply}. Unix only; falls back to serial on
+Windows.}
 \item{\code{future}}{\code{future.apply::future_lapply}. The caller owns the plan, this
 package will not set one. Warns if the plan resolves in one process.}
 \item{\code{BiocParallel}}{\code{BiocParallel::bplapply} with \code{MulticoreParam}. No new
@@ -27,8 +28,13 @@ dependency in practice, since \pkg{sva} depends on it.}
 \item{\code{foreach}}{\verb{foreach::\%dopar\%} over a cached cluster from \code{doParallel},
 FORK on Unix and PSOCK on Windows. Slower than the original on the limma and
 edgeR paths, measured 0.24x to 0.41x against \code{limma::lmFit} at four workers,
-because \code{doParallel} serialises each task's closure and the closure captures
-the matrix. Correct, and worth choosing only where a fork is unavailable.}
+because \code{doParallel} serializes each task's closure and the closure captures
+the matrix. Correct, and worth choosing only where a fork is unavailable. A
+\code{foreach} backend you registered yourself is used as it is, and this package builds
+no cluster. Concurrency is then bounded by that backend's width and the number of
+tasks, not by \code{workers}: a row split sends one task per chunk, ComBat-seq's two
+dispatches across batches send one task per batch, and the memory guard's cut to
+\code{workers} does not reach the backend.}
 \item{\code{serial}}{Plain \code{lapply}. Same output, no workers.}
 }
 }

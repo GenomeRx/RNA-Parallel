@@ -23,9 +23,14 @@
 #' @section Why this needs no gate:
 #' Nothing here holds original source. The original's own `mixedModel2Fit` object runs unchanged;
 #' only the primitives it calls are shadowed, in a child of the original's own environment, by
-#' memos keyed on a bitwise `identical()` of the actual arguments. A statmod that stops calling
-#' `La.svd`, or calls it with per-gene arguments, produces a cache that never hits: correct and
-#' slow, never wrong and quiet. The earlier form evaluated the original's statements in a stubbed
+#' memos keyed on a bitwise `identical()` of what each call reads. For `La.svd` and `factor` that
+#' is the argument list. For `model.matrix` it is the formula plus the current value of every
+#' variable the formula names, found through the formula's own environment, because limma
+#' rebuilds the same formula object in the same frame for every gene and only the block factor
+#' it reads changes; anything other than a formula is never cached. A statmod that stops calling
+#' `La.svd` or calls it with per-gene arguments, or a limma that renames or inlines its block
+#' variable, therefore produces a cache that never hits: correct and slow, never wrong and
+#' quiet. The earlier form evaluated the original's statements in a stubbed
 #' environment, which could return NA for every gene against a drifted statmod, and needed
 #' roughly a hundred lines of body-text pinning to notice. None of that is needed to memoise a
 #' call, and none of it is here.
@@ -76,14 +81,15 @@ rp_dupcor_memo <- function(fn, env) {
     }
   })
   env2$model.matrix <- local({
-    # limma builds the block design from a formula whose environment holds `A`, captured by
-    # reference and rebuilt in that frame every gene, so a formula-keyed cache would serve a
-    # stale Z the moment the finite-value mask varies.
+    # limma rebuilds the block design every gene from one formula whose environment holds the
+    # block factor by reference, so the key is the formula plus the current value of every
+    # variable it names: a formula-only key would serve a stale Z once the finite mask varies.
     kf <- NULL; ka <- NULL; v <- NULL; has <- FALSE
     function(object, ...) {
-      if (nargs() != 1L) return(mm(object, ...))
-      a <- tryCatch(get("A", envir = environment(object), inherits = FALSE),
-                    error = function(e) NULL)
+      if (nargs() != 1L || !inherits(object, "formula") ||
+          !is.environment(environment(object))) return(mm(object, ...))
+      a <- mget(all.vars(object), envir = environment(object), inherits = TRUE,
+                ifnotfound = list(NULL))
       if (has && identical(object, kf) && rp_same(a, ka)) return(v)
       vv <- mm(object); kf <<- object; ka <<- a; v <<- vv; has <<- TRUE
       vv
@@ -143,7 +149,7 @@ rp_tail_decomposes <- function(fn, ndups, max_block) {
 }
 
 
-#' Intra-block correlation with the per-gene REML fits parallelised
+#' limma's duplicateCorrelation with the per-gene REML fits parallelized
 #'
 #' Runs [limma::duplicateCorrelation()] itself. The algorithm is not reimplemented and not
 #' copied: the original function is called on interleaved row blocks and the per-gene `atanh`
@@ -172,11 +178,12 @@ rp_tail_decomposes <- function(fn, ndups, max_block) {
 #' rebound in a child of limma's environment onto a copy whose `La.svd` is memoised, along with
 #' the `factor` and `model.matrix` calls that rebuild the block design per gene.
 #'
-#' The memo is installed unconditionally, because it is keyed on the arguments rather than on an
-#' assumption about them. Where it pays is unweighted input: counted, 300 genes give 300 calls and
-#' one distinct argument set, and it reaches 5.12x serial and 13.55x at four workers on 3000 genes
-#' by 100 arrays with 50 blocks. Where it does not pay is weighted input, because
-#' `mixedModel2Fit` scales `X` by each gene's own weights before `La.svd` sees it, so the argument
+#' The memo is installed unconditionally, because each cache is keyed on what its call reads (the
+#' arguments, and for `model.matrix` the formula plus the values of the variables it names)
+#' rather than on an assumption about them. Where it pays is unweighted input: counted, 300
+#' genes give 300 calls and one distinct argument set, and it reaches 5.12x serial and 13.55x at
+#' four workers on 3000 genes by 100 arrays with 50 blocks. Where it does not pay is weighted
+#' input, because `mixedModel2Fit` scales `X` by each gene's own weights before `La.svd` sees it, so the argument
 #' is not invariant: 300 calls, 300 distinct sets, a 0% hit rate. That costs nothing beyond one
 #' failed key comparison per gene, and it is the same fact that made the older body-pinned lift
 #' refuse to install on weighted input rather than run and miss.
@@ -224,6 +231,10 @@ rp_tail_decomposes <- function(fn, ndups, max_block) {
 #'   Measured on an 8-core machine with 4 performance cores, TMM on 15,000 genes by 9,000
 #'   specimens: 4 workers 10.74 s, 6 workers 7.26 s, 8 workers 11.60 s. Eight was slower than
 #'   four. The default resolved to 6 there and was optimal; raising it by hand made it worse.
+#'
+#'   With `parallel_backend = "foreach"` and a backend you registered yourself, `workers` sets
+#'   only the default chunk count, and that backend's width bounds concurrency; see
+#'   [combat_backends()].
 #' @param chunks Row chunks. Defaults to `workers`; passing `chunks = workers` explicitly is redundant.
 #'   One-gene chunks are allowed here:
 #'   the `lm.fit` one-column demotion behind `lmFit_parallel`'s two-gene floor never
@@ -233,7 +244,9 @@ rp_tail_decomposes <- function(fn, ndups, max_block) {
 #' @param backend Optional `duplicateCorrelation` function to wrap. Defaults to
 #'   `limma::duplicateCorrelation`.
 #'
-#' @param label Optional name for this call in the timing line, when
+#' @param label Optional name for this call. It is the stage name on the progress bar, which
+#'   draws by default on macOS and Linux in an interactive session or on a terminal
+#'   (`options(combat.progress = FALSE)` turns it off), and in the timing line when
 #'   `options(combat.timing = TRUE)` is set. Defaults to the companion and the matrix shape,
 #'   e.g. `duplicateCorrelation 18,270 x 1,500`; pass a cohort name to tell calls apart in a
 #'   loop.
@@ -276,10 +289,10 @@ duplicateCorrelation_parallel <- function(object, design = NULL, ndups = 2L, spa
   }
 
   if (is.null(block)) {
-    stop("`block` is required. With block = NULL the original pairs rows through unwrapdups, ",
-         "and `if (spacing == \"topbottom\") spacing <- nrow(M)/2` branches on the block's ",
-         "own row count, so a row split would pair different genes and raise nothing. ",
-         "Call limma::duplicateCorrelation directly for the ndups path.", call. = FALSE)
+    rp_refuse("`block` is required. With block = NULL the original pairs rows through unwrapdups, ",
+              "and `if (spacing == \"topbottom\") spacing <- nrow(M)/2` branches on the block's ",
+              "own row count, so a row split would pair different genes and raise nothing. ",
+              "Call limma::duplicateCorrelation directly for the ndups path.")
   }
 
   if (is.null(backend)) {
@@ -300,32 +313,45 @@ duplicateCorrelation_parallel <- function(object, design = NULL, ndups = 2L, spa
                       # nothing at all at serial pace, which no equivalence test can see.
                       rebound = c("getEAWP", "asMatrixWeights", "mixedModel2Fit"))
 
+# A backend call carries only the arguments the caller supplied, so every default is the backend's own.
+  given <- intersect(c("design", "ndups", "spacing", "trim", "weights"), names(match.call()))
+  whole <- function(weights) {
+    cl <- quote(be$fn(object = object, block = block))
+    for (a in given) cl[[a]] <- as.name(a)
+    eval(cl)
+  }
+
   # Lifted and checked BEFORE any work is dispatched, so a limma this package cannot
   # reproduce costs an error rather than an hour of SVDs and then an error.
   stmts <- as.list(body(be$fn))
   tail_exprs <- stmts[c(length(stmts) - 1L, length(stmts))]
   extra <- setdiff(unlist(lapply(tail_exprs, all.vars)), c("arho", "trim", "mrho"))
   if (length(extra)) {
-    stop("this limma backend's last two statements read ", paste(extra, collapse = ", "),
-         ", which a pooled tail cannot supply. rnaparallel was written against a tail that ",
-         "reads only the concatenated atanh correlations and `trim`. Refusing to run.",
-         call. = FALSE)
+    rp_refuse("this limma backend's last two statements read ", paste(extra, collapse = ", "),
+              ", which a pooled tail cannot supply. rnaparallel was written against a tail that ",
+              "reads only the concatenated atanh correlations and `trim`. Refusing to run.")
   }
   # The statements between the loop and that tail run inside every block on its own rho, and
   # the check above never looked at them. Refuse the split unless they still decompose.
-  if (!rp_tail_decomposes(be$fn, ndups, max(table(block)))) {
-    stop("this limma backend's statements between the per-gene loop and the pooled tail no ",
-         "longer give the same result run per block as run over all genes, so a split would ",
-         "return a quietly different consensus correlation. Call limma::duplicateCorrelation ",
-         "directly.", call. = FALSE)
+  if (!rp_tail_decomposes(be$fn,
+                          if ("ndups" %in% given) ndups else eval(formals(be$fn)$ndups, be$env),
+                          max(table(block)))) {
+    rp_refuse("this limma backend's statements between the per-gene loop and the pooled tail no ",
+              "longer give the same result run per block as run over all genes, so a split would ",
+              "return a quietly different consensus correlation. Call limma::duplicateCorrelation ",
+              "directly.")
   }
 
   eawp <- get("getEAWP", envir = be$env, inherits = TRUE)(object)
   M <- eawp$exprs
   if (nrow(M) == 0L) {
-    return(be$fn(object = object, design = design, ndups = ndups, spacing = spacing,
-                 block = block, trim = trim, weights = weights))
+    return(whole(weights))
   }
+  de <- list2env(mget(c("object", given)), parent = be$env)
+# A design or weights the caller left out takes the backend's own default, evaluated where a default that reads the call's arguments can see them.
+  if (!"design" %in% given) design <- eval(formals(be$fn)$design, de)
+  if (!"weights" %in% given) weights <- eval(formals(be$fn)$weights, de)
+
   # A block is handed a bare matrix, so getEAWP gives it design NULL and it would silently
   # substitute an intercept. matrix(1, ncol(M), 1) is the original's own fallback and is the
   # same in every block, so resolving here changes nothing except the y$design case.
@@ -340,11 +366,10 @@ duplicateCorrelation_parallel <- function(object, design = NULL, ndups = 2L, spa
   weights <- tryCatch(rp_weights_matrix(weights, dim(M), be$env),
                       error = function(e) NULL)
   if (!is.null(w_raw) && is.null(weights)) {
-    return(be$fn(object = object, design = design, ndups = ndups, spacing = spacing,
-                 block = block, trim = trim, weights = w_raw))
+    return(whole(w_raw))
   }
 
-  # No input gate. The memo keys on the actual arguments, so a varying finite-value mask
+  # No input gate. The memo keys on what each call reads, so a varying finite-value mask
   # misses the cache and runs the real call rather than returning a stale one, and it still
   # pays on the weighted and non-finite inputs the old body-pinned lift refused outright.
   dc <- be$fn
@@ -357,7 +382,7 @@ duplicateCorrelation_parallel <- function(object, design = NULL, ndups = 2L, spa
   idx <- combat_row_chunks(ngenes, workers = workers, chunks = chunks, min_rows = 1L,
                            ncol = ncol(M))
 
-  # Rebuilt against an environment holding only what the body reads. A closure is serialised
+  # Rebuilt against an environment holding only what the body reads. A closure is serialized
   # WITH its defining environment, so on a socket backend this frame's live bindings and its
   # unforced promises travel with every task, and the promises reach back through the original's
   # frames into the entry point's raw inputs. Invisible on a forking backend, where the child
@@ -369,13 +394,14 @@ duplicateCorrelation_parallel <- function(object, design = NULL, ndups = 2L, spa
   .lean$dc <- dc; .lean$M <- M; .lean$design <- design; .lean$ndups <- ndups
   .lean$spacing <- spacing; .lean$block <- block; .lean$trim <- trim
   .lean$weights <- weights; .lean$rp_weights_rows <- rp_weights_rows
+  .lean$blk_call <- quote(dc(object = M[ii, , drop = FALSE], design = design, block = block,
+                             weights = rp_weights_rows(weights, ii)))
+  for (a in intersect(given, c("ndups", "spacing", "trim"))) .lean$blk_call[[a]] <- as.name(a)
   fit_block <- function(ii) {
     conds <- list()
     keep <- function(cnd) conds[[length(conds) + 1L]] <<- cnd
     value <- withCallingHandlers(
-      dc(object = M[ii, , drop = FALSE], design = design, ndups = ndups,
-         spacing = spacing, block = block, trim = trim,
-         weights = rp_weights_rows(weights, ii)),
+      eval(blk_call),
       warning = function(w) { keep(w); invokeRestart("muffleWarning") },
       message = function(m) { keep(m); invokeRestart("muffleMessage") })
     list(value = value, conds = conds)
@@ -396,6 +422,38 @@ duplicateCorrelation_parallel <- function(object, design = NULL, ndups = 2L, spa
                            min_cells = getOption("combat.min.dupcor.cells", 5000)),
     "duplicateCorrelation across gene blocks", idx)
 
+  vals <- lapply(parts, function(p) p$value)
+  # combat_parallel_check skips its height check on list results, and the original returns a
+  # list, so the per-block count is checked here instead. A short block plus a long one can
+  # still total ngenes.
+  got <- vapply(vals, function(v) length(v$atanh.correlations), integer(1))
+  if (!identical(got, lengths(idx))) {
+    rp_refuse("duplicateCorrelation_parallel: blocks returned ", paste(got, collapse = "/"),
+              " correlation(s) where ", paste(lengths(idx), collapse = "/"),
+              " gene(s) were dispatched.")
+  }
+  arho <- rp_bind_rows(vals, combat_row_order(idx), "atanh.correlations", ngenes,
+                       "duplicateCorrelation_parallel")
+
+  tenv <- new.env(parent = be$env)
+  tenv$arho <- arho
+# Degenerate early returns never read trim, so a tail error hands the call to the original.
+  out <- tryCatch({
+    tenv$trim <- if ("trim" %in% given) trim else eval(formals(be$fn)$trim, be$env)
+    out <- NULL
+    for (e in tail_exprs) out <- eval(e, tenv)
+    list(out)
+  }, error = function(e) NULL)
+  if (is.null(out)) {
+    return(whole(w_raw))
+  }
+  out <- out[[1L]]
+# Refused before the replay below, so a caller that then runs the original whole sees each condition once.
+  if (!is.list(out)) {
+    rp_refuse("the lifted limma tail returned a ", class(out)[1],
+              " rather than the result list. Refusing to return it.")
+  }
+
   # The rank note and the two degenerate-block warnings are raised once per block, and some
   # backends swallow child output entirely, so what the caller sees would otherwise depend
   # on parallel_backend. Replay each distinct condition once, from here.
@@ -403,29 +461,6 @@ duplicateCorrelation_parallel <- function(object, design = NULL, ndups = 2L, spa
   for (cnd in cnds[!duplicated(vapply(cnds, conditionMessage, ""))]) {
     cnd$call <- NULL                     # else the block's own call prints, M[ii, ] and all
     if (inherits(cnd, "warning")) warning(cnd) else message(cnd)
-  }
-
-  vals <- lapply(parts, function(p) p$value)
-  # combat_parallel_check skips its height check on list results, and the original returns a
-  # list, so the per-block count is checked here instead. A short block plus a long one can
-  # still total ngenes.
-  got <- vapply(vals, function(v) length(v$atanh.correlations), integer(1))
-  if (!identical(got, lengths(idx))) {
-    stop("duplicateCorrelation_parallel: blocks returned ", paste(got, collapse = "/"),
-         " correlation(s) where ", paste(lengths(idx), collapse = "/"),
-         " gene(s) were dispatched.", call. = FALSE)
-  }
-  arho <- rp_bind_rows(vals, combat_row_order(idx), "atanh.correlations", ngenes,
-                       "duplicateCorrelation_parallel")
-
-  tenv <- new.env(parent = be$env)
-  tenv$arho <- arho
-  tenv$trim <- trim
-  out <- NULL
-  for (e in tail_exprs) out <- eval(e, tenv)
-  if (!is.list(out)) {
-    stop("the lifted limma tail returned a ", class(out)[1],
-         " rather than the result list. Refusing to return it.", call. = FALSE)
   }
   out
 }

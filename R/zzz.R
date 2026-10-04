@@ -2,6 +2,9 @@
 
 .rp_build <- new.env(parent = emptyenv())
 
+# These names are bound in the environment each worker closure is given, which R CMD check cannot see.
+utils::globalVariables(c("blk_call", "master_pid", "progress_dir", "progress_stage"))
+
 .onLoad <- function(libname, pkgname) {
   # Stamped once, cheaply. Deliberately NOT a force() sweep over the namespace: that costs
   # every consumer on every library() call to detect a condition only a reinstall creates,
@@ -22,7 +25,7 @@
 #' `lazy-load database ... is corrupt` the first time it touches a symbol it had not yet
 #' forced. Inside a forked worker that surfaces as a failed dispatch, and a caller with a
 #' fallback path can quietly proceed on uncorrected data: three notebook runs were lost to
-#' exactly this before anyone realised the package, not the data, was the problem.
+#' exactly this before anyone realized the package, not the data, was the problem.
 #'
 #' Nothing here prevents it. The fix is to restart R after installing. This only lets a long
 #' run notice, by comparing the build stamp this session loaded against the one on disk now.

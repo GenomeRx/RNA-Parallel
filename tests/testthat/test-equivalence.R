@@ -72,7 +72,7 @@ test_that("covar_mod is identical, upstream's own example", {
 
 test_that("a confounded covar_mod is rejected the same way by both", {
   # cov1 alternates exactly like a 2-level group, so group + cov1 is collinear and
-  # ComBat-seq refuses. Correct behaviour, and the companion must refuse identically.
+  # ComBat-seq refuses. Correct behavior, and the companion must refuse identically.
   original <- backend_fn()
   set.seed(43)
   cov1 <- rep(c(0, 1), 4)
@@ -112,6 +112,7 @@ test_that("the input matrix is not modified by either arm", {
 })
 
 test_that("batch given as character and as integer both work", {
+  skip_if_not_installed("sva")
   d <- make_counts(6, G = 200, n_per_batch = c(6, 6))
   as_chr <- as.character(d$batch)
   as_int <- as.integer(d$batch)
@@ -198,9 +199,22 @@ test_that("no ::: appears anywhere in the package sources", {
 
 test_that("the function actually run is the original's, byte for byte", {
   original <- backend_fn()
-  be <- rnaparallel:::combat_backend()
-  expect_identical(body(be$fn), body(original))
-  expect_identical(formals(be$fn), formals(original))
+  d <- make_counts(8, G = 200, n_per_batch = c(6, 6))
+  ran <- NULL
+  spy <- function(idx, f, workers) {
+    if (is.null(ran)) {
+      fns <- lapply(seq_len(sys.nframe()), sys.function)
+      hit <- vapply(fns, function(g) identical(formals(g), formals(original)), logical(1))
+      if (any(hit)) ran <<- fns[[which(hit)[1L]]]
+    }
+    lapply(idx, f)
+  }
+  invisible(quietly(ComBat_seq_parallel(d$counts, d$batch, group = NULL, workers = 2L,
+                                        parallel_backend = spy)))
+  expect_true(is.function(ran))
+  expect_identical(body(ran), body(original))
+  expect_identical(formals(ran), formals(original))
+  expect_identical(parent.env(environment(ran)), environment(original))
 })
 
 test_that("the export surface is exactly the entry points and the shared controls", {
@@ -225,7 +239,8 @@ test_that("the default backend resolves with the helper from its own environment
   expect_identical(names(formals(be$match_quantiles)),
                    c("counts_sub", "old_mu", "old_phi", "new_mu", "new_phi"))
   # the helper must come from the same place as the function, never a second copy
-  expect_identical(be$env, environment(be$fn))
+  expect_identical(be$env, environment(sva::ComBat_seq))
+  expect_identical(be$match_quantiles, get("match_quantiles", envir = environment(sva::ComBat_seq)))
 })
 
 test_that("a sourced upstream copy works, helpers in a plain environment", {
@@ -267,10 +282,22 @@ test_that("a backend with no match_quantiles in scope is refused", {
 test_that("a non-function backend is refused", {
   expect_error(rnaparallel:::combat_backend("sva::ComBat_seq"), "must be a function")
 })
-## Tagwise dispersion is the third parallelised path, and the only one whose exactness
+## Tagwise dispersion is the third parallelized path, and the only one whose exactness
 ## depends on an argument value rather than on the shape of the computation. It is exact
 ## because ComBat-seq passes prior.df = 0, which zeroes the weight on the across-gene
 ## moderation term. These tests fail if that reasoning stops holding.
+
+tagwise_split_spy <- function() {
+  calls <- 0L
+  list(backend = function(idx, f, workers) { calls <<- calls + 1L; lapply(idx, f) },
+       calls = function() calls)
+}
+
+tagwise_poison <- function(idx, f, workers) {
+  r <- lapply(idx, f)
+  r[[1L]]$value[1L] <- r[[1L]]$value[1L] * 2
+  r
+}
 
 test_that("splitting tagwise dispersion by row is exact at prior.df = 0", {
   skip_if_not_installed("edgeR")
@@ -285,11 +312,17 @@ test_that("splitting tagwise dispersion by row is exact at prior.df = 0", {
   dc <- edgeR::estimateGLMCommonDisp(y, design = design, subset = nrow(y))
 
   ref <- edgeR::estimateGLMTagwiseDisp(y, design = design, dispersion = dc, prior.df = 0)
+  sp <- tagwise_split_spy()
   got <- rnaparallel:::estimateGLMTagwiseDisp_rows_parallel(
     y, design = design, dispersion = dc, prior.df = 0,
-    workers = 2L, chunks = 4L, parallel_backend = "serial")
+    workers = 2L, chunks = 4L, parallel_backend = sp$backend)
 
   expect_identical(got, ref)
+  expect_identical(sp$calls(), 1L)
+  bad <- rnaparallel:::estimateGLMTagwiseDisp_rows_parallel(
+    y, design = design, dispersion = dc, prior.df = 0,
+    workers = 2L, chunks = 4L, parallel_backend = tagwise_poison)
+  expect_false(identical(bad, ref))
 })
 
 test_that("it stays exact when dead, constant and near-empty genes are present", {
@@ -314,10 +347,16 @@ test_that("it stays exact when dead, constant and near-empty genes are present",
 
   ref <- edgeR::estimateGLMTagwiseDisp(y, design = design, dispersion = dc, prior.df = 0)
   for (nch in c(2L, 4L, 7L)) {
+    sp <- tagwise_split_spy()
     got <- rnaparallel:::estimateGLMTagwiseDisp_rows_parallel(
       y, design = design, dispersion = dc, prior.df = 0,
-      workers = 2L, chunks = nch, parallel_backend = "serial")
+      workers = 2L, chunks = nch, parallel_backend = sp$backend)
     expect_identical(got, ref, info = paste("chunks:", nch))
+    expect_identical(sp$calls(), 1L, info = paste("chunks:", nch))
+    bad <- rnaparallel:::estimateGLMTagwiseDisp_rows_parallel(
+      y, design = design, dispersion = dc, prior.df = 0,
+      workers = 2L, chunks = nch, parallel_backend = tagwise_poison)
+    expect_false(identical(bad, ref), info = paste("chunks:", nch))
   }
 })
 
@@ -454,7 +493,7 @@ test_that("a one-group design is refused the row split rather than trusted to it
     cbind(1, rep(0:1, each = 3), stats::rnorm(6))))
 })
 
-## The one copy of original code this package holds is the row-vectorised match_quantiles.
+## The one copy of original code this package holds is the row-vectorized match_quantiles.
 ## The gate that guards it had no coverage, so a permanently shut gate would leave every
 ## suite green while silently running the slow path forever.
 
@@ -467,7 +506,7 @@ test_that("the match_quantiles gate opens on the real backend, even under hostil
   expect_identical(
     rnaparallel:::combat_mq_dispatch(sva:::match_quantiles, cs, om, op),
     rnaparallel:::match_quantiles_rows)
-  # deparse honours scipen; an analyst's .Rprofile must not silently shut the gate
+  # deparse honors scipen; an analyst's .Rprofile must not silently shut the gate
   withr::local_options(scipen = 999)
   expect_identical(
     rnaparallel:::combat_mq_dispatch(sva:::match_quantiles, cs, om, op),
@@ -485,7 +524,7 @@ test_that("the match_quantiles gate closes on a genuinely edited original body",
   expect_identical(rnaparallel:::combat_mq_dispatch(f, cs, om, op), f)
 })
 
-test_that("the row-vectorised transcription matches the original cell loop bit for bit", {
+test_that("the row-vectorized transcription matches the original cell loop bit for bit", {
   skip_if_not_installed("sva")
   # adversarial: zeros, ones, huge counts, and cells landing in the outlier branch
   set.seed(41)
@@ -539,12 +578,30 @@ test_that("the tagwise batch dispatch survives the original's own gene filter", 
   y[5, batch == 1] <- 0L                      # filtered by the original
   calls <- 0L
   spy <- function(idx, f, w) { calls <<- calls + 1L; lapply(idx, f) }
+  rnaparallel:::rp_count_reset()
   out <- suppressMessages(ComBat_seq_parallel(y, batch = batch, group = NULL,
                                               workers = 2L, parallel_backend = spy))
   expect_identical(out, suppressMessages(sva::ComBat_seq(y, batch = batch, group = NULL)))
   # one match_quantiles per batch, one common dispersion, one tagwise across batches: the
   # tagwise dispatch must still be among them rather than falling back to base::lapply
   expect_identical(calls, 4L)
+  expect_false("tagwise across batches" %in% rnaparallel:::.rp_dispatch$fallback)
+
+  tampered <- 0L
+  poison <- function(idx, f, w) {
+    r <- lapply(idx, f)
+    v <- r[[1L]]$value
+    if (is.numeric(v) && is.null(dim(v)) && length(v) > 1L) {
+      v[1L] <- v[1L] * 50
+      r[[1L]]$value <- v
+      tampered <<- tampered + 1L
+    }
+    r
+  }
+  out2 <- suppressMessages(ComBat_seq_parallel(y, batch = batch, group = NULL,
+                                               workers = 2L, parallel_backend = poison))
+  expect_identical(tampered, 1L)
+  expect_false(identical(out2, out))
 })
 
 test_that("group= is identical across many batches without confounding", {

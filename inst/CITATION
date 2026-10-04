@@ -1,10 +1,9 @@
 citHeader(paste(
-  "This package is a set of parallel companions. It reimplements no method it runs and",
-  "modifies none of them, so please cite the ORIGINAL method you used as well as this",
-  "companion. Citing only the companion credits the parallelism and not the statistics.",
-  "ComBat-seq is cited below; for the limma and edgeR companions cite limma",
-  "(Ritchie et al. 2015, NAR 43(7), e47) and edgeR (Robinson, McCarthy and Smyth 2010,",
-  "Bioinformatics 26(1), 139-140)."
+  "This package is a set of parallel companions. It reimplements no method it runs, apart",
+  "from one transcribed sva helper (match_quantiles) and three transcribed edgeR default",
+  "statements (.tagwise_defaults_pinned), and modifies none of them, so please cite the",
+  "ORIGINAL method you used (ComBat-seq, limma or edgeR, all below) as well as this",
+  "companion. Citing only the companion credits the parallelism and not the statistics."
 ))
 
 bibentry(
@@ -49,15 +48,54 @@ bibentry(
 )
 
 bibentry(
+  bibtype  = "Article",
+  key      = "robinson2010edger",
+  title    = "edgeR: a Bioconductor package for differential expression analysis of digital gene expression data",
+  author   = c(person("Mark D.", "Robinson"), person("Davis J.", "McCarthy"),
+               person("Gordon K.", "Smyth")),
+  journal  = "Bioinformatics",
+  year     = "2010",
+  volume   = "26",
+  number   = "1",
+  pages    = "139--140",
+  doi      = "10.1093/bioinformatics/btp616",
+  textVersion = paste(
+    "Robinson MD, McCarthy DJ, Smyth GK (2010).",
+    "edgeR: a Bioconductor package for differential expression analysis of digital gene expression data.",
+    "Bioinformatics, 26(1), 139-140. doi:10.1093/bioinformatics/btp616"
+  )
+)
+
+bibentry(
+  bibtype  = "Article",
+  key      = "chen2025edger",
+  title    = "{edgeR} v4: powerful differential analysis of sequencing data with expanded functionality and improved support for small counts and larger datasets",
+  author   = c(person("Yunshun", "Chen"), person("Lizhong", "Chen"),
+               person(c("Aaron", "T", "L"), "Lun"), person(c("Pedro", "L"), "Baldoni"),
+               person(c("Gordon", "K"), "Smyth")),
+  journal  = "Nucleic Acids Research",
+  year     = "2025",
+  volume   = "53",
+  number   = "2",
+  pages    = "gkaf018",
+  doi      = "10.1093/nar/gkaf018",
+  textVersion = paste(
+    "Chen Y, Chen L, Lun ATL, Baldoni PL, Smyth GK (2025).",
+    "edgeR v4: powerful differential analysis of sequencing data with expanded functionality and improved support for small counts and larger datasets.",
+    "Nucleic Acids Research 53(2), gkaf018. doi:10.1093/nar/gkaf018"
+  )
+)
+
+bibentry(
   bibtype  = "Manual",
   key      = "nguyen2026rnaparallel",
-  title    = "rnaparallel: Parallel Companions for RNA-Seq Tools",
+  title    = "rnaparallel: Exact Parallel Companions for sva ComBat-Seq, edgeR and limma",
   author   = person("Nam", "Nguyen"),
   year     = "2026",
   note     = paste("R package version", meta$Version),
   url      = "https://github.com/GenomeRx/RNA-Parallel",
   textVersion = paste(
-    "Nguyen N (2026). rnaparallel: Parallel Companions for RNA-Seq Tools.",
+    "Nguyen N (2026). rnaparallel: Exact Parallel Companions for sva ComBat-Seq, edgeR and limma.",
     paste0("R package version ", meta$Version, "."),
     "https://github.com/GenomeRx/RNA-Parallel"
   )

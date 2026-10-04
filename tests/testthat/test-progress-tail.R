@@ -68,22 +68,23 @@ test_that("a cache spans multiple worker files independently", {
 })
 
 test_that("watch mode uses one cache across its own polls, not a fresh one per poll", {
-  # Real end-to-end proof the wiring works, not just the read function in isolation:
-  # start a worker file already at 100% so watch mode returns after its first poll, then
-  # confirm calling it twice in a row (as watch would across two Sys.sleep() iterations)
-  # does not re-derive rows it already parsed.
   d <- withr::local_tempdir()
-  path <- file.path(d, "rnaparallel-1.tsv")
-  writeLines(c("1\ta\t1\tstart", "2\ta\t1\tdone"), path)
-  cache <- new.env(parent = emptyenv())
-  r1 <- rnaparallel:::rp_progress_read(d, cache = cache)
-  r2 <- rnaparallel:::rp_progress_read(d, cache = cache)
-  expect_identical(r1, r2)
-  expect_identical(cache[[path]]$size, file.size(path))
+  writeLines("1\ta\t1\tstart", file.path(d, "rnaparallel-1.tsv"))
+  real_read <- rnaparallel:::rp_progress_read
+  seen <- list()
+  local_mocked_bindings(rp_progress_read = function(dir, cache = NULL) {
+    seen[[length(seen) + 1L]] <<- cache
+    real_read(dir, cache = cache)
+  }, .package = "rnaparallel")
+  invisible(utils::capture.output(
+    rnaparallel_progress(d, watch = TRUE, interval = 0.05, stall_after = 0.3)))
+  expect_gte(length(seen), 2L)
+  expect_true(is.environment(seen[[1L]]))
+  expect_true(all(vapply(seen, identical, logical(1), seen[[1L]])))
 })
 
 ## rp_step_begin() creates combat.progress.dir up front and refuses to start if it cannot,
-## rather than the old silent-drop behaviour where every worker write vanished for the
+## rather than the old silent-drop behavior where every worker write vanished for the
 ## whole run and rnaparallel_progress() reported "no files yet" forever.
 
 test_that("rp_step_begin creates a missing combat.progress.dir rather than failing silently", {
@@ -106,6 +107,22 @@ test_that("rp_step_begin refuses an unwritable combat.progress.dir loudly", {
   withr::defer(Sys.chmod(target, mode = "0700"))   # let the tempdir cleanup remove it
   expect_error(rnaparallel:::rp_step_begin(NULL, "unit", matrix(1, 2, 2), "serial", 1L),
               "not writable")
+})
+
+test_that("rp_step_begin refuses a combat.progress.dir it cannot create loudly", {
+  blocker <- withr::local_tempfile()
+  writeLines("a file, so no directory can be made under it", blocker)
+  withr::local_options(combat.progress.dir = file.path(blocker, "progress"))
+  expect_error(rnaparallel:::rp_step_begin(NULL, "unit", matrix(1, 2, 2), "serial", 1L),
+               "could not be created")
+})
+
+test_that("the default progress directory under tempdir() is still created silently", {
+  withr::local_options(combat.progress.dir = NULL)
+  d <- rnaparallel:::rp_progress_dir()
+  expect_identical(dirname(d), file.path(tempdir(), "rnaparallel-progress"))
+  expect_match(basename(d), paste0("^", Sys.getpid(), "-[0-9]+$"))
+  expect_true(dir.exists(d))
 })
 
 ## rp_progress_tick() must not draw from inside a worker: regression for a real bug where a

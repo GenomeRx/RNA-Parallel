@@ -14,6 +14,7 @@ test_that("the backend list is what the docs promise", {
 })
 
 test_that("an unknown backend is refused, not silently ignored", {
+  withr::local_options(combat.mem.guard = FALSE)
   d <- make_counts(20, G = 60, n_per_batch = c(4, 4))
   expect_error(ComBat_seq_parallel(d$counts, d$batch, parallel_backend = "sparklyr"),
                "should be one of")
@@ -27,28 +28,27 @@ test_that("every installed backend gives a bit-identical result", {
   needs <- c(mclapply = "parallel", future = "future.apply",
              BiocParallel = "BiocParallel", foreach = "doParallel", serial = "base")
 
-  exercised <- 0L
+  dropped <- character()
   for (be in combat_backends()) {
     pkg <- needs[[be]]
-    # skip() aborts the whole test, so one absent package used to drop every backend after
-    # it from this comparison. next drops only that backend, and the counter below refuses a
-    # run in which nothing was exercised.
-    if (pkg != "base" && !requireNamespace(pkg, quietly = TRUE)) next
-    exercised <- exercised + 1L
-    if (be == "future") {
-      old <- future::plan(future::multisession, workers = 2)
-      on.exit(future::plan(old), add = TRUE)
+# skip() here would abort the whole test, so an absent package drops only its own backend and the skip after the loop names it.
+    if (pkg != "base" && !requireNamespace(pkg, quietly = TRUE)) {
+      dropped <- c(dropped, be)
+      next
     }
-    got <- quietly(ComBat_seq_parallel(d$counts, d$batch, group = NULL,
-                                       workers = 2L, chunks = 4L,
-                                       parallel_backend = be))
+    got <- local({
+      if (be == "future") local_socket_plan(2L)
+      quietly(ComBat_seq_parallel(d$counts, d$batch, group = NULL,
+                                  workers = 2L, chunks = 4L,
+                                  parallel_backend = be))
+    })
     expect_identical(got, ref, info = paste("backend:", be))
   }
-  # a loop that exercised nothing would otherwise report green
-  expect_gte(exercised, 2L)
+  if (length(dropped)) skip(paste("not installed, so not compared:", paste(dropped, collapse = ", ")))
 })
 
 test_that("chunk order is preserved, which is what identical() depends on", {
+  skip_if_not_installed("sva")
   # A backend returning results out of order would rbind the genes scrambled. The
   # matrix would still be the right shape, so only a value check catches it.
   d <- make_counts(22, G = 240, n_per_batch = c(6, 6))
@@ -64,18 +64,70 @@ test_that("chunk order is preserved, which is what identical() depends on", {
   }
 })
 
+test_that("a BiocParallel dispatch returns when the progress dir holds a stalled row", {
+  skip_on_cran()
+  skip_on_os("windows")
+  skip_if_not_installed("BiocParallel")
+  skip_if_not_installed("sva")
+
+  script <- tempfile(fileext = ".R")
+  writeLines(c(
+    rp_load_line(),
+    "utils::assignInNamespace(\"rp_reporter_visible\", function() TRUE, \"rnaparallel\")",
+    "options(combat.min.cells = 0, combat.min.disp.cells = 0, combat.min.batch.cells = 0,",
+    "        combat.min.glm.cells = 0, combat.mem.guard = FALSE)",
+    "d <- tempfile(\"rp-stalled-\"); dir.create(d)",
+    "writeLines(\"1\\tearlier stage\\t1\\tstart\", file.path(d, \"rnaparallel-1.tsv\"))",
+    "options(combat.progress.dir = d)",
+    "set.seed(1)",
+    "m <- matrix(rnbinom(400 * 12, mu = 50, size = 5), 400, 12)",
+    "batch <- factor(rep(1:2, each = 6))",
+    "invisible(capture.output(x <- ComBat_seq_parallel(m, batch, group = NULL, workers = 2L,",
+    "                                                  parallel_backend = \"BiocParallel\")))",
+    "invisible(capture.output(ref <- sva::ComBat_seq(m, batch, group = NULL)))",
+    "cat(\"\\nBIOC_STALLED_OK\", identical(x, ref), \"\\n\")"), script)
+  out <- suppressWarnings(system2(
+    file.path(R.home("bin"), "Rscript"), c("--vanilla", shQuote(script)),
+    stdout = TRUE, stderr = TRUE,
+    env = c("NOT_CRAN=true",
+            paste0("R_LIBS=", shQuote(paste(.libPaths(), collapse = .Platform$path.sep)))),
+    timeout = 60))
+  expect_true(any(grepl("BIOC_STALLED_OK TRUE", out, fixed = TRUE)),
+              info = paste(tail(out, 5), collapse = "\n"))
+})
+
 test_that("combat.fork = FALSE forces serial on every backend", {
+  skip_if_not_installed("sva")
   d <- make_counts(23, G = 150, n_per_batch = c(5, 5))
   ref <- quietly(ComBat_seq_parallel(d$counts, d$batch, group = NULL,
                                      parallel_backend = "serial", workers = 1L))
   old <- getOption("combat.fork")
   options(combat.fork = FALSE)
   on.exit(options(combat.fork = old), add = TRUE)
+  if (requireNamespace("future.apply", quietly = TRUE) && future::supportsMulticore()) {
+    old_plan <- future::plan(future::multicore, workers = 2)
+    on.exit(future::plan(old_plan), add = TRUE)
+  }
+  idx <- rnaparallel:::combat_row_chunks(8L, chunks = 4L)
+  needs <- c(mclapply = "parallel", future = "future.apply",
+             BiocParallel = "BiocParallel", foreach = "doParallel", serial = "base")
+  dropped <- character()
   for (be in combat_backends()) {
+    pkg <- needs[[be]]
+# skip() here would abort the whole test, so an absent package drops only its own backend and the skip after the loop names it.
+    if (pkg != "base" && !requireNamespace(pkg, quietly = TRUE)) {
+      dropped <- c(dropped, be)
+      next
+    }
     got <- quietly(ComBat_seq_parallel(d$counts, d$batch, group = NULL,
                                        workers = 4L, parallel_backend = be))
     expect_identical(got, ref, info = paste("backend:", be))
+    pids <- unlist(rnaparallel:::combat_parallel_lapply(
+      idx, function(i) Sys.getpid(), workers = 2L, parallel_backend = be,
+      cells = Inf, min_cells = 0))
+    expect_true(all(pids == Sys.getpid()), info = paste("forked under combat.fork = FALSE:", be))
   }
+  if (length(dropped)) skip(paste("not installed, so not compared:", paste(dropped, collapse = ", ")))
 })
 
 test_that("the future backend warns instead of silently running serially", {
@@ -190,12 +242,7 @@ test_that("the nesting guard does not disturb a caller's own parallel loop", {
 })
 
 test_that("the two nesting guards answer differently for a caller's own fork", {
-  # The spy tests above run a CUSTOM executor, which never reaches the mclapply branch, so
-  # neither of them exercises mc.allow.recursive = FALSE. That guard is still passed, and on
-  # the default backend it fires for ANY enclosing fork child, including one the caller made.
-  # The env-var guard fires only for our own workers. The two therefore disagree about a
-  # caller's own loop, and the README says which is which, so it is pinned here by process
-  # count rather than left to prose.
+# mc.allow.recursive = FALSE serializes a dispatch inside any fork child, the caller's own included, as REFERENCE.md's "Nesting is blocked on every backend" paragraph says, so it is pinned here by process count.
   skip_on_os("windows")
   skip_if(!identical(Sys.getenv("NOT_CRAN"), "true"), "forking test")
 
@@ -240,6 +287,7 @@ test_that("a dispatch too small to be worth a fork runs serially instead", {
 })
 
 test_that("the size gate does not change the numbers, only who computes them", {
+  skip_if_not_installed("sva")
   skip_on_os("windows")   # these executors call mclapply, which cannot fork on Windows
 
   d <- make_counts(11, G = 300L, n_per_batch = c(12, 10, 11))
@@ -284,13 +332,13 @@ matrix_backends <- function() {
     # function of its chunk: the same idx recomputed gives the same answer, and nothing here
     # accumulates.
     for (attempt in 1:4) {
-      cl <- tryCatch({
-        cc <- parallel::makeCluster(n, type = "PSOCK")
-        parallel::clusterEvalQ(cc, suppressMessages(library(edgeR)))
-        cc
-      }, error = function(e) NULL)
+      cl <- tryCatch(parallel::makeCluster(n, type = "PSOCK"), error = function(e) NULL)
       if (is.null(cl)) { Sys.sleep(0.25 * attempt); next }
-      out <- tryCatch(parallel::parLapply(cl, idx, f), error = function(e) e)
+      out <- tryCatch({
+        parallel::clusterEvalQ(cl, suppressMessages(library(edgeR)))
+        rp_cluster_load(cl)
+        parallel::parLapply(cl, idx, f)
+      }, error = function(e) e)
       try(parallel::stopCluster(cl), silent = TRUE)
       if (!inherits(out, "error")) return(out)
       # Only a broken socket is retryable. An error raised BY the chunk must surface on the
@@ -303,7 +351,9 @@ matrix_backends <- function() {
       }
       Sys.sleep(0.25 * attempt)
     }
-    testthat::skip("PSOCK could not complete a dispatch in four attempts")
+    stop(structure(class = c("psock_unavailable", "error", "condition"),
+                   list(message = "PSOCK could not complete a dispatch in four attempts",
+                        call = NULL)))
   }
   if (requireNamespace("BiocParallel", quietly = TRUE)) b[["BiocParallel"]] <- "BiocParallel"
   b
@@ -329,17 +379,25 @@ test_that("every backend agrees on every argument path, RNG paths included", {
          seed = TRUE))
 
   bes <- matrix_backends()
+  dropped <- character()
   for (p in paths) {
     if (p$seed) set.seed(4242)
     ref <- quietly(do.call(original, c(list(counts = d$counts, batch = d$batch), p$a)))
     for (bn in names(bes)) {
       if (p$seed) set.seed(4242)
-      got <- quietly(do.call(ComBat_seq_parallel, c(
+      got <- tryCatch(quietly(do.call(ComBat_seq_parallel, c(
         list(counts = d$counts, batch = d$batch, workers = 3L, chunks = 4L,
-             parallel_backend = bes[[bn]]), p$a)))
+             parallel_backend = bes[[bn]]), p$a))),
+        psock_unavailable = function(e) e)
+      if (inherits(got, "psock_unavailable")) {
+        dropped <- c(dropped, paste0(bn, " / ", p$nm))
+        next
+      }
       expect_identical(got, ref, info = paste0(bn, " / ", p$nm))
     }
   }
+  if (length(dropped)) skip(paste("no PSOCK cluster in four attempts, not compared:",
+                                  paste(dropped, collapse = ", ")))
 })
 
 test_that("no backend fails silently when a chunk errors", {
@@ -355,8 +413,12 @@ test_that("no backend fails silently when a chunk errors", {
   for (bn in names(bes)) {
     be <- bes[[bn]]
     surfaced <- tryCatch({
-      parts <- rnaparallel:::combat_parallel_lapply(idx, boom, workers = 3L,
-                                                          parallel_backend = be)
+      parts <- withCallingHandlers(
+        rnaparallel:::combat_parallel_lapply(idx, boom, workers = 3L, parallel_backend = be),
+        warning = function(w) {
+          if (grepl("function calls resulted in an error|encountered error in user code",
+                    conditionMessage(w))) invokeRestart("muffleWarning")
+        })
       # came back rather than throwing: the check must reject it
       tryCatch({ rnaparallel:::combat_parallel_check(parts, "probe"); FALSE },
                error = function(e) TRUE)
@@ -406,6 +468,7 @@ test_that("clusters are cached, not rebuilt per dispatch", {
 
 test_that("a stopped cluster is rebuilt rather than reused dead", {
   skip_on_cran()
+  skip_on_os("windows")
   rnaparallel:::combat_cluster_stop()
   cl <- rnaparallel:::combat_cluster(2L, "FORK")
   parallel::stopCluster(cl)                    # kill it behind the cache's back
@@ -418,6 +481,8 @@ test_that("a stopped cluster is rebuilt rather than reused dead", {
 test_that("a machine with no ps binary still builds and reuses a cluster", {
   skip_on_cran()
   skip_on_os("windows")
+  skip_if_not_installed("foreach")
+  skip_if_not_installed("doParallel")
 
   # The identity probe shells out to ps. Making a missing identity fatal turned ps into an
   # undeclared hard dependency: on a distroless container or a sandbox that blocks subprocess
@@ -426,8 +491,7 @@ test_that("a machine with no ps binary still builds and reuses a cluster", {
   script <- tempfile(fileext = ".R")
   writeLines(c(
     'Sys.setenv(PATH = tempdir())',
-    sprintf('suppressMessages(pkgload::load_all(%s, quiet = TRUE))',
-            deparse(normalizePath(testthat::test_path("..", "..")))),
+    rp_load_line(),
     'stopifnot(!nzchar(Sys.which("ps")))',
     'cl <- rnaparallel:::combat_cluster(2L, "FORK")',
     'stopifnot(length(cl) == 2L)',
@@ -445,24 +509,30 @@ test_that("a machine with no ps binary still builds and reuses a cluster", {
     env = c("NOT_CRAN=true",
             paste0("R_LIBS=", shQuote(paste(.libPaths(), collapse = .Platform$path.sep)))),
     timeout = 60))
-  expect_true("NO_PS_OK" %in% out, info = paste(out, collapse = "\n"))
+  expect_true(any(grepl("NO_PS_OK", out, fixed = TRUE)), info = paste(out, collapse = "\n"))
 })
+
+reap_outsider <- function(job) {
+  if (isTRUE(tools::pskill(job$pid, 0L))) tools::pskill(job$pid, tools::SIGKILL)
+  withCallingHandlers(
+    try(parallel::mccollect(job, wait = FALSE), silent = TRUE),
+    warning = function(w) {
+      if (grepl("did not deliver", conditionMessage(w), fixed = TRUE)) invokeRestart("muffleWarning")
+    })
+}
 
 test_that("a retired entry that will not die is given up on rather than retried forever", {
   skip_on_cran()
   skip_on_os("windows")
 
   outsider <- parallel::mcparallel(Sys.sleep(30))
-  on.exit({
-    if (isTRUE(tools::pskill(outsider$pid, 0L))) tools::pskill(outsider$pid, tools::SIGKILL)
-    try(parallel::mccollect(outsider, wait = FALSE), silent = TRUE)
-  }, add = TRUE)
+  on.exit(reap_outsider(outsider), add = TRUE)
 
   cache <- rnaparallel:::.combat_clusters
   old_retired <- cache$retired
   on.exit(cache$retired <- old_retired, add = TRUE)
 
-  # a live PID this session recorded but cannot identify: status "unknown", so it is signalled
+  # a live PID this session recorded but cannot identify: status "unknown", so it is signaled
   # and waited on. Before the attempt cap it survived every round, and combat_cluster() paid
   # the full timeout on every later dispatch, forever, saying nothing.
   ns <- asNamespace("rnaparallel")
@@ -490,17 +560,16 @@ test_that("a forked child never reaps the workers its parent recorded", {
   on.exit(cache$retired <- old_retired, add = TRUE)
 
   outsider <- parallel::mcparallel(Sys.sleep(30))
-  on.exit({
-    if (isTRUE(tools::pskill(outsider$pid, 0L))) tools::pskill(outsider$pid, tools::SIGKILL)
-    try(parallel::mccollect(outsider, wait = FALSE), silent = TRUE)
-  }, add = TRUE)
+  on.exit(reap_outsider(outsider), add = TRUE)
 
   # stamped with a PID that is not this process, exactly as a child inheriting the parent's
-  # list would see it. The child must forget the entry without signalling anything behind it.
+  # list would see it. The child must forget the entry without signaling anything behind it.
   cache$retired <- list(list(pid = Sys.getpid() + 1L, pids = outsider$pid,
                              identities = NA_character_, tries = 0L))
   expect_identical(rnaparallel:::combat_retired_reap(timeout = 0), 0L)
-  expect_true(isTRUE(tools::pskill(outsider$pid, 0L)))
+  now <- rnaparallel:::combat_pid_identities(outsider$pid)
+  expect_false(grepl("defunct", now))
+  expect_identical(rnaparallel:::combat_pid_status(outsider$pid, now), "owned")
   expect_null(cache$retired)
 })
 
@@ -542,12 +611,7 @@ test_that("retired cleanup never kills a reused PID", {
   skip_on_os("windows")
 
   outsider <- parallel::mcparallel(Sys.sleep(30))
-  on.exit({
-    if (isTRUE(tools::pskill(outsider$pid, 0L))) {
-      tools::pskill(outsider$pid, tools::SIGKILL)
-    }
-    try(parallel::mccollect(outsider, wait = FALSE), silent = TRUE)
-  }, add = TRUE)
+  on.exit(reap_outsider(outsider), add = TRUE)
 
   cache <- rnaparallel:::.combat_clusters
   old_retired <- cache$retired
@@ -579,7 +643,7 @@ test_that("a partially dead cluster is torn down whole, leaving no worker behind
     file.path(R.home("bin"), "Rscript"), c("--vanilla", shQuote(script)),
     stdout = TRUE, stderr = TRUE,
     env = c("NOT_CRAN=true", paste0("R_LIBS=", shQuote(libs)),
-            paste0("RNAPARALLEL_SRC=", shQuote(normalizePath(testthat::test_path("..", ".."))))),
+            paste0("RNAPARALLEL_SRC=", shQuote(rp_dev_root()))),
     timeout = 30
   ))
 
@@ -766,12 +830,15 @@ test_that("a chunk that comes back the wrong size is refused, not bound", {
 test_that("an uninstalled named backend is refused at any dispatch size", {
   # the dependency check used to sit below the size gate, so an unavailable framework
   # succeeded quietly on a small dispatch and errored on an otherwise identical large one
-  skip_if(requireNamespace("future.apply", quietly = TRUE),
-          "future.apply is installed, so this path cannot be exercised here")
+  real <- base::requireNamespace
+  local_mocked_bindings(requireNamespace = function(package, ...) {
+    if (identical(package, "future.apply")) FALSE else real(package, ...)
+  }, .package = "base")
   idx <- rnaparallel:::combat_row_chunks(20L, chunks = 4L)
   expect_error(
     rnaparallel:::combat_parallel_lapply(idx, function(i) sum(i), workers = 2L,
-                                               parallel_backend = "future", cells = 10),
+                                               parallel_backend = "future", cells = 10,
+                                               min_cells = 2e4),
     "needs future.apply")
 })
 test_that("row chunks cover every gene exactly once", {
@@ -793,6 +860,7 @@ test_that("chunks are clamped, so a huge value cannot fork once per gene", {
 })
 
 test_that("worker and chunk layouts do not change the answer", {
+  skip_if_not_installed("sva")
   d <- make_counts(11, G = 250, n_per_batch = c(6, 6))
   ref <- quietly(ComBat_seq_parallel(d$counts, d$batch, group = NULL, workers = 1L, chunks = 1L))
   for (layout in list(c(1, 8), c(2, 2), c(4, 1), c(4, 3), c(2, 64))) {

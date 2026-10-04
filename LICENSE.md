@@ -26,5 +26,8 @@ ComBat-seq itself is by Yuqing Zhang, Giovanni Parmigiani and W. Evan Johnson,
 distributed in Bioconductor's `sva` under Artistic-2.0. The original function is
 called rather than forked. One file reproduces upstream source so the companion can
 detect an upstream change and stand down: `R/helper_seq_parallel.R` holds the
-`sva::match_quantiles` body and a row-vectorised transcription of it, derived from
-Artistic-2.0 code. Nothing else here reproduces upstream code.
+`sva::match_quantiles` body and a row-vectorized transcription of it, derived from
+Artistic-2.0 code. The same file holds `.tagwise_defaults_pinned`, the three
+one-line default statements (`offset`, `span`, `AveLogCPM`) of edgeR 4.4.2's
+`estimateGLMTagwiseDisp.default`, which the tagwise row split also executes, derived
+from edgeR under GPL (>= 2).

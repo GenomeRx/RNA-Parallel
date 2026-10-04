@@ -1,8 +1,8 @@
 ## helper_limma_parallel.R
 ##
-## Everything the limma companions need that is not an entry point. Mirrors the role
-## helper_seq_parallel.R plays for ComBat-seq, and reuses its dispatch layer unchanged:
-## combat_row_chunks, combat_parallel_lapply, combat_parallel_check, combat_row_order.
+## Everything the limma companions need that is not an entry point; rp_uncapped() also serves the
+## edgeR DGEList entry. Mirrors helper_seq_parallel.R for ComBat-seq and reuses its dispatch
+## layer unchanged: combat_row_chunks, combat_parallel_lapply, combat_parallel_check, combat_row_order.
 ##
 ## Nothing here reimplements limma. The original function is called unchanged on each block.
 ## What this file does is resolve, once and on the full matrix, the arguments a block would
@@ -56,6 +56,49 @@ rp_weights_matrix <- function(weights, dim_full, env) {
          "object this package cannot account for.", call. = FALSE)
   }
   w
+}
+
+
+#' Would the expanded weights leave limma on its fast branch?
+#'
+#' Read off the shape alone, in [limma::asMatrixWeights()]'s own branch order, so a call that a
+#' size gate sends to the original never builds the full weight matrix just to choose the gate.
+#' TRUE when the expansion is `NULL` or carries `arrayweights`: a full-size matrix already
+#' flagged, a one-row matrix spanning more than one array, or a vector whose length is the array
+#' count and is neither 1 nor the gene count, since the gene branch is tested first. A wrong
+#' answer only picks the other gate; everything after the gates reads the real expansion.
+#' @param weights `NULL`, a vector, or a matrix, as the user supplied it.
+#' @param dim_full `dim()` of the FULL matrix.
+#' @noRd
+rp_weights_fast <- function(weights, dim_full) {
+  if (is.null(weights)) return(TRUE)
+  dw <- dim(weights)
+  if (length(dw) != 2L) dw <- c(length(weights), 1L)
+  if (all(dw == dim_full)) return(is.matrix(weights) && !is.null(attr(weights, "arrayweights")))
+  if (min(dw) != 1L) return(FALSE)
+  if (dw[2L] > 1L && dw[2L] == dim_full[2L]) return(TRUE)
+  lw <- prod(dw)
+  lw != 1L && lw != dim_full[1L] && lw == dim_full[2L]
+}
+
+
+#' Evaluate a nested companion call with the memory cap switched off
+#'
+#' For a call whose `workers` is capped exactly once elsewhere in the same user-facing call, so
+#' one call reads memory once and warns at most once. The removeBatchEffect and DGEList entries
+#' wrap their own prologue and leave the cap to the nested call; the rebound lmFit and gls.series
+#' wrap the nested call and keep the cap they already applied. `rp_mem_cap()` returns its input
+#' untouched while `.rp_dispatch$uncapped` is TRUE. The flag is internal, so code running inside
+#' the call (a custom backend, a user's lmFit) still reads the caller's own `combat.mem.guard`.
+#' The previous flag is restored on exit, so the outer of two nested scopes stays uncapped. The
+#' caller's option is validated first, so a garbage value is still refused at the door.
+#' @noRd
+rp_uncapped <- function(expr) {
+  rp_opt_flag("combat.mem.guard", default = TRUE)
+  prev <- .rp_dispatch$uncapped
+  .rp_dispatch$uncapped <- TRUE
+  on.exit(.rp_dispatch$uncapped <- prev)
+  expr
 }
 
 
@@ -227,9 +270,17 @@ rp_bind_rows <- function(parts, ord, nm, ngenes, what, chunk_lens = NULL) {
 }
 
 
+#' Refuse with a condition a caller can tell apart from a real error
+#'
+#' Classed `rnaparallel_refusal`, so lmFit_parallel can run limma's own duplicateCorrelation
+#' whole when the split refuses, while any other error still reaches the user unchanged.
+#' @noRd
+rp_refuse <- function(...) stop(errorCondition(paste0(...), class = "rnaparallel_refusal"))
+
+
 #' Resolve a limma backend and refuse when a rebind target has moved
 #'
-#' The limma analogue of `combat_backend()`. An unreachable rebind returns correct output
+#' The limma analog of `combat_backend()`. An unreachable rebind returns correct output
 #' at serial speed, and no equivalence test can see the difference, so this refuses to
 #' start rather than run a companion that silently does nothing.
 #'
@@ -254,17 +305,17 @@ limma_backend <- function(fn = NULL, need_args = character(), rebound = characte
   }
   missing_args <- setdiff(need_args, names(formals(fn)))
   if (length(missing_args)) {
-    stop("this limma backend is missing argument(s): ", paste(missing_args, collapse = ", "),
-         ". rnaparallel was written against limma 3.62's signature.", call. = FALSE)
+    rp_refuse("this limma backend is missing argument(s): ", paste(missing_args, collapse = ", "),
+              ". rnaparallel was written against limma 3.62's signature.")
   }
   # Same call-head walk as combat_backend: heads only, and only bare symbols, so a future
   # `limma::lm.series(...)` is caught rather than being read as reachable.
   unreachable <- setdiff(rebound, rp_bare_call_heads(body(fn)))
   if (length(unreachable)) {
-    stop("this limma backend no longer calls ", paste(unreachable, collapse = ", "),
-         " as a bare symbol, so rebinding cannot reach it. The package would run serially ",
-         "while still returning identical() output, which no equivalence test can detect. ",
-         "Refusing to run.", call. = FALSE)
+    rp_refuse("this limma backend no longer calls ", paste(unreachable, collapse = ", "),
+              " as a bare symbol, so rebinding cannot reach it. The package would run serially ",
+              "while still returning identical() output, which no equivalence test can detect. ",
+              "Refusing to run.")
   }
   list(fn = fn, env = env)
 }

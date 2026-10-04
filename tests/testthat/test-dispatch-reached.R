@@ -44,6 +44,39 @@ test_that("the common dispersion is dispatched across batches, not once per run"
   expect_identical(count_for(4L), 6L)
 })
 
+test_that("both across-batch dispersion results reach the returned counts", {
+  skip_if_not_installed("sva")
+  set.seed(4)
+  cts <- matrix(rnbinom(300 * 30, mu = 60, size = 4), nrow = 300)
+  bat <- rep(1:3, each = 10L)
+  ref <- quietly(sva::ComBat_seq(cts, batch = bat, group = NULL))
+
+  poison <- function(scalar) {
+    hits <- 0L
+    list(backend = function(idx, f, workers) {
+      r <- lapply(idx, f)
+      v <- r[[1L]]$value
+      if (is.numeric(v) && is.null(dim(v)) && (length(v) == 1L) == scalar) {
+        v[1L] <- v[1L] * if (scalar) 3 else 50
+        r[[1L]]$value <- v
+        hits <<- hits + 1L
+      }
+      r
+    }, hits = function() hits)
+  }
+  common <- poison(TRUE)
+  out_common <- quietly(ComBat_seq_parallel(cts, batch = bat, group = NULL, workers = 2L,
+                                            parallel_backend = common$backend))
+  expect_identical(common$hits(), 1L)
+  expect_false(identical(out_common, ref))
+
+  tagwise <- poison(FALSE)
+  out_tagwise <- quietly(ComBat_seq_parallel(cts, batch = bat, group = NULL, workers = 2L,
+                                             parallel_backend = tagwise$backend))
+  expect_identical(tagwise$hits(), 1L)
+  expect_false(identical(out_tagwise, ref))
+})
+
 test_that("a backend that no longer calls the rebound symbols is refused", {
   # the failure this guards is silent: an unreachable rebind still returns identical output
   fake <- function(counts, batch, group = NULL, covar_mod = NULL, full_mod = TRUE,
@@ -58,7 +91,7 @@ test_that("a backend that no longer calls the rebound symbols is refused", {
 
 test_that("cluster bookkeeping survives a non-cluster entry in the cache", {
   # The named flags are excluded from the sweep by name, so planting one of those would
-  # never reach the is.list() guard this test exists for. Plant an unrecognised entry.
+  # never reach the is.list() guard this test exists for. Plant an unrecognized entry.
   assign("bogus_entry", TRUE, envir = rnaparallel:::.combat_clusters)
   on.exit(suppressWarnings(rm(list = "bogus_entry",
                               envir = rnaparallel:::.combat_clusters)), add = TRUE)
@@ -97,7 +130,7 @@ test_that("a backend that namespace-qualifies a rebound call is refused", {
     f <- function(counts, batch, group = NULL, covar_mod = NULL, full_mod = TRUE,
                   shrink = FALSE, shrink.disp = FALSE, gene.subset.n = NULL) NULL
     body(f) <- parse(text = sprintf(
-      "{ match_quantiles(a, b, c, d, e); %s; glmFit.default(y); estimateGLMTagwiseDisp(y); sapply(z, g); lapply(z, g) }",
+      "{ match_quantiles(a, b, c, d, e); %s; glmFit.default(y); estimateGLMTagwiseDisp(y); sapply(z, function(i) estimateGLMCommonDisp(i)); lapply(z, function(j) estimateGLMTagwiseDisp(j)) }",
       if (qualified) "edgeR::glmFit(y)" else "glmFit(y)"))[[1]]
     e <- new.env(parent = globalenv())
     assign("match_quantiles",

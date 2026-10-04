@@ -2,7 +2,7 @@
 % Please edit documentation in R/edger_norm_parallel.R
 \name{calcNormFactors_parallel}
 \alias{calcNormFactors_parallel}
-\title{edgeR normalisation factors with the per-column work parallelised}
+\title{edgeR's normLibSizes (calcNormFactors) with the per-column work parallelized}
 \usage{
 calcNormFactors_parallel(
   object,
@@ -28,7 +28,7 @@ calcNormFactors_parallel(
 \item{lib.size}{Library sizes. Defaults to \code{colSums(object)}, computed by edgeR on the
 whole matrix.}
 
-\item{method}{Normalisation method, one of \code{"TMM"}, \code{"TMMwsp"}, \code{"RLE"},
+\item{method}{Normalization method, one of \code{"TMM"}, \code{"TMMwsp"}, \code{"RLE"},
 \code{"upperquartile"} or \code{"none"}.}
 
 \item{refColumn}{Reference column for TMM and TMMwsp. Chosen by edgeR when \code{NULL}.}
@@ -50,7 +50,11 @@ Going past your PERFORMANCE core count can be slower than stopping at it, and th
 worst on the largest inputs, which is exactly where people reach for more workers.
 Measured on an 8-core machine with 4 performance cores, TMM on 15,000 genes by 9,000
 specimens: 4 workers 10.74 s, 6 workers 7.26 s, 8 workers 11.60 s. Eight was slower than
-four. The default resolved to 6 there and was optimal; raising it by hand made it worse.}
+four. The default resolved to 6 there and was optimal; raising it by hand made it worse.
+
+With \code{parallel_backend = "foreach"} and a backend you registered yourself, \code{workers} sets
+only the default chunk count, and that backend's width bounds concurrency; see
+\code{\link[=combat_backends]{combat_backends()}}.}
 
 \item{chunks}{Column chunks per dispatch. Defaults to \code{workers}; passing \code{chunks = workers} explicitly is redundant.}
 
@@ -58,13 +62,18 @@ four. The default resolved to 6 there and was optimal; raising it by hand made i
 \verb{function(idx, f, workers)} returning a list in the order of \code{idx}. Defaults to
 \code{getOption("combat.backend", combat_default_backend())}.}
 
-\item{backend}{Optional edgeR default normalisation method to wrap. Defaults to
+\item{backend}{Optional edgeR default normalization method to wrap. Defaults to
 \code{normLibSizes.default} when available, with the older name as a fallback.}
 
-\item{label}{Optional name for this call in the timing line, when
+\item{label}{Optional name for this call. It labels the progress bar, which draws by
+default on macOS and Linux in an interactive session or on a terminal, the single-line progress tick on
+stderr (\code{options(combat.progress = FALSE)} turns both off), the
+rows written to the progress directory (\code{combat.progress.dir}, or a folder under
+\code{tempdir()} when unset), and the timing line when
 \code{options(combat.timing = TRUE)} is set. Defaults to \code{calcNormFactors} plus the resolved
 method and matrix shape, e.g. \verb{calcNormFactors TMM 12,000 x 700}. Unlike the other four
-companions (whose default is just their own name, e.g. \verb{lmFit 18,270 x 1,500}), this one
+companions (whose default is their own name and the matrix shape, e.g.
+\verb{lmFit 18,270 x 1,500}), this one
 also names the method, since \code{calcNormFactors_parallel(method = "TMM")} and \code{method = "RLE"} take genuinely different code paths worth telling apart in a multi-call log or a
 shared \code{combat.progress.dir} (\code{rnaparallel_progress()} groups TSV rows by this string).
 Pass a cohort name to tell calls apart in a loop.}
@@ -106,7 +115,7 @@ method divides by.
 
 \section{Dispatches too small to be worth a fork}{
 
-A fork costs about 60 ms here, so small matrices are slower parallelised than not, and
+A fork costs about 60 ms here, so small matrices are slower parallelized than not, and
 each path has its own threshold because they do not cost the same per cell. The TMM and
 TMMwsp loops dispatch at or above \code{getOption("combat.min.norm.cells", 2e5)} cells:
 measured 0.50x at 1e5, 1.00x at 2e5, 1.85x at 5e5. The RLE and upperquartile loops take
@@ -117,11 +126,17 @@ one order statistic per column and cost roughly a fifteenth as much, so they wai
 
 \section{When this is worth reaching for}{
 
-Unconditionally. The \code{rank} hoist needs no workers at all, so this companion is ahead even
-on an input too small to dispatch. Measured on an M3 at the default worker count, companion
-against original, every arm \code{identical()}: 1.44x at 2,000 genes by 20 samples with every
-dispatch gated, then 2.12x at 5,000 x 50, 3.90x at 20,000 x 50, 6.07x at 20,000 x 200 and
-6.26x at 20,000 x 500.
+For \code{method = "TMM"}, the default, unconditionally. The \code{rank} hoist needs no workers at
+all, so this companion is ahead even on an input too small to dispatch. Measured on an M3
+at the default worker count, TMM, companion against original, every arm \code{identical()}:
+1.44x at 2,000 genes by 20 samples with every dispatch gated, then 2.12x at 5,000 x 50,
+3.90x at 20,000 x 50, 6.07x at 20,000 x 200 and 6.26x at 20,000 x 500.
+
+The hoist is installed only into \code{.calcFactorTMM}. \code{TMMwsp}, \code{RLE} and \code{upperquartile} get
+none, so below their column-split gates (\code{combat.min.norm.cells} for TMMwsp,
+\code{combat.min.order.cells} for RLE and upperquartile) they run the original plus a fixed
+per-call overhead, which measured slower on small inputs: about 0.4x to 0.8x at 2,000 x 20.
+Call edgeR directly there.
 }
 
 \examples{

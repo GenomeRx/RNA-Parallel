@@ -1863,12 +1863,8 @@ alongside this package.</p>
 <span id="cb2-89"><a href="#cb2-89" tabindex="-1"></a><span class="co"># the package&#39;s own documentation recommends here. `foreach` degrades as workers are added,</span></span>
 <span id="cb2-90"><a href="#cb2-90" tabindex="-1"></a><span class="co"># rather than merely failing to improve: measured across a 2-to-16 sweep it fell from 1.18x to</span></span>
 <span id="cb2-91"><a href="#cb2-91" tabindex="-1"></a><span class="co"># 0.28x, which at the wide end is three and a half times SLOWER than not parallelising at all.</span></span>
-<span id="cb2-92"><a href="#cb2-92" tabindex="-1"></a><span class="co"># ComBat-seq dispatches 3 + 2 * n_batch times per correction, and the cached cluster is rebuilt</span></span>
-<span id="cb2-93"><a href="#cb2-93" tabindex="-1"></a><span class="co"># whenever the requested width changes, which it does on every alternation between the</span></span>
-<span id="cb2-94"><a href="#cb2-94" tabindex="-1"></a><span class="co"># batch-level and row-level dispatches. `future` holds one `multisession` set of workers across</span></span>
-<span id="cb2-95"><a href="#cb2-95" tabindex="-1"></a><span class="co"># all of them and shows the ordinary shape instead. Both return identical() output; only the</span></span>
-<span id="cb2-96"><a href="#cb2-96" tabindex="-1"></a><span class="co"># clock separates them, which is the whole reason this section exists. The table below is the</span></span>
-<span id="cb2-97"><a href="#cb2-97" tabindex="-1"></a><span class="co"># current measurement, not this note. Read it there.</span></span>
+<span id="cb2-92"><a href="#cb2-92" tabindex="-1"></a></span>
+<span id="cb2-93"><a href="#cb2-93" tabindex="-1"></a><span class="co"># ComBat-seq dispatches up to 2 * n_batch + 4 times per correction, and doParallel&#39;s cluster form sends every task of each dispatch over a socket with its closure and data, while `future` holds one `multisession` set of workers across all of them and shows the ordinary shape instead.</span></span>
 <span id="cb2-98"><a href="#cb2-98" tabindex="-1"></a>win_backends <span class="ot">&lt;-</span> <span class="fu">c</span>(<span class="st">&quot;mclapply&quot;</span>, <span class="st">&quot;BiocParallel&quot;</span>, <span class="st">&quot;future&quot;</span>, <span class="st">&quot;foreach&quot;</span>)</span>
 <span id="cb2-99"><a href="#cb2-99" tabindex="-1"></a></span>
 <span id="cb2-100"><a href="#cb2-100" tabindex="-1"></a><span class="co"># Every backend in the sweep needs its framework present. The package does raise a clear</span></span>
@@ -1973,11 +1969,13 @@ added.</p>
 <div class="sourceCode" id="cb8"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb8-1"><a href="#cb8-1" tabindex="-1"></a><span class="fu">stopifnot</span>(<span class="fu">identical</span>(demo_ref, demo_par))</span></code></pre></div>
 <p>Fifty genes by eight samples sits far below
 <code>combat.min.cells</code>, so every row-split dispatch runs
-serially: starting a PSOCK worker would cost more than the work. Only
-the common dispersion is handed out, one whole-matrix estimate per
-batch, which carries no size gate because it is always worth
-dispatching. Either way the output is the same matrix, which is the only
-thing the gate is allowed to leave alone.</p>
+serially: starting a PSOCK worker would cost more than the work. The
+dispatches across batches, one whole-matrix estimate per batch, are
+gated too, by
+<code>getOption(&quot;combat.min.batch.cells&quot;, 20000)</code> counted over
+the whole filtered matrix, so they run serially here as well. Either way
+the output is the same matrix, which is the only thing the gate is
+allowed to leave alone.</p>
 </div>
 <div id="c.-simulated-counts" class="section level1">
 <h1>C. Simulated counts</h1>

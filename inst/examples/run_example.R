@@ -14,9 +14,9 @@ G       <- as.integer(if (length(args) >= 1) args[1] else 20000L)
 n_cell  <- as.integer(if (length(args) >= 2) args[2] else 120L)   # samples per batch-condition cell
 workers <- as.integer(if (length(args) >= 3) args[3] else 4L)
 
-need <- c(rnaparallel = 'remotes::install_github("GenomeRx/RNA-Parallel")',
+need <- c(edgeR = 'BiocManager::install("edgeR")',
+          rnaparallel = 'remotes::install_github("GenomeRx/RNA-Parallel", dependencies = c("Depends", "Imports"), upgrade = "never")',
           sva = 'BiocManager::install("sva")',
-          edgeR = 'BiocManager::install("edgeR")',
           limma = 'BiocManager::install("limma")')
 missing <- names(need)[!vapply(names(need), requireNamespace, logical(1), quietly = TRUE)]
 if (length(missing)) {

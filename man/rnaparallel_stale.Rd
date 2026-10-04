@@ -16,7 +16,7 @@ package rewrites that file, so a session that was already running gets
 \verb{lazy-load database ... is corrupt} the first time it touches a symbol it had not yet
 forced. Inside a forked worker that surfaces as a failed dispatch, and a caller with a
 fallback path can quietly proceed on uncorrected data: three notebook runs were lost to
-exactly this before anyone realised the package, not the data, was the problem.
+exactly this before anyone realized the package, not the data, was the problem.
 }
 \details{
 Nothing here prevents it. The fix is to restart R after installing. This only lets a long

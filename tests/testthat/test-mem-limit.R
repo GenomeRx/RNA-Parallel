@@ -5,14 +5,21 @@
 ## still wrote to the real ~/.Renviron. Caught building this, which is why path= exists and
 ## every test below uses it instead of relying on the default.
 
-test_that("rp_mem_total returns NA when neither /proc nor a Windows reading is available", {
+test_that("rp_mem_total returns NA when neither /proc, Windows nor ps can be read", {
   skip_if(file.exists("/proc/meminfo"), "this machine has /proc; NA path not exercised here")
-  skip_if(!identical(.Platform$OS.type, "windows"),
-          "off Windows with no /proc there is no second source to fail")
-  # cannot force the Windows PowerShell call itself to fail portably; this only asserts the
-  # function returns a number type consistent with the contract when it CAN read something
-  v <- rnaparallel:::rp_mem_total()
-  expect_true(is.na(v) || (is.numeric(v) && v > 0))
+  real <- base::requireNamespace
+  local_mocked_bindings(requireNamespace = function(package, ...) {
+    if (identical(package, "ps")) FALSE else real(package, ...)
+  }, .package = "base")
+  local_mocked_bindings(system2 = function(...) character(), .package = "base")
+  expect_identical(rnaparallel:::rp_mem_total(), NA_real_)
+})
+
+test_that("rp_mem_total reads the machine's RAM off Linux", {
+  skip_if(file.exists("/proc/meminfo"), "this machine has /proc; the ps reading is not used here")
+  skip_if(identical(.Platform$OS.type, "windows"), "Windows reads PowerShell first")
+  skip_if_not_installed("ps")
+  expect_identical(rnaparallel:::rp_mem_total(), as.numeric(ps::ps_system_memory()$total))
 })
 
 test_that("a garbage fraction is refused, not silently ignored", {
@@ -44,12 +51,12 @@ test_that("NA total RAM writes nothing and returns NA invisibly", {
   expect_false(file.exists(p))
 })
 
-test_that("halves total RAM and rounds to the nearest tier, on a fresh file", {
+test_that("halves total RAM and rounds down to a tier, on a fresh file", {
   testthat::local_mocked_bindings(rp_mem_total = function() 100 * 2^30, .package = "rnaparallel")
   p <- withr::local_tempfile()
   suppressMessages(rnaparallel_set_mem_limit(fraction = 0.5, path = p))
-  # 100 GB * 0.5 = 50 GB, nearer to 64 than 32 in log space
-  expect_identical(readLines(p), "R_MAX_VSIZE=64Gb")
+# 100 GB * 0.5 = 50 GB, rounded down to the 32 GB tier.
+  expect_identical(readLines(p), "R_MAX_VSIZE=32Gb")
 })
 
 test_that("preserves other lines and replaces only a pre-existing R_MAX_VSIZE line", {

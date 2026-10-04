@@ -18,8 +18,11 @@ test_that("removeBatchEffect_parallel is identical on every argument path", {
   des <- stats::model.matrix(~ d$group)
   expect_identical(removeBatchEffect_parallel(d$y, batch = d$batch, workers = 2L),
                    limma::removeBatchEffect(d$y, batch = d$batch))
-  expect_identical(removeBatchEffect_parallel(d$y, batch = d$batch, design = des, workers = 2L),
-                   limma::removeBatchEffect(d$y, batch = d$batch, design = des))
+  expect_warning(got <- removeBatchEffect_parallel(d$y, batch = d$batch, design = des, workers = 2L),
+                 "Partial NA coefficients for 400 probe(s)", fixed = TRUE)
+  expect_warning(want <- limma::removeBatchEffect(d$y, batch = d$batch, design = des),
+                 "Partial NA coefficients for 400 probe(s)", fixed = TRUE)
+  expect_identical(got, want)
   expect_identical(
     suppressWarnings(removeBatchEffect_parallel(d$y, batch = d$batch, batch2 = d$batch2,
                                                 workers = 2L)),
@@ -62,7 +65,24 @@ test_that("removeBatchEffect_parallel actually dispatches", {
   got <- removeBatchEffect_parallel(d$y, batch = d$batch, workers = 2L, chunks = 4L,
                                     parallel_backend = spy)
   expect_identical(got, limma::removeBatchEffect(d$y, batch = d$batch))
-  expect_gt(n, 0L)
+  expect_identical(n, 1L)
+})
+
+test_that("removeBatchEffect_parallel with voom weights is identical and dispatches once", {
+  skip_no_limma()
+  skip_if_not_installed("edgeR")
+  set.seed(5)
+  cts <- matrix(stats::rnbinom(200 * 12, mu = 100, size = 10), 200, 12,
+                dimnames = list(sprintf("g%04d", 1:200), sprintf("s%02d", 1:12)))
+  grp <- factor(rep(c("A", "B"), each = 6))
+  v <- limma::voom(edgeR_norm(edgeR::DGEList(cts)), stats::model.matrix(~ grp))
+  b <- factor(rep(1:4, length.out = 12))
+  n <- 0L
+  spy <- function(idx, f, w) { n <<- n + 1L; lapply(idx, f) }
+  got <- removeBatchEffect_parallel(v$E, batch = b, weights = v$weights, workers = 2L,
+                                    chunks = 4L, parallel_backend = spy)
+  expect_identical(got, limma::removeBatchEffect(v$E, batch = b, weights = v$weights))
+  expect_identical(n, 1L)
 })
 
 test_that("removeBatchEffect_parallel refuses what lmFit_parallel refuses", {
@@ -71,7 +91,10 @@ test_that("removeBatchEffect_parallel refuses what lmFit_parallel refuses", {
   d <- rbe_fixture()
   # method = "robust" reshapes nothing but is refused upstream because a row split changes the
   # robust weights; ndups >= 2 pairs different genes. Both arrive here through `...`.
-  expect_error(removeBatchEffect_parallel(d$y, batch = d$batch, method = "robust", workers = 2L))
+  expect_error(removeBatchEffect_parallel(d$y, batch = d$batch, method = "robust", workers = 2L),
+               "robust|mrlm")
+  expect_error(removeBatchEffect_parallel(d$y, batch = d$batch, ndups = 2L, workers = 2L),
+               "ndups|unwrapdups")
 })
 
 test_that("the lmFit rebind inside removeBatchEffect is gated for reachability", {

@@ -85,6 +85,7 @@ rp_count_reset <- function() {
   .rp_dispatch$ser <- 0L
   .rp_dispatch$fallback <- character()
   .rp_dispatch$progress_last <- NULL
+  .rp_dispatch$nested_workers <- NULL
   invisible(NULL)
 }
 
@@ -113,8 +114,8 @@ rp_count_serial_after_all <- function() {
 
 #' Record that a pinned original excerpt stood down for this call
 #'
-#' `match_quantiles` is the one piece of original text this package still holds, and its gate is a
-#' byte-exact body match against sva. An sva release that reformats that body (never mind
+#' `match_quantiles` is pinned original text, and its gate is a byte-exact body match against
+#' sva. An sva release that reformats that body (never mind
 #' rewrites it) silently hands every slice back to the original's own cell loop. The numbers stay
 #' correct and the run gets 1.4-1.7x slower forever, which is the failure nobody reports because
 #' nobody can see it. So say it in the same line that already reports what ran.
@@ -130,16 +131,6 @@ rp_or0 <- function(x) if (is.null(x)) 0L else x
 
 
 # ---- single-line progress (default on) ----------------------------------------
-
-# combat.timing prints one line at the END of a call. ComBat-seq alone dispatches its hot
-# paths up to 2*n_batch + 3 times per call, so on a large cohort (hundreds of batches) there
-# is nothing on screen between "computing" and the final line, and a stuck run looks exactly
-# like a slow one. This is the fix: one line, overwritten in place with a carriage return, so
-# it never scrolls and never floods a log. On by default so every parallel call is visible
-# without opting in; set options(combat.progress = FALSE) to silence it.
-#
-# This tick fires in the MASTER process between dispatches. See the file-based mechanism
-# below for the part that survives the master blocking inside one big parallel call.
 
 #' @noRd
 rp_progress_tick <- function() {
@@ -187,7 +178,7 @@ rp_progress_done <- function() {
 }
 
 
-# ---- file progress (opt-in, for a blocking parallel call) --------------------
+# ---- file progress (default on, for a blocking parallel call) ----------------
 
 # The console tick above only fires in the MASTER process, and only between dispatches: the
 # moment mclapply/future/BiocParallel/foreach blocks for the actual parallel work, the master
@@ -201,11 +192,7 @@ rp_progress_done <- function() {
 # workers do not share a console at all. A file each worker can append to, read from a
 # SEPARATE session while the master blocks, is the only channel that survives all four
 # backends. One file per worker PID avoids write contention between workers.
-#
-# Off unless the caller sets a directory. Every write is one line; the cost is a
-# file-append syscall per chunk, not per gene, so at hundreds of chunks over hours it is
-# immaterial next to the compute itself.
-#
+
 # One file per worker PID, and the file is APPEND-ONLY for the life of that PID: a worker
 # pool reused across multiple companion calls in one long pipeline script (five companions,
 # one shared `future::multisession` plan, `combat.progress.dir` set once at the top) keeps
@@ -220,14 +207,29 @@ rp_progress_done <- function() {
 #' @noRd
 rp_progress_dir <- function() {
   d <- getOption("combat.progress.dir", NA_character_)
-  if (is.na(d) || !nzchar(d)) {
+  named <- !(is.na(d) || !nzchar(d))
+  if (!named) {
     # Default on: with no dir the run is silent for its whole duration, which is the state this
     # package exists to fix. Under tempdir(), so it never lands in a repo.
-    d <- file.path(tempdir(), "rnaparallel-progress")
+    d <- rp_progress_own_dir()
   }
   if (!dir.exists(d)) dir.create(d, showWarnings = FALSE, recursive = TRUE)
-  if (!dir.exists(d)) return(NULL)
+# A directory the caller named is returned even when it cannot be created, so rp_step_begin refuses it loudly.
+  if (!dir.exists(d) && !named) return(NULL)
   d
+}
+
+#' The directory the current dispatch writes to when no `combat.progress.dir` is named
+#'
+#' Keyed by pid and a dispatch counter that `rp_reporter_stop()` advances after removing the
+#' directory. Rows from earlier dispatches therefore never pile up for every later reporter poll
+#' to list, and a straggler from an earlier dispatch writes into a directory that no longer
+#' exists, so its write fails silently instead of landing in the current one. A forked caller
+#' has its own pid, so it never shares a directory with its parent.
+#' @noRd
+rp_progress_own_dir <- function() {
+  file.path(tempdir(), "rnaparallel-progress",
+            sprintf("%d-%d", Sys.getpid(), rp_or0(.rp_dispatch$progress_seq)))
 }
 
 #' Append one chunk-progress line to this worker's own file
@@ -250,30 +252,34 @@ rp_progress_file_write <- function(dir, stage, chunk, event) {
   # append = TRUE, one write per line: a worker that dies mid-chunk leaves a "start" with no
   # matching "done", which is itself useful (rnaparallel_progress() reports it as stalled)
   # rather than losing the row a buffered/batched write would risk on a killed process.
-  try(cat(line, file = path, append = TRUE), silent = TRUE)
+  try(suppressWarnings(cat(line, file = path, append = TRUE)), silent = TRUE)
   invisible(NULL)
 }
 
-#' Summarise chunk progress from a `combat.progress.dir`, with an ETA
+#' Summarize chunk progress from a `combat.progress.dir`, with an ETA
 #'
 #' Reads every `rnaparallel-*.tsv` file in `dir`, pairs each chunk's start/done rows, and
 #' reports completed chunks, a mean seconds-per-chunk from the ones that finished, and a
 #' projected finish time. Meant to be called from a SEPARATE R session while the run that is
 #' writing the files is still blocked inside its parallel call: that is the whole point of
-#' writing to a file rather than a console the blocked session cannot flush anyway.
+#' writing to a file rather than a console the blocked session cannot flush anyway. The running
+#' session draws its own bar only in an interactive session or on a terminal; for a knitr or
+#' Rscript log, set `combat.progress.dir` to keep these files and follow the run from a second
+#' session.
 #'
 #' A single continuously-updating bar DURING one blocking call is not something the running
 #' session can print: once it calls into `mclapply`/`future`/`BiocParallel`/`foreach` it is
 #' synchronously waiting and cannot redraw a console until the call returns, which is the whole
-#' reason this writes to files instead. `watch = TRUE` gets the live-bar behaviour anyway, from
+#' reason this writes to files instead. `watch = TRUE` gets the live-bar behavior anyway, from
 #' the side that CAN keep drawing: this function's own process, polling the files and
-#' redrawing a real `[#####-----] 47%` bar with the current stage name, once a second, until
+#' redrawing a real `|=====-----|  47%` bar with the current stage name, once a second, until
 #' every chunk in the last dispatch is done.
 #'
 #' @param dir Directory passed as `options(combat.progress.dir = ...)` in the running session.
 #' @param watch If `TRUE`, poll and redraw a live bar every `interval` seconds instead of
 #'   returning once. Meant for a SEPARATE terminal/session next to the one running the actual
-#'   computation; stop it with Ctrl-C or `interval` reaching a stall (see below).
+#'   computation; stop it with Ctrl-C, or it returns once `stall_after` seconds pass with no
+#'   chunk starting or finishing.
 #' @param interval Seconds between redraws in watch mode.
 #' @param stall_after Seconds with no new "done" OR "start" row before watch mode gives up
 #'   and returns, so a finished or crashed run does not poll forever with nobody watching.
@@ -431,14 +437,15 @@ rp_progress_once <- function(dir) {
 #' the blocked one
 #'
 #' This is the process that can actually keep redrawing: the running session is synchronously
-#' blocked inside its parallel call and cannot. Stops on its own once `started` chunks stop
-#' growing for `stall_after` seconds (the run finished, or nobody is writing to `dir` at all)
-#' so a call left running does not poll an abandoned directory forever.
+#' blocked inside its parallel call and cannot. Stops on its own about 2 s after every started
+#' chunk is done, or once no chunk has started or finished for `stall_after` seconds (a crashed
+#' run, or nobody writing to `dir` at all), so a call left running does not poll an abandoned
+#' directory forever.
 #'
 #' Single line, overwritten in place with a carriage return, same mechanism as the console
 #' tick: a redraw needs a live process polling a SEPARATE process's progress files, which is
 #' a different problem from printing your own progress once. A two-line redraw would need
-#' ANSI cursor-up escapes that not every terminal honours identically, so one line keeps the
+#' ANSI cursor-up escapes that not every terminal honors identically, so one line keeps the
 #' `|===---|` look without that risk.
 #' Render the progress bar from a process that is not blocked
 #'
@@ -454,21 +461,82 @@ rp_reporter_start <- function(dir) {
   if (is.null(dir) || .Platform$OS.type != "unix") return(NULL)
   if (nzchar(Sys.getenv("RNAPARALLEL_IN_WORKER"))) return(NULL)   # nested dispatch, master already has one
   if (!isTRUE(getOption("combat.fork", TRUE))) return(NULL)
+  if (!rp_opt_flag("combat.progress", default = TRUE)) return(NULL)
+  if (!rp_reporter_visible()) return(NULL)
+  cache <- rp_progress_mark(dir)
+  master <- Sys.getpid()
+# The reporter is a fork of this master, so its ppid differs from master once the master dies; without a ppid reader it falls back to signal 0.
+  alive <- function() {
+    pp <- rp_getppid()
+    if (is.na(pp)) isTRUE(tools::pskill(master, 0L)) else identical(as.integer(pp), master)
+  }
   # Quarter second before the first frame, then twice a second. Long enough that a dispatch
   # finishing instantly never paints and erases, short enough that every call doing real work
   # shows a bar.
-  h <- tryCatch(parallel::mcparallel({ Sys.sleep(0.25); rp_progress_watch(dir, 0.5, .Machine$integer.max) }),
-                error = function(e) NULL)
-  if (!is.null(h)) .rp_dispatch$reporter <- TRUE
+  h <- tryCatch(parallel::mcparallel({
+# Only the master's death ends the reporter, so an error or interrupt in the watch falls through to the wait below.
+    tryCatch({
+      Sys.sleep(0.25)
+      rp_progress_watch(dir, 0.5, .Machine$integer.max, cache = cache, alive = alive)
+    }, error = function(e) NULL, interrupt = function(e) NULL)
+    while (alive()) tryCatch(Sys.sleep(0.5), interrupt = function(e) NULL)
+# Detached so no mccollect() or parallel::children() of anyone else sees it.
+  }, detached = TRUE, mc.set.seed = FALSE), error = function(e) NULL)
+  if (!is.null(h)) {
+    .rp_dispatch$reporter_pid <- h$pid
+    .rp_dispatch$reporter <- TRUE
+    h$ctime <- rp_proc_ctime(h$pid)
+    .rp_dispatch$reporter_ctime <- h$ctime
+  }
   h
+}
+
+#' Whether anyone can see the reporter; in a knitr or Rscript log it only appends a frame every 0.5 s
+#' @noRd
+rp_reporter_visible <- function() interactive() || isatty(stdout())
+
+#' Creation time of a process, read at fork so a later signal can tell the reporter from a pid reuse
+#'
+#' A detached reporter that dies early is reaped at once, and its pid is free for another process
+#' long before the dispatch ends. NULL without \pkg{ps}, which `rp_reporter_stop()` reads as
+#' "cannot tell"; NA when the pid names no process.
+#' @noRd
+rp_proc_ctime <- function(pid) {
+  if (!requireNamespace("ps", quietly = TRUE)) return(NULL)
+  tryCatch(as.numeric(ps::ps_create_time(ps::ps_handle(as.integer(pid)))),
+           error = function(e) NA_real_)
+}
+
+#' Remember how far every progress file already runs, so a read with this cache sees only new rows
+#'
+#' Worker files are append-only and outlive a dispatch, and a stalled row left by an earlier run
+#' would otherwise hold this dispatch's bar short of done forever.
+#' @noRd
+rp_progress_mark <- function(dir) {
+  cache <- new.env(parent = emptyenv())
+  for (p in list.files(dir, pattern = "^rnaparallel-.*\\.tsv$", full.names = TRUE)) {
+    sz <- tryCatch(file.size(p), error = function(e) NA_real_)
+    if (!is.na(sz)) cache[[p]] <- list(size = sz, rows = NULL)
+  }
+  cache
 }
 
 #' @noRd
 rp_reporter_stop <- function(h) {
   .rp_dispatch$reporter <- FALSE
-  if (is.null(h)) return(invisible(NULL))
-  try(tools::pskill(h$pid, tools::SIGKILL), silent = TRUE)
-  try(suppressWarnings(parallel::mccollect(h, wait = FALSE)), silent = TRUE)
+  if (is.null(h)) h <- list(pid = .rp_dispatch$reporter_pid, ctime = .rp_dispatch$reporter_ctime)
+  .rp_dispatch$reporter_pid <- NULL
+  .rp_dispatch$reporter_ctime <- NULL
+# On exit, so the unnamed directory goes only after the kill below, since the reporter reads it until then.
+  on.exit({
+    unlink(rp_progress_own_dir(), recursive = TRUE)
+    .rp_dispatch$progress_seq <- rp_or0(.rp_dispatch$progress_seq) + 1L
+  }, add = TRUE)
+  if (is.null(h$pid)) return(invisible(NULL))
+# A pid whose creation time no longer matches the one read at fork names another process, so it is not signaled.
+  if (is.null(h$ctime) || identical(rp_proc_ctime(h$pid), h$ctime)) {
+    try(tools::pskill(h$pid, tools::SIGKILL), silent = TRUE)
+  }
   # Erase the bar rather than newline past it. The reporter dies mid-frame, so whatever it had
   # painted stays on the terminal and reads as belonging to whichever call prints next: a TMM bar
   # sitting under an lmFit heading is worse than no bar. rp_step_end prints the real summary.
@@ -477,7 +545,7 @@ rp_reporter_stop <- function(h) {
 }
 
 #' @noRd
-rp_progress_watch <- function(dir, interval, stall_after) {
+rp_progress_watch <- function(dir, interval, stall_after, cache = NULL, alive = NULL) {
   last_activity <- Sys.time()
   last_started <- -1L
   last_done <- -1L
@@ -487,8 +555,10 @@ rp_progress_watch <- function(dir, interval, stall_after) {
   # One cache across every poll in this watch call: the whole reason to tail is to stop
   # re-reading and re-parsing lines already seen, which only pays off across REPEATED reads
   # of the same files. A fresh cache per poll would tail nothing and cost the same as none.
-  cache <- new.env(parent = emptyenv())
+  if (is.null(cache)) cache <- new.env(parent = emptyenv())
   repeat {
+# The in-session reporter passes alive so it stops polling once its master is gone instead of pinning the master's pages forever.
+    if (!is.null(alive) && !isTRUE(alive())) return(invisible(NULL))
     rows <- rp_progress_read(dir, cache = cache)
     if (is.null(rows)) {
       cat(cr, strrep(" ", 70L), cr, "  waiting for ", dir, " ...", sep = "")
@@ -504,7 +574,7 @@ rp_progress_watch <- function(dir, interval, stall_after) {
       if (s$started != last_started || s$done != last_done) {
         last_activity <- Sys.time(); last_started <- s$started; last_done <- s$done
       }
-      pct <- if (s$started > 0L) s$done / s$started else 0
+      pct <- if (s$started > 0L) min(1, s$done / s$started) else 0
       filled <- round(pct * width)
       bar <- paste0("|", strrep("=", filled), strrep("-", width - filled), "|")
       eta_txt <- if (!is.na(s$eta)) sprintf("  ETA %s", format(s$eta, "%H:%M")) else ""
@@ -515,7 +585,8 @@ rp_progress_watch <- function(dir, interval, stall_after) {
       utils::flush.console()
       if (s$started > 0L && s$done >= s$started &&
           as.numeric(Sys.time() - last_activity, units = "secs") > 2) {
-        cat("\n")
+# Only a standalone watch moves past its bar; the reporter leaves it for rp_reporter_stop to erase.
+        if (is.null(alive)) cat("\n")
         return(invisible(s[c("done", "started", "stalled", "eta")]))
       }
     }
@@ -556,6 +627,9 @@ rp_label <- function(what, x) {
 #' `on.exit()` in the caller is what makes this exception-safe: the sink unwinds and the
 #' elapsed line still prints when the original throws, so a failed run reports where it failed
 #' rather than vanishing.
+#'
+#' A nested call prints nothing but records its own `workers`, and the outer timing line prints
+#' that count. The two differ when the nested call is the one that applied the memory cap.
 #' @noRd
 rp_step_begin <- function(label, what, x, backend, workers) {
   timing <- rp_opt_flag("combat.timing")
@@ -583,7 +657,7 @@ rp_step_begin <- function(label, what, x, backend, workers) {
            "permissions, or unset the option to run without file progress.", call. = FALSE)
     }
     probe <- file.path(pdir, sprintf(".rp_write_test_%d", Sys.getpid()))
-    writable <- isTRUE(tryCatch({ cat("", file = probe); file.remove(probe); TRUE },
+    writable <- isTRUE(tryCatch({ suppressWarnings(cat("", file = probe)); file.remove(probe); TRUE },
                                 error = function(e) FALSE))
     if (!writable) {
       stop("combat.progress.dir (", pdir, ") exists but is not writable. Every worker's ",
@@ -597,6 +671,7 @@ rp_step_begin <- function(label, what, x, backend, workers) {
   # only it resets the counters, so the inner dispatches are still attributed to it.
   if (rp_or0(.rp_dispatch$depth) > 0L) {
     .rp_dispatch$depth <- .rp_dispatch$depth + 1L
+    .rp_dispatch$nested_workers <- workers
     return(structure(list(nested = TRUE), class = "rp_step"))
   }
   # Build the handle FIRST and claim the depth last. Opening the sink can fail, and a depth
@@ -617,8 +692,9 @@ rp_step_begin <- function(label, what, x, backend, workers) {
 #' Peak resident bytes this process has ever held
 #'
 #' VmHWM, not VmRSS: the high-water mark is what the fit needed, and it is still readable
-#' after the memory has been released. `ps::ps_memory_info()$peak_wset` (Windows/macOS peak
-#' working set) as a cross-platform fallback, same reasoning as `rp_mem_available()` and
+#' after the memory has been released. `ps::ps_memory_full_info()` as a cross-platform fallback:
+#' `maxrss` (this process's lifetime peak, which ps reports only for the calling process, macOS)
+#' or `peak_wset` (the Windows peak working set), same reasoning as `rp_mem_available()` and
 #' `rp_mem_rss()` in `helper_seq_parallel.R`: without it, the peak-RSS column in the
 #' `combat.timing` line never appears off Linux at all. NA when neither is available.
 #' @noRd
@@ -630,8 +706,11 @@ rp_mem_peak <- function() {
     return(NA_real_)
   }
   if (requireNamespace("ps", quietly = TRUE)) {
-    v <- tryCatch(ps::ps_memory_info()[["peak_wset"]], error = function(e) NA_real_)
-    if (!is.null(v) && !is.na(v)) return(as.numeric(v))
+    v <- tryCatch(ps::ps_memory_full_info(), error = function(e) NULL)
+    pk <- if ("maxrss" %in% names(v)) v[["maxrss"]]
+          else if ("peak_wset" %in% names(v)) v[["peak_wset"]]
+          else NA_real_
+    if (!is.null(pk) && !is.na(pk)) return(as.numeric(pk))
   }
   NA_real_
 }
@@ -649,24 +728,29 @@ rp_mem_peak <- function() {
 # without being told to, and the number to pick depends on a machine's own RAM, which most
 # people do not have memorized in GB let alone bytes.
 
-#' Set `R_MAX_VSIZE` to half the machine's RAM, rounded to the nearest whole tier
+#' Set `R_MAX_VSIZE` to half the machine's RAM, rounded down to a whole tier
 #'
-#' Reads total RAM (`/proc/meminfo` on Linux, PowerShell's `Get-CimInstance` on Windows),
-#' halves it, and rounds to the nearest of 8/16/32/64/128/256/512/1024 GB, R's own
-#' vector-heap ceiling. This does NOT replace `rp_mem_cap()`: that guard degrades the worker
-#' count before a fork based on a live reading of what is available right now; this sets a
+#' Reads total RAM (`/proc/meminfo` on Linux, PowerShell's `Get-CimInstance` on Windows,
+#' `ps::ps_system_memory()` elsewhere when \pkg{ps} is installed), halves it, and rounds down
+#' to the largest of 8/16/32/64/128/256/512/1024 GB at or below that, or writes the exact value
+#' in Mb when it is under 8 GB. `R_MAX_VSIZE` is R's own vector-heap ceiling. This does NOT
+#' replace `rp_mem_cap()`: that guard degrades the worker count before a fork based on a live reading of what is available right now; this sets a
 #' fixed ceiling R itself enforces on every allocation, in every session, whether or not
-#' this package's dispatch code is what allocated the memory. Two independent nets against
-#' the same failure mode (a silent kernel SIGKILL with no R condition to catch), not one
-#' superseding the other.
+#' this package's dispatch code is what allocated the memory. The limit is per process. Each
+#' forked worker inherits it and counts its own allocations against it, so N workers that each
+#' stay under it can still exhaust RAM together. It turns one process's overshoot into an R
+#' error. It does not bound the total across workers; only the memory guard, or fewer workers,
+#' does that.
 #'
 #' Writes (or updates) the `R_MAX_VSIZE` line in the target `.Renviron`, which only takes
 #' effect on the NEXT R session; `.Renviron` is read once at startup, so this cannot change
 #' the limit for the session that calls it. Existing lines for other variables are left
 #' untouched; only a pre-existing `R_MAX_VSIZE=` line, if any, is replaced.
 #'
-#' `path` defaults to `Sys.getenv("R_ENVIRON_USER", path.expand("~/.Renviron"))`, R's own
-#' resolution order for the per-user file, and on Windows `path.expand("~")` resolves via
+#' `path` defaults to `Sys.getenv("R_ENVIRON_USER", path.expand("~/.Renviron"))`:
+#' `R_ENVIRON_USER`, else `~/.Renviron`. With `R_ENVIRON_USER` unset, R reads `./.Renviron`
+#' when one exists in the startup directory and `~/.Renviron` otherwise, so a project with its
+#' own `.Renviron` needs the line there too. On Windows `path.expand("~")` resolves via
 #' `USERPROFILE`, not the `HOME` environment variable: a test that tried to redirect this by
 #' setting `HOME` still wrote to the real file, because `path.expand()` never consulted it.
 #' Pass `path` explicitly to target anything else, which is also how to test this function
@@ -699,21 +783,25 @@ rnaparallel_set_mem_limit <- function(fraction = 0.5, dry_run = FALSE,
   }
   total <- rp_mem_total()
   if (is.na(total)) {
-    message("could not read total RAM on this platform (checked /proc/meminfo and ",
-            "PowerShell). Set R_MAX_VSIZE yourself in ", path, ", e.g. R_MAX_VSIZE=64Gb")
+    message("could not read total RAM on this platform (checked /proc/meminfo, PowerShell ",
+            "and the ps package). Set R_MAX_VSIZE yourself in ", path, ", e.g. R_MAX_VSIZE=64Gb")
     return(invisible(NA_real_))
   }
   target <- total * fraction
   tiers_gb <- c(8, 16, 32, 64, 128, 256, 512, 1024)
   tiers_b <- tiers_gb * 2^30
-  # Nearest by ratio in log space, not absolute difference: 100 GB is meant to round to 128,
-  # not sit exactly between 64 and 128 by raw GB and get pulled to whichever is closer in a
-  # way that ignores how differently 64->128 and 512->1024 both double.
-  chosen_gb <- tiers_gb[which.min(abs(log(tiers_b / target)))]
-  chosen_b <- chosen_gb * 2^30
-
-  line <- sprintf("R_MAX_VSIZE=%dGb", chosen_gb)
-  message(sprintf("total RAM ~%.0f GB, %.0f%% -> nearest tier: %s (target: %s)",
+# Round down, never up: a tier above the target can reach past physical RAM at a large fraction.
+  fits <- tiers_b <= target
+  if (any(fits)) {
+    chosen_gb <- max(tiers_gb[fits])
+    chosen_b <- chosen_gb * 2^30
+    line <- sprintf("R_MAX_VSIZE=%dGb", chosen_gb)
+  } else {
+    chosen_mb <- floor(target / 2^20)
+    chosen_b <- chosen_mb * 2^20
+    line <- sprintf("R_MAX_VSIZE=%dMb", chosen_mb)
+  }
+  message(sprintf("total RAM ~%.0f GB, %.0f%% -> %s (file: %s)",
                   total / 2^30, fraction * 100, line, path))
 
   if (isTRUE(dry_run)) {
@@ -743,6 +831,9 @@ rp_step_end <- function(h) {
   if (is.null(h)) return(invisible(NULL))
   .rp_dispatch$depth <- max(0L, rp_or0(.rp_dispatch$depth) - 1L)
   if (isTRUE(h$nested)) return(invisible(NULL))
+  pd <- getOption("combat.progress.dir", NA_character_)
+# A call that stayed serial never reached rp_reporter_stop, so its unnamed directory is removed here.
+  if (is.na(pd) || !nzchar(pd)) unlink(rp_progress_own_dir(), recursive = TRUE)
   rp_progress_done()
   if (!is.null(h$con)) rp_quiet_end(h$con)
   if (!isTRUE(h$timing)) return(invisible(NULL))
@@ -751,7 +842,8 @@ rp_step_end <- function(h) {
 
   par <- rp_or0(.rp_dispatch$par)
   ser <- rp_or0(.rp_dispatch$ser)
-  engine <- if (par > 0L) sprintf("%s x%d", h$backend, h$workers) else "serial"
+  engine <- if (par > 0L) sprintf("%s x%d", h$backend, .rp_dispatch$nested_workers %||% h$workers)
+            else "serial"
   note <- if (par > 0L && ser > 0L) sprintf("  %d par / %d gated", par, ser)
           else if (par == 0L && ser > 0L) sprintf("  %d gated", ser)
           else ""

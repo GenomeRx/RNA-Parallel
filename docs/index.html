@@ -1828,10 +1828,7 @@ alongside this package.</p>
 <span id="cb4-55"><a href="#cb4-55" tabindex="-1"></a><span class="fu">options</span>(<span class="at">combat.backend =</span> <span class="st">&quot;mclapply&quot;</span>)</span>
 <span id="cb4-56"><a href="#cb4-56" tabindex="-1"></a><span class="fu">options</span>(<span class="at">future.globals.maxSize =</span> <span class="dv">8</span> <span class="sc">*</span> <span class="dv">1024</span><span class="sc">^</span><span class="dv">3</span>)</span>
 <span id="cb4-57"><a href="#cb4-57" tabindex="-1"></a></span>
-<span id="cb4-58"><a href="#cb4-58" tabindex="-1"></a><span class="co"># Accelerate is the system BLAS here and manages its own thread pool, so there is no</span></span>
-<span id="cb4-59"><a href="#cb4-59" tabindex="-1"></a><span class="co"># OPENBLAS_NUM_THREADS to pin as there is on Linux. A user-installed OpenBLAS or MKL build is</span></span>
-<span id="cb4-60"><a href="#cb4-60" tabindex="-1"></a><span class="co"># multi-threaded and would open a pool inside every forked worker on top of the fork, so the</span></span>
-<span id="cb4-61"><a href="#cb4-61" tabindex="-1"></a><span class="co"># thread count is reported either way rather than assumed.</span></span>
+<span id="cb4-58"><a href="#cb4-58" tabindex="-1"></a><span class="co"># The published macOS report ran on R&#39;s single-threaded reference BLAS (libRblas.0.dylib); Accelerate (vecLib) or OpenBLAS would open a thread pool inside every forked worker, a setup REFERENCE.md marks as untested, so the thread count is reported rather than assumed.</span></span>
 <span id="cb4-62"><a href="#cb4-62" tabindex="-1"></a>blas_name   <span class="ot">&lt;-</span> <span class="fu">basename</span>(<span class="fu">sessionInfo</span>()<span class="sc">$</span>BLAS)</span>
 <span id="cb4-63"><a href="#cb4-63" tabindex="-1"></a>blas_thread <span class="ot">&lt;-</span> <span class="fu">Sys.getenv</span>(<span class="st">&quot;OPENBLAS_NUM_THREADS&quot;</span>, <span class="fu">Sys.getenv</span>(<span class="st">&quot;VECLIB_MAXIMUM_THREADS&quot;</span>, <span class="st">&quot;&quot;</span>))</span>
 <span id="cb4-64"><a href="#cb4-64" tabindex="-1"></a>blas_pinned <span class="ot">&lt;-</span> <span class="fu">identical</span>(blas_thread, <span class="st">&quot;1&quot;</span>)</span>
@@ -1904,9 +1901,10 @@ added.</p>
 <div class="sourceCode" id="cb10"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb10-1"><a href="#cb10-1" tabindex="-1"></a><span class="fu">stopifnot</span>(<span class="fu">identical</span>(demo_ref, demo_par))</span></code></pre></div>
 <p>Fifty genes by eight samples sits far below
 <code>combat.min.cells</code>, so every row-split dispatch runs
-serially: a fork would cost more than the work. Only the common
-dispersion is handed out, one whole-matrix estimate per batch, which
-carries no size gate because it is always worth dispatching. Either way
+serially: a fork would cost more than the work. The dispatches across
+batches, one whole-matrix estimate per batch, are gated too, by
+<code>getOption(&quot;combat.min.batch.cells&quot;, 20000)</code> counted over
+the whole filtered matrix, so they run serially here as well. Either way
 the output is the same matrix, which is the only thing the gate is
 allowed to leave alone.</p>
 </div>

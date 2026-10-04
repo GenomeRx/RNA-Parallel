@@ -2,7 +2,7 @@
 % Please edit documentation in R/verbose.R
 \name{rnaparallel_set_mem_limit}
 \alias{rnaparallel_set_mem_limit}
-\title{Set \code{R_MAX_VSIZE} to half the machine's RAM, rounded to the nearest whole tier}
+\title{Set \code{R_MAX_VSIZE} to half the machine's RAM, rounded down to a whole tier}
 \usage{
 rnaparallel_set_mem_limit(
   fraction = 0.5,
@@ -26,14 +26,17 @@ testing or to target \code{Renviron.site} / a project-local \code{.Renviron} ins
 Invisibly, the chosen value in bytes, or \code{NA} if total RAM could not be read.
 }
 \description{
-Reads total RAM (\verb{/proc/meminfo} on Linux, PowerShell's \code{Get-CimInstance} on Windows),
-halves it, and rounds to the nearest of 8/16/32/64/128/256/512/1024 GB, R's own
-vector-heap ceiling. This does NOT replace \code{rp_mem_cap()}: that guard degrades the worker
-count before a fork based on a live reading of what is available right now; this sets a
+Reads total RAM (\verb{/proc/meminfo} on Linux, PowerShell's \code{Get-CimInstance} on Windows,
+\code{ps::ps_system_memory()} elsewhere when \pkg{ps} is installed), halves it, and rounds down
+to the largest of 8/16/32/64/128/256/512/1024 GB at or below that, or writes the exact value
+in Mb when it is under 8 GB. \code{R_MAX_VSIZE} is R's own vector-heap ceiling. This does NOT
+replace \code{rp_mem_cap()}: that guard degrades the worker count before a fork based on a live reading of what is available right now; this sets a
 fixed ceiling R itself enforces on every allocation, in every session, whether or not
-this package's dispatch code is what allocated the memory. Two independent nets against
-the same failure mode (a silent kernel SIGKILL with no R condition to catch), not one
-superseding the other.
+this package's dispatch code is what allocated the memory. The limit is per process. Each
+forked worker inherits it and counts its own allocations against it, so N workers that each
+stay under it can still exhaust RAM together. It turns one process's overshoot into an R
+error. It does not bound the total across workers; only the memory guard, or fewer workers,
+does that.
 }
 \details{
 Writes (or updates) the \code{R_MAX_VSIZE} line in the target \code{.Renviron}, which only takes
@@ -41,8 +44,10 @@ effect on the NEXT R session; \code{.Renviron} is read once at startup, so this 
 the limit for the session that calls it. Existing lines for other variables are left
 untouched; only a pre-existing \verb{R_MAX_VSIZE=} line, if any, is replaced.
 
-\code{path} defaults to \code{Sys.getenv("R_ENVIRON_USER", path.expand("~/.Renviron"))}, R's own
-resolution order for the per-user file, and on Windows \code{path.expand("~")} resolves via
+\code{path} defaults to \code{Sys.getenv("R_ENVIRON_USER", path.expand("~/.Renviron"))}:
+\code{R_ENVIRON_USER}, else \verb{~/.Renviron}. With \code{R_ENVIRON_USER} unset, R reads \code{./.Renviron}
+when one exists in the startup directory and \verb{~/.Renviron} otherwise, so a project with its
+own \code{.Renviron} needs the line there too. On Windows \code{path.expand("~")} resolves via
 \code{USERPROFILE}, not the \code{HOME} environment variable: a test that tried to redirect this by
 setting \code{HOME} still wrote to the real file, because \code{path.expand()} never consulted it.
 Pass \code{path} explicitly to target anything else, which is also how to test this function

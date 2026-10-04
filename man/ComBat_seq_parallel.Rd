@@ -2,7 +2,7 @@
 % Please edit documentation in R/ComBat_seq_parallel.R
 \name{ComBat_seq_parallel}
 \alias{ComBat_seq_parallel}
-\title{ComBat-seq with its hot paths parallelised}
+\title{sva's ComBat_seq with its hot paths parallelized}
 \usage{
 ComBat_seq_parallel(
   counts,
@@ -53,7 +53,11 @@ Going past your PERFORMANCE core count can be slower than stopping at it, and th
 worst on the largest inputs, which is exactly where people reach for more workers.
 Measured on an 8-core machine with 4 performance cores, TMM on 15,000 genes by 9,000
 specimens: 4 workers 10.74 s, 6 workers 7.26 s, 8 workers 11.60 s. Eight was slower than
-four. The default resolved to 6 there and was optimal; raising it by hand made it worse.}
+four. The default resolved to 6 there and was optimal; raising it by hand made it worse.
+
+With \code{parallel_backend = "foreach"} and a backend you registered yourself, \code{workers} sets
+only the default chunk count, and that backend's width bounds concurrency; see
+\code{\link[=combat_backends]{combat_backends()}}.}
 
 \item{chunks}{Row chunks per parallel step. Defaults to \code{workers}, which is almost always
 what you want. Passing \code{chunks = workers} explicitly is redundant. Raise it above
@@ -77,15 +81,21 @@ Defaults to \code{getOption("combat.backend", combat_default_backend())}.}
 \item{backend}{Optional ComBat-seq function to wrap. Defaults to
 \code{sva::ComBat_seq}, falling back to a visible top-level \code{ComBat_seq}.}
 
-\item{label}{Optional name for this call in the timing line, when
-\code{options(combat.timing = TRUE)} is set. Defaults to the companion and the matrix shape,
-e.g. \verb{ComBat-seq 18,270 x 1,500}; pass a cohort name to tell calls apart in a loop.}
+\item{label}{Optional name for this call. It labels the progress bar, which draws by
+default on macOS and Linux in an interactive session or on a terminal (\code{options(combat.progress = FALSE)}
+turns it off), the stage column of the progress files, and the timing line under
+\code{options(combat.timing = TRUE)}. Defaults to
+the companion and the matrix shape, e.g. \verb{ComBat-seq 18,270 x 1,500}; pass a cohort name
+to tell calls apart in a loop.}
 }
 \value{
 A gene-by-sample matrix of adjusted counts, \code{identical()} to what the
-backend's own \code{ComBat_seq} returns for the same input. \code{workers = 1} takes a
-plain \code{lapply} and adds no parallelism, so it is the backend function itself
-with a thin dispatch wrapper.
+backend's own \code{ComBat_seq} returns for the same input. \code{workers = 1} runs every
+chunk in this process through \code{lapply}, but the quantile match still uses this
+package's row-vectorized form rather than the backend's own cell loop whenever the
+backend's \code{match_quantiles} is the text it was verified against; output is identical
+either way. \code{options(combat.fork = FALSE)} rules out every fork, the progress
+reporter's included.
 }
 \description{
 Runs ComBat-seq itself. The algorithm is not reimplemented and not copied: the
@@ -97,12 +107,25 @@ per-batch tagwise estimate the same way, while every other symbol in the
 body, \code{vec2mat}, \code{estimateGLMCommonDisp}, \code{getOffset}, \code{monte_carlo_int_NB}, still
 resolves to the backend's own. Output is
 \code{identical()} to what \code{sva::ComBat_seq} returns for the same input, not merely
-close to it.
+close to it. An argument left out of the call is left out of the backend call too,
+so it takes the backend's own default rather than the copy shown in the usage line.
+}
+\details{
+The \code{glmFit} and tagwise row splits do not always run. edgeR fits a one-way design, one
+whose columns are exactly the levels of one factor, with a kernel whose result for a gene
+that does not converge depends on which other genes share the matrix, so neither split
+runs on one. The \code{glmFit} split runs only when \code{group} or \code{covar_mod} makes the design more
+than one-way; with \code{group = NULL} and no \code{covar_mod} the fit runs whole. The tagwise row
+split runs only when \code{covar_mod} makes a batch's own design more than one-way. With \code{group}
+alone or no covariates every batch's design is one-way, so the tagwise estimate is
+dispatched across batches and never split by rows. Where the tagwise split does run, it
+dispatches in parallel only when the dispatch across batches runs in this process; inside a
+worker of that dispatch it runs serially.
 }
 \section{Why a rebind and not a rewrite}{
 
 An earlier version transcribed the algorithm by hand so the loop could be
-parallelised, and drifted from the original ComBat-seq twice in ways synthetic test data
+parallelized, and drifted from the original ComBat-seq twice in ways synthetic test data
 could not expose. The gene filter was written \code{!all(x <= 1) && var(x) > 0}
 against the original ComBat-seq's per-batch \code{all(x == 0)}, which returned 258 genes
 uncorrected and shifted \code{lib.size} for every surviving gene as well. And the
@@ -122,7 +145,8 @@ from the backend's own environment, so the two can never be mixed.
 
 \section{Backends for the parallelism}{
 
-\code{parallel_backend} selects the framework: \code{"mclapply"} (default, forks),
+\code{parallel_backend} selects the framework: \code{"mclapply"} (forks; the default except
+on Windows with a multi-worker future plan, where the default is \code{"future"}),
 \code{"future"}, \code{"BiocParallel"}, \code{"foreach"}, or \code{"serial"}. All of them return
 bit-identical results, because each row chunk is a pure function of its own
 genes and every backend preserves chunk order. See \code{\link[=combat_backends]{combat_backends()}}.
@@ -133,8 +157,9 @@ that would stamp on a plan established for the whole session. Set e.g.
 
 \code{options(combat.fork = FALSE)} forces a serial run on any backend, with
 identical output. That is the escape hatch if forking upsets an IDE. Windows
-cannot fork and falls back to serial automatically, so results are correct there
-and not faster.
+cannot fork. With no future plan the default mclapply backend runs serially there
+and says so once; set \code{future::plan(future::multisession, workers = N)} and the
+default switches to the future backend, measured 3.57x at 6 workers.
 }
 
 \section{Dispatches too small to be worth a fork}{
@@ -143,31 +168,34 @@ ComBat-seq calls the quantile match and the dispersion estimate once per batch, 
 once per run, so batch count sets how thin each dispatch is. A 100-batch design hands
 over a hundredth of the samples at a time, and on a small matrix that is not worth it:
 measured 0.50x at 5,000 cells, 0.92x at 10,000 and 1.39x at 20,000.
-Dispatches below \code{getOption("combat.min.cells", 20000)} therefore run serially.
-Without that gate 500 genes by 1,000 samples across 100 batches ran at 0.80x,
-slower than not parallelising at all. Set the option to 0 to restore the old
-unconditional behaviour; output is identical either way.
+The quantile match below \code{getOption("combat.min.cells", 20000)} therefore runs
+serially; in ComBat-seq that option gates the quantile match and nothing else. Without that gate
+500 genes by 1,000 samples across 100 batches ran at 0.80x, slower than not
+parallelizing at all.
 
 The threshold is per path, because the paths do not cost the same per cell.
 \code{qnbinom} in the quantile match earns a fork at 20,000 cells; dispersion
 estimation is cheaper and does not break even below 30,000, measuring
 0.65x at 10,000 and 0.79x at 20,000, so it has its own
 \code{getOption("combat.min.disp.cells", 30000)}, and the GLM fit its own
-\code{getOption("combat.min.glm.cells", 1e5)}. One shared threshold made the
-dispersion split a net loss on small matrices with many batches.
+\code{getOption("combat.min.glm.cells", 1e5)}. The two dispatches across batches, the
+common and the tagwise dispersion, have \code{getOption("combat.min.batch.cells", 20000)},
+counted over the whole filtered matrix. One shared threshold made the
+dispersion split a net loss on small matrices with many batches. Set
+\code{combat.min.cells}, \code{combat.min.disp.cells}, \code{combat.min.glm.cells} and
+\code{combat.min.batch.cells} all to 0 to dispatch unconditionally; output is identical
+either way.
 }
 
 \section{When this is worth reaching for}{
 
 Almost always, and it is the companion with the most to win: the original is measured in
-minutes on a real cohort. It does have a floor. Measured on an M3 at the default worker
-count, companion against original, every arm \code{identical()}: 0.69x at 300 genes by 20 samples,
-0.89x at 500 x 20, 1.19x at 1,000 x 20, 1.45x at 2,000 x 20, and 4.63x at 6,000 x 120.
-Below about a thousand genes call \code{sva::ComBat_seq} directly.
+minutes on a real cohort. Measured on an M3 at the default worker count, companion against
+original, every arm \code{identical()}: 4.63x at 6,000 genes by 120 samples.
 
-The row-split gates already decline on an input that small; what still dispatches there is
-the per-batch work, which carries no size gate because one whole-matrix estimate per batch
-is worth a fork at any realistic scale and is not worth one at three hundred genes.
+On a small input the four gates above send every dispatch serial, and the companion still
+runs faster than the original there, because its row-vectorized quantile match is a serial
+win: 1.20x at 300 genes by 20 samples with nothing dispatched.
 }
 
 \examples{

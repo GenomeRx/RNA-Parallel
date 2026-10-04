@@ -57,12 +57,14 @@ which parallelism is worth measuring.
 # A. Setup
 
 ```{r install, eval = FALSE}
-if (!requireNamespace("remotes", quietly = TRUE)) install.packages("remotes")
-remotes::install_github("GenomeRx/RNA-Parallel")
-
 if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
 BiocManager::install(c("sva", "edgeR", "limma", "statmod", "SummarizedExperiment", "TCGAbiolinks",
                        "ComplexHeatmap", "BiocParallel"))
+
+if (!requireNamespace("remotes", quietly = TRUE)) install.packages("remotes")
+remotes::install_github("GenomeRx/RNA-Parallel",
+                        dependencies = c("Depends", "Imports"),
+                        upgrade = "never")
 
 # future/future.apply, foreach/doParallel and BiocParallel are needed here and are not
 # needed by the macOS or Linux reports: those sweep worker counts on one backend, this
@@ -165,12 +167,8 @@ n_workers    <- max(tcga_workers)
 # the package's own documentation recommends here. `foreach` degrades as workers are added,
 # rather than merely failing to improve: measured across a 2-to-16 sweep it fell from 1.18x to
 # 0.28x, which at the wide end is three and a half times SLOWER than not parallelising at all.
-# ComBat-seq dispatches 3 + 2 * n_batch times per correction, and the cached cluster is rebuilt
-# whenever the requested width changes, which it does on every alternation between the
-# batch-level and row-level dispatches. `future` holds one `multisession` set of workers across
-# all of them and shows the ordinary shape instead. Both return identical() output; only the
-# clock separates them, which is the whole reason this section exists. The table below is the
-# current measurement, not this note. Read it there.
+
+# ComBat-seq dispatches up to 2 * n_batch + 4 times per correction, and doParallel's cluster form sends every task of each dispatch over a socket with its closure and data, while `future` holds one `multisession` set of workers across all of them and shows the ordinary shape instead.
 win_backends <- c("mclapply", "BiocParallel", "future", "foreach")
 
 # Every backend in the sweep needs its framework present. The package does raise a clear
@@ -247,10 +245,10 @@ stopifnot(identical(demo_ref, demo_par))
 ```
 
 Fifty genes by eight samples sits far below `combat.min.cells`, so every row-split dispatch runs
-serially: starting a PSOCK worker would cost more than the work. Only the common dispersion is handed out, one
-whole-matrix estimate per batch, which carries no size gate because it is always worth
-dispatching. Either way the output is the same matrix, which is the only thing the gate is
-allowed to leave alone.
+serially: starting a PSOCK worker would cost more than the work. The dispatches across batches,
+one whole-matrix estimate per batch, are gated too, by `getOption("combat.min.batch.cells", 20000)`
+counted over the whole filtered matrix, so they run serially here as well. Either way the output
+is the same matrix, which is the only thing the gate is allowed to leave alone.
 
 # C. Simulated counts
 

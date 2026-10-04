@@ -16,8 +16,11 @@ misbehaving; the next call rebuilds it. Clusters are also stopped when the
 package namespace unloads.
 }
 \details{
-Building a cluster is expensive and one ComBat-seq run dispatches 3 + n_batch +
-eligible tagwise batches, up to 2 * n_batch + 3, so nine on a 3-batch design.
+Building a cluster is expensive, and one ComBat-seq run dispatches up to 2 * n_batch + 4
+times: twice for the GLM fits, once per batch for the quantile match, twice across batches
+for the common and tagwise dispersions, and once per batch for a tagwise row split when the
+dispatch across batches runs in this process and the batch design is not one-way. That is
+ten on a 3-batch design. Every dispatch that runs in parallel reuses the cached cluster.
 Measured on a 4-worker PSOCK cluster: 153 ms to build, and five dispatches
 went from 631 ms to 5 ms once the cluster was reused.
 }

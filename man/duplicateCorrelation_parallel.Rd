@@ -2,7 +2,7 @@
 % Please edit documentation in R/limma_dupcor_parallel.R
 \name{duplicateCorrelation_parallel}
 \alias{duplicateCorrelation_parallel}
-\title{Intra-block correlation with the per-gene REML fits parallelised}
+\title{limma's duplicateCorrelation with the per-gene REML fits parallelized}
 \usage{
 duplicateCorrelation_parallel(
   object,
@@ -45,7 +45,11 @@ Going past your PERFORMANCE core count can be slower than stopping at it, and th
 worst on the largest inputs, which is exactly where people reach for more workers.
 Measured on an 8-core machine with 4 performance cores, TMM on 15,000 genes by 9,000
 specimens: 4 workers 10.74 s, 6 workers 7.26 s, 8 workers 11.60 s. Eight was slower than
-four. The default resolved to 6 there and was optimal; raising it by hand made it worse.}
+four. The default resolved to 6 there and was optimal; raising it by hand made it worse.
+
+With \code{parallel_backend = "foreach"} and a backend you registered yourself, \code{workers} sets
+only the default chunk count, and that backend's width bounds concurrency; see
+\code{\link[=combat_backends]{combat_backends()}}.}
 
 \item{chunks}{Row chunks. Defaults to \code{workers}; passing \code{chunks = workers} explicitly is redundant.
 One-gene chunks are allowed here:
@@ -58,7 +62,9 @@ applies, because \code{duplicateCorrelation} does not reach \code{lm.fit} per ge
 \item{backend}{Optional \code{duplicateCorrelation} function to wrap. Defaults to
 \code{limma::duplicateCorrelation}.}
 
-\item{label}{Optional name for this call in the timing line, when
+\item{label}{Optional name for this call. It is the stage name on the progress bar, which
+draws by default on macOS and Linux in an interactive session or on a terminal
+(\code{options(combat.progress = FALSE)} turns it off), and in the timing line when
 \code{options(combat.timing = TRUE)} is set. Defaults to the companion and the matrix shape,
 e.g. \verb{duplicateCorrelation 18,270 x 1,500}; pass a cohort name to tell calls apart in a
 loop.}
@@ -100,11 +106,12 @@ of the original's wall clock. \code{mixedModel2Fit} is a bare call in the origin
 rebound in a child of limma's environment onto a copy whose \code{La.svd} is memoised, along with
 the \code{factor} and \code{model.matrix} calls that rebuild the block design per gene.
 
-The memo is installed unconditionally, because it is keyed on the arguments rather than on an
-assumption about them. Where it pays is unweighted input: counted, 300 genes give 300 calls and
-one distinct argument set, and it reaches 5.12x serial and 13.55x at four workers on 3000 genes
-by 100 arrays with 50 blocks. Where it does not pay is weighted input, because
-\code{mixedModel2Fit} scales \code{X} by each gene's own weights before \code{La.svd} sees it, so the argument
+The memo is installed unconditionally, because each cache is keyed on what its call reads (the
+arguments, and for \code{model.matrix} the formula plus the values of the variables it names)
+rather than on an assumption about them. Where it pays is unweighted input: counted, 300
+genes give 300 calls and one distinct argument set, and it reaches 5.12x serial and 13.55x at
+four workers on 3000 genes by 100 arrays with 50 blocks. Where it does not pay is weighted
+input, because \code{mixedModel2Fit} scales \code{X} by each gene's own weights before \code{La.svd} sees it, so the argument
 is not invariant: 300 calls, 300 distinct sets, a 0\% hit rate. That costs nothing beyond one
 failed key comparison per gene, and it is the same fact that made the older body-pinned lift
 refuse to install on weighted input rather than run and miss.

@@ -60,12 +60,14 @@ which parallelism is worth measuring.
 # A. Setup
 
 ```{r install, eval = FALSE}
-if (!requireNamespace("remotes", quietly = TRUE)) install.packages("remotes")
-remotes::install_github("GenomeRx/RNA-Parallel")
-
 if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
 BiocManager::install(c("sva", "edgeR", "limma", "statmod", "SummarizedExperiment", "TCGAbiolinks",
                        "ComplexHeatmap"))
+
+if (!requireNamespace("remotes", quietly = TRUE)) install.packages("remotes")
+remotes::install_github("GenomeRx/RNA-Parallel",
+                        dependencies = c("Depends", "Imports"),
+                        upgrade = "never")
 
 cran <- c("ggplot2", "ggrepel", "patchwork", "callr", "gtsummary", "broom", "circlize", "RColorBrewer")
 need <- cran[!vapply(cran, requireNamespace, logical(1), quietly = TRUE)]
@@ -202,10 +204,10 @@ stopifnot(identical(demo_ref, demo_par))
 ```
 
 Fifty genes by eight samples sits far below `combat.min.cells`, so every row-split dispatch runs
-serially: a fork would cost more than the work. Only the common dispersion is handed out, one
-whole-matrix estimate per batch, which carries no size gate because it is always worth
-dispatching. Either way the output is the same matrix, which is the only thing the gate is
-allowed to leave alone.
+serially: a fork would cost more than the work. The dispatches across batches, one whole-matrix
+estimate per batch, are gated too, by `getOption("combat.min.batch.cells", 20000)` counted over
+the whole filtered matrix, so they run serially here as well. Either way the output is the same
+matrix, which is the only thing the gate is allowed to leave alone.
 
 # C. Simulated counts
 

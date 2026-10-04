@@ -1,10 +1,10 @@
 ## edger_norm_parallel.R
 ##
-## The edgeR normalisation companion. Mirrors the role helper_seq_parallel.R plays for
+## The edgeR normalization companion. Mirrors the role helper_seq_parallel.R plays for
 ## ComBat-seq, and reuses its dispatch layer unchanged: combat_row_chunks,
 ## combat_parallel_lapply, combat_parallel_check, combat_row_order.
 ##
-## Nothing here reimplements edgeR. The current default normalisation method is called once on
+## Nothing here reimplements edgeR. The current default normalization method is called once on
 ## the whole matrix, with four internals rebound in a child of edgeR's own namespace. Two
 ## separate wins come out of that. Inside `.calcFactorTMM`, `rank` is computed once per
 ## vector instead of twice. Inside the original's per-column loops, the columns are dispatched
@@ -30,7 +30,7 @@
 # Number 1 is also why blocks are the wrong shape for this function at all. colSums over
 # FRACTIONAL doubles is not block-associative on arm64, where sizeof.longdouble is 8:
 # summing a matrix in pieces and adding the pieces differs from summing it whole by about
-# 1.8e-14 relative. Integer counts are exact either way, but a caller normalising
+# 1.8e-14 relative. Integer counts are exact either way, but a caller normalizing
 # already-scaled data is not, and identical() does not grade on a curve.
 #
 # What is left after those five is per column and nothing else, so that is what gets split.
@@ -38,9 +38,12 @@
 
 # ---- backend resolution ------------------------------------------------------
 
-#' Name the edgeR normalisation generic this installation dispatches on
+#' Name the edgeR normalization generic this installation dispatches on
 #'
-#' edgeR renamed `calcNormFactors` to `normLibSizes` and kept the old name as an alias. One
+#' edgeR added `normLibSizes` as the new name for `calcNormFactors`, but the two are separate
+#' methods, not an alias: `normLibSizes.default` also rejects negative counts, while
+#' `calcNormFactors.default` checks only for NA. The companion wraps `normLibSizes.default`
+#' whenever it exists. One
 #' predicate, used by the backend resolver, the tests, the examples and the report, so the
 #' suite can never compare the companion's output against a different original function than
 #' the companion ran. Resolution is on the `.default` METHOD, because that is the object
@@ -48,7 +51,7 @@
 #' otherwise select a name that cannot be got.
 #'
 #' @param fn Optional resolved method. When supplied, the name is read off the object rather
-#'   than off which branch resolved it, so an explicit `backend =` is labelled correctly.
+#'   than off which branch resolved it, so an explicit `backend =` is labeled correctly.
 #' @noRd
 rp_edger_generic <- function(fn = NULL) {
   ns <- asNamespace("edgeR")
@@ -60,7 +63,7 @@ rp_edger_generic <- function(fn = NULL) {
   "calcNormFactors"
 }
 
-#' Resolve an edgeR normalisation backend and the internals it calls
+#' Resolve an edgeR normalization backend and the internals it calls
 #'
 #' Everything is taken from one environment, the backend's own, so the original function and
 #' the four internals it dispatches to can never be drawn from two different copies of
@@ -68,7 +71,7 @@ rp_edger_generic <- function(fn = NULL) {
 #' than named directly, so a rebind always shadows exactly the function the original would
 #' otherwise have reached.
 #'
-#' @param fn An edgeR default normalisation method. Defaults to `normLibSizes.default`
+#' @param fn An edgeR default normalization method. Defaults to `normLibSizes.default`
 #'   when available, with `calcNormFactors.default` retained for older edgeR releases.
 #' @return A list with `fn`, `env`, the four `.calcFactor*` internals, the three base
 #'   functions the shims stand in for, and the name of each batched loop's index.
@@ -92,12 +95,12 @@ calcnorm_backend <- function(fn = NULL) {
   }
 
   # gate: the backend must take every argument we forward, or a silent upstream signature
-  # change would surface as a wrong normalisation factor rather than an error
+  # change would surface as a wrong normalization factor rather than an error
   need <- c("object", "lib.size", "method", "refColumn", "logratioTrim", "sumTrim",
             "doWeighting", "Acutoff", "p")
   missing_args <- setdiff(need, names(formals(fn)))
   if (length(missing_args)) {
-    stop("this edgeR normalisation backend is missing argument(s): ",
+    stop("this edgeR normalization backend is missing argument(s): ",
          paste(missing_args, collapse = ", "),
          ". rnaparallel was written against the signature edgeR exposes.",
          call. = FALSE)
@@ -108,7 +111,7 @@ calcnorm_backend <- function(fn = NULL) {
   absent <- internals[!vapply(internals, exists, logical(1), envir = env, inherits = TRUE)]
   if (length(absent)) {
     stop("could not find ", paste(absent, collapse = ", "), " alongside the ",
-         "edgeR normalisation backend, so the per-column work cannot be reached.", call. = FALSE)
+         "edgeR normalization backend, so the per-column work cannot be reached.", call. = FALSE)
   }
   got <- lapply(internals, get, envir = env, inherits = TRUE)
   names(got) <- internals
@@ -128,7 +131,7 @@ calcnorm_backend <- function(fn = NULL) {
 
   # A rebind only reaches a call written as a bare symbol. If any of these is ever
   # namespace-qualified, the companion degrades to a pass-through: output stays identical(),
-  # every equivalence test still passes, and nothing is parallelised or hoisted. Fail loudly.
+  # every equivalence test still passes, and nothing is parallelized or hoisted. Fail loudly.
   # all.names() would flatten `edgeR:::.calcFactorTMM` into its parts and read as reachable,
   # so collect the heads of calls whose head is a bare symbol instead.
   reach <- list(fn = internals, .calcFactorTMM = "rank", .calcFactorRLE = "apply",
@@ -213,7 +216,7 @@ rp_rank_once <- function(rank0) {
   # calcNormFactors_parallel's frame, holding `object` and all four shims. The TMM shim's lean
   # environment has to carry `vfun`, and `vfun`'s environment holds this closure, so the one
   # door that lean environment exists to shut was reopened by the object it must carry.
-  # Measured: the rank shim serialised to 12,265,358 B against 11,348 B for its own frame.
+  # Measured: the rank shim serialized to 12,265,358 B against 11,348 B for its own frame.
   force(rank0)
   last <- NULL
   ranked <- NULL
@@ -246,7 +249,7 @@ rp_rank_once <- function(rank0) {
 #' @noRd
 rp_norm_cols <- function(ncols, cells, f, workers, chunks, parallel_backend, min_cells,
                          what) {
-  # the two-row floor is an lm.fit row-axis hazard; columns have no analogue.
+  # the two-row floor is an lm.fit row-axis hazard; columns have no analog.
   # `ncol` here means "cells per column", the OTHER axis of the real matrix, since
   # combat_row_chunks() is splitting columns and needs the per-chunk cell count to bound
   # combat.mem.chunk.cells the same way the row-splitting callers do. cells / ncols is
@@ -315,6 +318,13 @@ rp_factor_shim <- function(vfun, loopvar, workers, chunks, parallel_backend, wha
     if (is.null(vals) || !identical(fr, seen) || !identical(got$x, fx) ||
         !identical(got$lib.size, flib) || !identical(got$refColumn, frc) ||
         !identical(targs, list(logratioTrim, sumTrim, doWeighting, Acutoff))) {
+# edgeR does not validate refColumn, so a length other than one gets the original's own per-column call instead of an error.
+      if (exists("refColumn", envir = fr, inherits = FALSE) && length(got$refColumn) != 1L) {
+        rp_note_fallback(what)
+        return(vfun(obs = obs, ref = ref, libsize.obs = libsize.obs, libsize.ref = libsize.ref,
+                    logratioTrim = logratioTrim, sumTrim = sumTrim, doWeighting = doWeighting,
+                    Acutoff = Acutoff))
+      }
       ok <- is.matrix(got$x) && length(got$refColumn) == 1L &&
         identical(ncol(got$x), as.integer(got$nsamples)) &&
         is.numeric(i) && length(i) == 1L && isTRUE(i >= 1) && isTRUE(i <= ncol(got$x)) &&
@@ -329,7 +339,7 @@ rp_factor_shim <- function(vfun, loopvar, workers, chunks, parallel_backend, wha
       }
       seen <<- fr; fx <<- got$x; flib <<- got$lib.size; frc <<- got$refColumn
       targs <<- list(logratioTrim, sumTrim, doWeighting, Acutoff)
-      # The dispatched closure is SERIALISED on a socket backend, and a closure carries its
+      # The dispatched closure is SERIALIZED on a socket backend, and a closure carries its
       # whole defining environment whether the body reads it or not. This frame holds the
       # backend's entire DGEList alongside `fx`, so at cohort scale the dispatch presented
       # three globals of 2.05 GiB each and future refused it outright:
@@ -373,28 +383,35 @@ rp_factor_shim <- function(vfun, loopvar, workers, chunks, parallel_backend, wha
 #' and same exactness argument as `rp_factor_shim()`.
 #'
 #' This path runs for `method = "upperquartile"` and for the f75 that picks TMM's reference
-#' column, so batching it also parallelises a pooled stage.
+#' column, so batching it also parallelizes a pooled stage.
 #'
 #' @param q0 The `quantile` the original would otherwise have reached.
 #' @param loopvar Name of the original's loop index, from `calcnorm_backend()`.
 #' @noRd
 rp_quantile_shim <- function(q0, loopvar, workers, chunks, parallel_backend) {
   what <- "calcNormFactors_parallel quantile columns"
-  seen <- NULL; fdata <- NULL; vals <- NULL
+  seen <- NULL; fdata <- NULL; fdots <- NULL; vals <- NULL
   function(x, probs, ...) {
+    if (missing(probs)) {
+      rp_note_fallback(what)
+      return(q0(x, ...))
+    }
     # a multi-element `p` makes the original assign a longer value into f[j], which warns and
     # keeps only the first element. Batching that through vapply(numeric(1)) would error
     # where edgeR warns, so it goes straight through instead.
-    if (...length() || !is.numeric(probs) || length(probs) != 1L) {
+    if (!is.numeric(probs) || length(probs) != 1L) {
+      rp_note_fallback(what)
       return(q0(x, probs = probs, ...))
     }
+    dots <- list(...)
     fr <- parent.frame()
     got <- mget(c(loopvar, "data", "p"), envir = fr, inherits = FALSE,
                 ifnotfound = vector("list", 3L))
     j <- got[[loopvar]]
 
+# The extra arguments are part of the batch, so a call carrying different ones must rebuild it.
     if (is.null(vals) || !identical(fr, seen) || !identical(got$data, fdata) ||
-        !identical(got$p, probs)) {
+        !identical(got$p, probs) || !identical(dots, fdots)) {
       ok <- is.matrix(got$data) && identical(got$p, probs) &&
         is.numeric(j) && length(j) == 1L && isTRUE(j >= 1) && isTRUE(j <= ncol(got$data)) &&
         identical(got$data[, j], x)
@@ -403,15 +420,17 @@ rp_quantile_shim <- function(q0, loopvar, workers, chunks, parallel_backend) {
              "passed down, so the column loop this companion batches is not the loop edgeR ",
              "is running.", call. = FALSE)
       }
-      seen <<- fr; fdata <<- got$data
+      seen <<- fr; fdata <<- got$data; fdots <<- dots
       # unname because the original assigns into f[j], which drops the "75%" name anyway
       # Leaned for the same reason the TMM loop above is: this frame holds `fr`, the ORIGINAL's
       # own call frame, and `got`, a second copy of the matrix, neither of which the body
-      # reads. On a socket backend all of it would be serialised per chunk.
+      # reads. On a socket backend all of it would be serialized per chunk.
       lean <- new.env(parent = rp_home())
-      lean$q0 <- q0; lean$fdata <- fdata; lean$probs <- probs
+      lean$q0 <- q0; lean$fdata <- fdata; lean$probs <- probs; lean$dots <- dots
+# quote = TRUE keeps a language-valued extra argument from being evaluated a second time.
       per_chunk <- function(jj) vapply(jj, function(k)
-        unname(q0(fdata[, k], probs = probs)), numeric(1))
+        unname(do.call(q0, c(list(fdata[, k], probs = probs), dots), quote = TRUE)),
+        numeric(1))
       environment(per_chunk) <- lean
       vals <<- rp_norm_cols(ncol(fdata), length(fdata), per_chunk,
                             workers, chunks, parallel_backend,
@@ -439,21 +458,18 @@ rp_quantile_shim <- function(q0, loopvar, workers, chunks, parallel_backend) {
 #' @param apply0 The `apply` the original would otherwise have reached.
 #' @noRd
 rp_apply_shim <- function(apply0, workers, chunks, parallel_backend) {
+  what <- "calcNormFactors_parallel RLE columns"
   function(X, MARGIN, FUN, ..., simplify = TRUE) {
-    if (!identical(MARGIN, 2) || !is.matrix(X) || ...length() || !isTRUE(simplify)) {
+# MARGIN is compared by value, so an upstream `2L` splits exactly as `2` does.
+    if (!(is.numeric(MARGIN) && length(MARGIN) == 1L && isTRUE(MARGIN == 2)) ||
+        !is.matrix(X) || !isTRUE(simplify)) {
+      rp_note_fallback(what)
       return(apply0(X, MARGIN, FUN, ..., simplify = simplify))
     }
-    # FUN is carried over UNCHANGED and deliberately: it closes over the original's frame, which
-    # is where the pooled `gm` lives, and that is the one thing each block must still read.
-    # `X` is NOT also stored in `lean`: X here and `data` in FUN's own captured frame
-    # (.calcFactorRLE's frame, since this is always called as apply(data, 2, ...)) are the
-    # SAME matrix SEXP reached via two different environments. R's serializer dedups repeated
-    # objects within one environment chain, not across two independent ones, so storing X a
-    # second time in `lean` had a socket/future task write the whole matrix twice and a worker
-    # unserialize two separate copies of it. Reading `data` back out of FUN's own environment
-    # inside per_chunk keeps exactly one path to the matrix, so it serializes once.
+# FUN keeps the original's frame for the pooled gm, and X stays out of lean because FUN's frame already holds the same matrix as `data`, which a second binding would serialize twice.
     lean <- new.env(parent = rp_home())
-    lean$apply0 <- apply0; lean$FUN <- FUN
+    dots <- list(...)
+    lean$apply0 <- apply0; lean$FUN <- FUN; lean$dots <- dots
     # Confirmed at call time, not merely assumed: `data` is edgeR's own local variable name
     # inside `.calcFactorRLE`'s body (`apply(data, 2, ...)`), so it is present in FUN's frame
     # on every edgeR release this package supports. Falls back to shipping X the old way if a
@@ -461,27 +477,31 @@ rp_apply_shim <- function(apply0, workers, chunks, parallel_backend) {
     has_data <- tryCatch(
       identical(get("data", envir = environment(FUN), inherits = FALSE), X),
       error = function(e) FALSE)
+# X, MARGIN and FUN go by exact name so an extra argument cannot partial-match one of them.
     if (has_data) {
       per_chunk <- function(jj) {
         X <- get("data", envir = environment(FUN), inherits = FALSE)
-        apply0(X[, jj, drop = FALSE], 2, FUN)
+        do.call(apply0, c(list(X = X[, jj, drop = FALSE], MARGIN = 2, FUN = FUN), dots),
+                quote = TRUE)
       }
     } else {
       lean$X <- X
-      per_chunk <- function(jj) apply0(X[, jj, drop = FALSE], 2, FUN)
+      per_chunk <- function(jj) {
+        do.call(apply0, c(list(X = X[, jj, drop = FALSE], MARGIN = 2, FUN = FUN), dots),
+                quote = TRUE)
+      }
     }
     environment(per_chunk) <- lean
     rp_norm_cols(ncol(X), length(X), per_chunk,
                  workers, chunks, parallel_backend,
-                 rp_order_min_cells(parallel_backend),
-                 "calcNormFactors_parallel RLE columns")
+                 rp_order_min_cells(parallel_backend), what)
   }
 }
 
 
 # ---- entry point -------------------------------------------------------------
 
-#' edgeR normalisation factors with the per-column work parallelised
+#' edgeR's normLibSizes (calcNormFactors) with the per-column work parallelized
 #'
 #' Runs edgeR's own `normLibSizes` on current releases and `calcNormFactors` on older ones.
 #' The method is not reimplemented or copied: its default method is called once on the whole
@@ -509,7 +529,7 @@ rp_apply_shim <- function(apply0, workers, chunks, parallel_backend) {
 #' method divides by.
 #'
 #' @section Dispatches too small to be worth a fork:
-#' A fork costs about 60 ms here, so small matrices are slower parallelised than not, and
+#' A fork costs about 60 ms here, so small matrices are slower parallelized than not, and
 #' each path has its own threshold because they do not cost the same per cell. The TMM and
 #' TMMwsp loops dispatch at or above `getOption("combat.min.norm.cells", 2e5)` cells:
 #' measured 0.50x at 1e5, 1.00x at 2e5, 1.85x at 5e5. The RLE and upperquartile loops take
@@ -518,16 +538,22 @@ rp_apply_shim <- function(apply0, workers, chunks, parallel_backend) {
 #' `rank` hoist is not gated, because it never costs anything, and neither is `workers = 1`.
 #'
 #' @section When this is worth reaching for:
-#' Unconditionally. The `rank` hoist needs no workers at all, so this companion is ahead even
-#' on an input too small to dispatch. Measured on an M3 at the default worker count, companion
-#' against original, every arm `identical()`: 1.44x at 2,000 genes by 20 samples with every
-#' dispatch gated, then 2.12x at 5,000 x 50, 3.90x at 20,000 x 50, 6.07x at 20,000 x 200 and
-#' 6.26x at 20,000 x 500.
+#' For `method = "TMM"`, the default, unconditionally. The `rank` hoist needs no workers at
+#' all, so this companion is ahead even on an input too small to dispatch. Measured on an M3
+#' at the default worker count, TMM, companion against original, every arm `identical()`:
+#' 1.44x at 2,000 genes by 20 samples with every dispatch gated, then 2.12x at 5,000 x 50,
+#' 3.90x at 20,000 x 50, 6.07x at 20,000 x 200 and 6.26x at 20,000 x 500.
+#'
+#' The hoist is installed only into `.calcFactorTMM`. `TMMwsp`, `RLE` and `upperquartile` get
+#' none, so below their column-split gates (`combat.min.norm.cells` for TMMwsp,
+#' `combat.min.order.cells` for RLE and upperquartile) they run the original plus a fixed
+#' per-call overhead, which measured slower on small inputs: about 0.4x to 0.8x at 2,000 x 20.
+#' Call edgeR directly there.
 #'
 #' @param object Count matrix, genes in rows and samples in columns, or a `DGEList`.
 #' @param lib.size Library sizes. Defaults to `colSums(object)`, computed by edgeR on the
 #'   whole matrix.
-#' @param method Normalisation method, one of `"TMM"`, `"TMMwsp"`, `"RLE"`,
+#' @param method Normalization method, one of `"TMM"`, `"TMMwsp"`, `"RLE"`,
 #'   `"upperquartile"` or `"none"`.
 #' @param refColumn Reference column for TMM and TMMwsp. Chosen by edgeR when `NULL`.
 #' @param logratioTrim,sumTrim,doWeighting,Acutoff TMM trimming and weighting, passed
@@ -545,17 +571,26 @@ rp_apply_shim <- function(apply0, workers, chunks, parallel_backend) {
 #'   Measured on an 8-core machine with 4 performance cores, TMM on 15,000 genes by 9,000
 #'   specimens: 4 workers 10.74 s, 6 workers 7.26 s, 8 workers 11.60 s. Eight was slower than
 #'   four. The default resolved to 6 there and was optimal; raising it by hand made it worse.
+#'
+#'   With `parallel_backend = "foreach"` and a backend you registered yourself, `workers` sets
+#'   only the default chunk count, and that backend's width bounds concurrency; see
+#'   [combat_backends()].
 #' @param chunks Column chunks per dispatch. Defaults to `workers`; passing `chunks = workers` explicitly is redundant.
 #' @param parallel_backend One of [combat_backends()], or a function
 #'   `function(idx, f, workers)` returning a list in the order of `idx`. Defaults to
 #'   `getOption("combat.backend", combat_default_backend())`.
-#' @param backend Optional edgeR default normalisation method to wrap. Defaults to
+#' @param backend Optional edgeR default normalization method to wrap. Defaults to
 #'   `normLibSizes.default` when available, with the older name as a fallback.
 #'
-#' @param label Optional name for this call in the timing line, when
+#' @param label Optional name for this call. It labels the progress bar, which draws by
+#'   default on macOS and Linux in an interactive session or on a terminal, the single-line progress tick on
+#'   stderr (`options(combat.progress = FALSE)` turns both off), the
+#'   rows written to the progress directory (`combat.progress.dir`, or a folder under
+#'   `tempdir()` when unset), and the timing line when
 #'   `options(combat.timing = TRUE)` is set. Defaults to `calcNormFactors` plus the resolved
 #'   method and matrix shape, e.g. `calcNormFactors TMM 12,000 x 700`. Unlike the other four
-#'   companions (whose default is just their own name, e.g. `lmFit 18,270 x 1,500`), this one
+#'   companions (whose default is their own name and the matrix shape, e.g.
+#'   `lmFit 18,270 x 1,500`), this one
 #'   also names the method, since `calcNormFactors_parallel(method = "TMM")` and `method =
 #'   "RLE"` take genuinely different code paths worth telling apart in a multi-call log or a
 #'   shared `combat.progress.dir` (`rnaparallel_progress()` groups TSV rows by this string).
@@ -592,12 +627,20 @@ calcNormFactors_parallel <- function(object, lib.size = NULL,
       workers != trunc(workers)) {
     stop("`workers` must be a whole number, not ", workers, call. = FALSE)
   }
-  workers <- rp_prologue(workers)
+# A DGEList is only validated here; the matrix call its DGEList method makes below owns the one cap.
+  workers <- if (inherits(object, "DGEList")) rp_uncapped(rp_prologue(workers)) else rp_prologue(workers)
+
+# Forced outside the tryCatch below, so a `method` whose evaluation fails errors once, as in edgeR, and is never re-run.
+  force(method)
+# The label never validates `method`: edgeR maps "TMMwzp" itself and owns every refusal.
+  .method <- tryCatch(
+    if (length(method) == 1L && isTRUE(method == "TMMwzp")) "TMMwsp" else match.arg(method),
+    error = function(e) if (is.character(method) && length(method)) method[1L] else "?")
 
   # timing and quieting are on.exit hooks, so an error unwinds the sink and still reports the
   # elapsed line: a failed run says where it failed instead of vanishing. Placed after the
   # prologue because that is what resolves `workers` from NULL to a number worth printing.
-  .rp <- rp_step_begin(label, paste("calcNormFactors", match.arg(method)), object,
+  .rp <- rp_step_begin(label, paste("calcNormFactors", .method), object,
                        parallel_backend, workers)
   on.exit(rp_step_end(.rp), add = TRUE)
   if (!is.function(parallel_backend)) {
@@ -606,17 +649,23 @@ calcNormFactors_parallel <- function(object, lib.size = NULL,
 
   be <- calcnorm_backend(backend)
   ns <- be$env
+# Only arguments the caller supplied are forwarded, so every default is the backend's own.
+  given <- intersect(c("lib.size", "method", "refColumn", "logratioTrim", "sumTrim",
+                       "doWeighting", "Acutoff", "p"), names(match.call()))
+  fwd <- lapply(given, as.name)
+  names(fwd) <- given
 
   # anything edgeR gives its own S3 method runs different code from the default one this
-  # companion wraps, so it is refused rather than quietly funnelled through as.matrix
+  # companion wraps, so it is refused rather than quietly funneled through as.matrix
   if (!inherits(object, "DGEList")) {
     # .class2, not class: S3 dispatch resolves through the whole inheritance chain, and
     # class() on an S4 object returns only the concrete name. A RangedSummarizedExperiment,
     # which is what tximeta and summarizeOverlaps hand back, walked past a class() guard and
-    # reached as.matrix, which is the funnelling this refusal exists to prevent.
+    # reached as.matrix, which is the funneling this refusal exists to prevent.
     cls   <- .class2(object)
+# getS3method also reads edgeR's S3 table, where a method another package registers lives.
     other <- vapply(cls, function(cl)
-      exists(paste0(be$generic, ".", cl), envir = ns, inherits = FALSE), logical(1))
+      !is.null(utils::getS3method(be$generic, cl, optional = TRUE, envir = ns)), logical(1))
     if (any(other)) {
       stop("calcNormFactors_parallel handles a matrix or a DGEList. edgeR has its own ",
            be$generic, " method for class ", cls[which(other)[1]],
@@ -630,15 +679,14 @@ calcNormFactors_parallel <- function(object, lib.size = NULL,
   if (inherits(object, "DGEList")) {
     m <- be$dge                          # the object calcnorm_backend() gated for reachability
     denv <- new.env(parent = environment(m))
-    rebound <- function(object, lib.size = NULL, ...) {
-      calcNormFactors_parallel(object, lib.size = lib.size, ..., workers = workers,
+    rebound <- function(object, ...) {
+      calcNormFactors_parallel(object, ..., workers = workers,
                                chunks = chunks, parallel_backend = parallel_backend,
                                backend = backend)
     }
     assign(be$generic, rebound, envir = denv)
     environment(m) <- denv
-    return(m(object, method = method, refColumn = refColumn, logratioTrim = logratioTrim,
-             sumTrim = sumTrim, doWeighting = doWeighting, Acutoff = Acutoff, p = p))
+    return(eval(as.call(c(list(as.name("m"), quote(object)), fwd))))
   }
 
   # one child env per rebind target, so the hoisted rank reaches .calcFactorTMM and nothing
@@ -672,7 +720,5 @@ calcNormFactors_parallel <- function(object, lib.size = NULL,
 
   f <- be$fn
   environment(f) <- env
-  f(object = object, lib.size = lib.size, method = method, refColumn = refColumn,
-    logratioTrim = logratioTrim, sumTrim = sumTrim, doWeighting = doWeighting,
-    Acutoff = Acutoff, p = p)
+  eval(as.call(c(list(as.name("f"), object = quote(object)), fwd)))
 }

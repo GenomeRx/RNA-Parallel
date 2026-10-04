@@ -2,14 +2,14 @@
 % Please edit documentation in R/limma_rbe_parallel.R
 \name{removeBatchEffect_parallel}
 \alias{removeBatchEffect_parallel}
-\title{limma's \code{removeBatchEffect} with its \code{lmFit} parallelised}
+\title{limma's \code{removeBatchEffect} with its \code{lmFit} parallelized}
 \usage{
 removeBatchEffect_parallel(
   x,
   batch = NULL,
   batch2 = NULL,
   covariates = NULL,
-  design = matrix(1, ncol(x), 1),
+  design = NULL,
   group = NULL,
   ...,
   workers = NULL,
@@ -20,7 +20,8 @@ removeBatchEffect_parallel(
 )
 }
 \arguments{
-\item{x, batch, batch2, covariates, design, group}{Passed to \code{limma::removeBatchEffect} unchanged.}
+\item{x, batch, batch2, covariates, design, group}{Passed to \code{limma::removeBatchEffect} unchanged.
+One left out is not passed at all, so it takes the backend's own default.}
 
 \item{...}{Passed through to the underlying \code{lmFit}. \code{method = "robust"} and \code{ndups >= 2}
 are refused by \code{\link[=lmFit_parallel]{lmFit_parallel()}} for the reasons given there, so they are refused here.}
@@ -35,7 +36,11 @@ Going past your PERFORMANCE core count can be slower than stopping at it, and th
 worst on the largest inputs, which is exactly where people reach for more workers.
 Measured on an 8-core machine with 4 performance cores, TMM on 15,000 genes by 9,000
 specimens: 4 workers 10.74 s, 6 workers 7.26 s, 8 workers 11.60 s. Eight was slower than
-four. The default resolved to 6 there and was optimal; raising it by hand made it worse.}
+four. The default resolved to 6 there and was optimal; raising it by hand made it worse.
+
+With \code{parallel_backend = "foreach"} and a backend you registered yourself, \code{workers} sets
+only the default chunk count, and that backend's width bounds concurrency; see
+\code{\link[=combat_backends]{combat_backends()}}.}
 
 \item{chunks}{Row chunks. Defaults to \code{workers}; passing \code{chunks = workers} explicitly is redundant.
 Clamped so no chunk holds one gene.}
@@ -44,11 +49,15 @@ Clamped so no chunk holds one gene.}
 \verb{function(idx, f, workers)} returning a list in the order of \code{idx}. Defaults to
 \code{getOption("combat.backend", combat_default_backend())}.}
 
-\item{backend}{Optional \code{lmFit} to wrap. Defaults to \code{limma::lmFit}.}
+\item{backend}{Optional \code{removeBatchEffect} to wrap. Its \code{lmFit} is the one its own
+environment resolves, so the two always come from the same copy of limma. Defaults to
+\code{limma::removeBatchEffect}.}
 
-\item{label}{Optional name for this call in the timing line, when
+\item{label}{Optional name for this call. It is the stage name on the progress bar, which
+draws by default on macOS and Linux in an interactive session or on a terminal
+(\code{options(combat.progress = FALSE)} turns it off), and in the timing line when
 \code{options(combat.timing = TRUE)} is set. Defaults to the companion and the matrix shape,
-e.g. \verb{lmFit 18,270 x 1,500}; pass a cohort name to tell calls apart in a loop.}
+e.g. \verb{removeBatchEffect 22,000 x 948}; pass a cohort name to tell calls apart in a loop.}
 }
 \value{
 The batch-corrected matrix \code{limma::removeBatchEffect} returns, \code{identical()} to it.
@@ -60,14 +69,11 @@ resolves to limma's own code, and the returned matrix is \code{identical()} to t
 }
 \section{Why this one is worth having}{
 
-It is called once per cohort in a batch-effect PCA and again on the pooled matrix, and its
-cost grows worse than linearly in samples. Measured against limma 3.62.2 on 22,000 genes:
-8.5 s at 948 samples and 154 batches, 44.2 s at 3,000 samples and 250 batches, and it did not
-finish inside ten minutes at 9,493 samples. A pipeline that calls it six times a run pays
-that six times.
+In a batch-effect PCA it runs once per cohort and once more on the pooled matrix, so a
+five-cohort analysis calls it six times.
 }
 
-\section{What is not parallelised}{
+\section{What is not parallelized}{
 
 The final \code{x - beta \%*\% t(X.batch)} is one BLAS call over the whole matrix. It is not split,
 because a matrix product is not row-associative in floating point once BLAS is threaded, and
@@ -82,10 +88,6 @@ split and the companion is the original plus about a millisecond. Measured on an
 default worker count, companion against original, every arm \code{identical()}: 1.00x at 2,000
 genes by 20 samples, 0.92x at 20,000 x 50, 0.98x at 20,000 x 200, then 1.91x at 20,000 x 500
 once the matrix is large enough for the split to run at all.
-
-A wide batch design is what makes it worth having: the original's cost grows worse than
-linearly in samples, measured 8.5 s at 948 samples and 154 batches against 44.2 s at 3,000
-samples and 250 batches.
 }
 
 \examples{

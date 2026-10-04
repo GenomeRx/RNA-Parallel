@@ -2,7 +2,7 @@
 % Please edit documentation in R/verbose.R
 \name{rnaparallel_progress}
 \alias{rnaparallel_progress}
-\title{Summarise chunk progress from a \code{combat.progress.dir}, with an ETA}
+\title{Summarize chunk progress from a \code{combat.progress.dir}, with an ETA}
 \usage{
 rnaparallel_progress(dir, watch = FALSE, interval = 1, stall_after = 600)
 }
@@ -11,7 +11,8 @@ rnaparallel_progress(dir, watch = FALSE, interval = 1, stall_after = 600)
 
 \item{watch}{If \code{TRUE}, poll and redraw a live bar every \code{interval} seconds instead of
 returning once. Meant for a SEPARATE terminal/session next to the one running the actual
-computation; stop it with Ctrl-C or \code{interval} reaching a stall (see below).}
+computation; stop it with Ctrl-C, or it returns once \code{stall_after} seconds pass with no
+chunk starting or finishing.}
 
 \item{interval}{Seconds between redraws in watch mode.}
 
@@ -31,15 +32,18 @@ Reads every \verb{rnaparallel-*.tsv} file in \code{dir}, pairs each chunk's star
 reports completed chunks, a mean seconds-per-chunk from the ones that finished, and a
 projected finish time. Meant to be called from a SEPARATE R session while the run that is
 writing the files is still blocked inside its parallel call: that is the whole point of
-writing to a file rather than a console the blocked session cannot flush anyway.
+writing to a file rather than a console the blocked session cannot flush anyway. The running
+session draws its own bar only in an interactive session or on a terminal; for a knitr or
+Rscript log, set \code{combat.progress.dir} to keep these files and follow the run from a second
+session.
 }
 \details{
 A single continuously-updating bar DURING one blocking call is not something the running
 session can print: once it calls into \code{mclapply}/\code{future}/\code{BiocParallel}/\code{foreach} it is
 synchronously waiting and cannot redraw a console until the call returns, which is the whole
-reason this writes to files instead. \code{watch = TRUE} gets the live-bar behaviour anyway, from
+reason this writes to files instead. \code{watch = TRUE} gets the live-bar behavior anyway, from
 the side that CAN keep drawing: this function's own process, polling the files and
-redrawing a real \verb{[#####-----] 47\%} bar with the current stage name, once a second, until
+redrawing a real \verb{|=====-----|  47\%} bar with the current stage name, once a second, until
 every chunk in the last dispatch is done.
 }
 \examples{
