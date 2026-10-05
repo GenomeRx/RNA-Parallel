@@ -40,7 +40,7 @@ rp_row_blocks <- function(M, weights, env, workers, chunks, parallel_backend, wh
   min_cells <- if (fast) rp_ls_min_cells("combat.min.ls.cells", 6e6, parallel_backend)
                else      rp_ls_min_cells("combat.min.cells",    2e4, parallel_backend)
 
-  # Under the gate, take the original call WHOLE. combat_parallel_lapply honours the gate by
+  # Under the gate, take the original call WHOLE. combat_parallel_lapply honors the gate by
   # walking the blocks serially instead, and on the fast branch that is four lm.fit calls
   # where one would do: measured 0.70x, a companion slower than the function it wraps. An
   # unusable option value falls through to the dispatch, which refuses it there.
@@ -71,7 +71,7 @@ rp_row_blocks <- function(M, weights, env, workers, chunks, parallel_backend, wh
   # Checked once the blocks are known, so it reads the leading rows and not the whole matrix.
   if (!rp_arrayweights_uniform(w, vapply(idx, `[[`, integer(1), 1L))) return(serial_fn())
 
-  # A dispatched closure is SERIALISED on a socket backend, and a closure carries its whole
+  # A dispatched closure is SERIALIZED on a socket backend, and a closure carries its whole
   # defining environment whether the body reads it or not. This frame reaches `M` a second
   # time and, through block_fn, the entry point's own `object`, so the dispatch presented
   # 664.29 MiB of globals for a 55 MiB matrix and `future` refused it outright:
@@ -152,7 +152,7 @@ rp_row_blocks <- function(M, weights, env, workers, chunks, parallel_backend, wh
 }
 
 
-#' limma's lmFit with its row loops parallelised
+#' limma's lmFit with its row loops parallelized
 #'
 #' Runs [limma::lmFit()] itself. The algorithm is not reimplemented and not copied: limma's
 #' own `lmFit` is called with `lm.series` and `gls.series` rebound in a child of its own
@@ -180,7 +180,7 @@ rp_row_blocks <- function(M, weights, env, workers, chunks, parallel_backend, wh
 #' different component sets: the fast path returns `lm.fit`'s whole object including `qr`
 #' and `assign`, the slow path a bare seven-element list without them. One NA cell in a 400
 #' gene matrix put the whole matrix on the slow path and every block on the fast one, and
-#' 114 of 400 sigma differed. Splitting is refused, in favour of one plain original call,
+#' 114 of 400 sigma differed. Splitting is refused, in favor of one plain original call,
 #' unless every block provably lands on the same side as the full matrix.
 #'
 #' `stats::lm.fit` demotes a one-column response with `if (is.matrix(y) && ny == 1L)
@@ -204,13 +204,13 @@ rp_row_blocks <- function(M, weights, env, workers, chunks, parallel_backend, wh
 #' from [limma::voom()], limma runs an R loop over genes, and that forks well: measured
 #' 3.70x unblocked and 4.35x blocked on 60,000 genes by 48 samples at the default 6 workers on
 #' an M3 (`tools/bench_lmfit.R` in the GitHub repository,
-#' <https://github.com/GenomeRx/RNA-Parallel>),
+#' <https://github.com/NamStacks/RNA-Parallel>),
 #' against 0.95x at 20,000 cells. This branch takes two gates:
 #' `getOption("combat.min.cells", 20000)` cells, the gate ComBat-seq uses, and
 #' `getOption("combat.min.wt.genes", 2000)` genes, because the loop's cost is per gene and it
 #' is genes per worker that pay for a fork. A call below either one is one plain original call.
 #'
-#' Without probe weights limma fits every gene in one vectorised `lm.fit`, which costs
+#' Without probe weights limma fits every gene in one vectorized `lm.fit`, which costs
 #' milliseconds and is mostly not worth handing to another process. That branch measured
 #' 0.24x at 1.2 million cells and 0.56x at 4.8 million, turning over to 1.47x at 12 million
 #' and 1.71x at 20 million. It gets its own, much higher
@@ -244,7 +244,7 @@ rp_row_blocks <- function(M, weights, env, workers, chunks, parallel_backend, wh
 #' genes, one ahead and one behind. The large-input figures are under "Dispatches too small to
 #' be worth a fork" above.
 #'
-#' Without probe weights limma fits every gene in one vectorised `lm.fit`, which costs
+#' Without probe weights limma fits every gene in one vectorized `lm.fit`, which costs
 #' milliseconds, so the companion declines to split until the matrix is very large and is
 #' parity until then. That is not a missing measurement, it is the gate doing its job.
 #'

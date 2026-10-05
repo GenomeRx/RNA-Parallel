@@ -33,7 +33,7 @@ knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = TRUE,
 knitr::opts_chunk$set(cache.path = "RNA_Parallel_linux_cache/")
 ```
 
-`rnaparallel` runs the original function itself and parallelises its hot paths.
+`rnaparallel` runs the original function itself and parallelizes its hot paths.
 `ComBat_seq_parallel` corrects the counts; `calcNormFactors_parallel`, `lmFit_parallel`,
 and `duplicateCorrelation_parallel` run the differential expression that
 follows. None of them reimplements a method from its description: the original is called unchanged on blocks of genes or
@@ -65,7 +65,7 @@ BiocManager::install(c("sva", "edgeR", "limma", "statmod", "SummarizedExperiment
                        "ComplexHeatmap"))
 
 if (!requireNamespace("remotes", quietly = TRUE)) install.packages("remotes")
-remotes::install_github("GenomeRx/RNA-Parallel",
+remotes::install_github("NamStacks/RNA-Parallel",
                         dependencies = c("Depends", "Imports"),
                         upgrade = "never")
 
@@ -85,7 +85,7 @@ library(ggplot2)
 # Refuse a stale install before anything expensive runs. `git pull` updates this file and the
 # package SOURCE; it does not reinstall the package, and nothing downstream would notice. The
 # report stamps its own sessionInfo and keys every timing cache on packageVersion("rnaparallel"),
-# so rendering against a previous install produces a report labelled with the wrong version that
+# so rendering against a previous install produces a report labeled with the wrong version that
 # measured the wrong code, silently, after an hour. Skipped when the working tree is not to hand,
 # which is the case for a reader rendering from an installed copy of the package.
 .desc <- file.path("..", "..", "DESCRIPTION")
@@ -116,8 +116,8 @@ theme_set(
           legend.text   = element_text(size = 12),
           plot.margin   = margin(12, 16, 10, 12)))
 
-# one colour per companion, shared by every bar figure below. Three figures each carried their
-# own copy and removeBatchEffect was in none of them, so it drew as a grey NA series
+# one color per companion, shared by every bar figure below. Three figures each carried their
+# own copy and removeBatchEffect was in none of them, so it drew as a gray NA series
 pal_stage <- c("ComBat_seq" = "#8172B3",
                "calcNormFactors (TMM)" = "#4C72B0",
                "lmFit" = "#DD8452",
@@ -145,8 +145,8 @@ n_workers    <- max(tcga_workers)
 
 # Backend: mclapply, the same one the macOS run used. On Linux fork() hands each worker the
 # parent's pages copy-on-write, so a large voom object costs nothing to distribute; the
-# socket backends must re-serialise it per chunk and measured far slower than not
-# parallelising at all. Set as an option so every companion call inherits it.
+# socket backends must re-serialize it per chunk and measured far slower than not
+# parallelizing at all. Set as an option so every companion call inherits it.
 options(combat.backend = "mclapply")
 options(future.globals.maxSize = 8 * 1024^3)
 
@@ -264,7 +264,7 @@ jit <- matrix(rnorm(n * 2L), n, 2L) * b_spread[rep(seq_len(n_batch), each = 2L *
 b_idio <- matrix(rnorm(G * n_batch, 0, 0.20), G, n_batch)
 b_disp <- runif(n_batch, 1, disp_fold)
 
-# Continuous patient heterogeneity, three latent programmes. Without it every sample in a cell
+# Continuous patient heterogeneity, three latent programs. Without it every sample in a cell
 # shares one mean vector, the only spread left is sampling noise, and that noise averages away
 # across thousands of genes: batches collapse to points and the condition becomes a straight
 # line once batch is removed.
@@ -309,7 +309,7 @@ share one mean vector and the batches would collapse to points.
 # scoring helpers, defined before the equivalence checks that use them
 pc_sim <- function(mat) {
   p <- prcomp(t(cpm(mat, log = TRUE, prior.count = 1)), scale. = FALSE)
-  # centre and loadings are kept so another matrix can be projected onto this basis, which is
+  # center and loadings are kept so another matrix can be projected onto this basis, which is
   # what makes a component index mean the same thing across two arms
   list(x = p$x, ve = p$sdev^2 / sum(p$sdev^2), center = p$center, rotation = p$rotation)
 }
@@ -418,7 +418,7 @@ ggplot(sd_df, aes(PC1, PC2, colour = batch)) +
                       name = "batch") +
   guides(colour = guide_legend(override.aes = list(size = 3, alpha = 1), ncol = 1)) +
   facet_wrap(~ arm, nrow = 1, scales = "free", labeller = labeller(arm = sim_lab)) +
-  labs(title = "Simulated counts, coloured by batch",
+  labs(title = "Simulated counts, colored by batch",
        subtitle = sprintf("%s genes, %s patients, %d batches. Ten clouds become one.",
                            format(G, big.mark = ","), format(ncol(sim), big.mark = ","),
                            nlevels(batch)),
@@ -760,7 +760,7 @@ if (length(absent)) {
                 directory = file.path(data_dir, "GDCdata"))
     se  <- GDCprepare(q, directory = file.path(data_dir, "GDCdata"), summarizedExperiment = TRUE)
     bc  <- colnames(se)
-    idx <- which(substr(bc, 14, 15) == "01")          # primary tumour
+    idx <- which(substr(bc, 14, 15) == "01")          # primary tumor
     idx <- idx[order(bc[idx])]                        # deterministic aliquot choice
     idx <- idx[!duplicated(substr(bc[idx], 1, 12))]   # one per patient
     pc  <- rowData(se)$gene_type == "protein_coding"
@@ -985,7 +985,7 @@ ggplot(pd, aes(PC1, PC2, colour = cancer)) +
   scale_colour_brewer(palette = "Paired", name = "cancer type") +
   guides(colour = guide_legend(override.aes = list(size = 3.4, alpha = 1), ncol = 1)) +
   facet_wrap(~ arm, nrow = 1, scales = "free", labeller = labeller(arm = arm_lab)) +
-  labs(title = "Principal components, coloured by cancer type",
+  labs(title = "Principal components, colored by cancer type",
        subtitle = sprintf("%s samples, %d cancer types, %d plates. Right two panels: same numbers, two ways.",
                            format(ncol(counts), big.mark = ","), nlevels(cancer), nlevels(plate)),
        x = "PC1", y = "PC2")
@@ -1048,7 +1048,7 @@ data.frame(plate = c(worst, "median of all plates"),
 ```
 
 ```{r pca-plate-plot, fig.width = 13, fig.height = 5.4}
-# the ten most displaced plates in colour, every other plate grey behind them
+# the ten most displaced plates in color, every other plate gray behind them
 hl <- factor(ifelse(plate %in% worst, as.character(plate), "other plates"),
              levels = c(worst, "other plates"))
 
@@ -1126,7 +1126,7 @@ data.frame(model = c("~ smoking", "~ smoking + cancer"),
 ```
 
 Genes called by the unadjusted model alone are the cost of ignoring cancer type. Smoking is not
-randomised across these cohorts, so an unadjusted contrast partly measures which cancers the
+randomized across these cohorts, so an unadjusted contrast partly measures which cancers the
 smokers have.
 
 ```{r tcga-de-assert}
@@ -1238,8 +1238,8 @@ top_n   <- length(top_g)
 top_lab <- lab_of(top_g)
 hm_fontsize <- max(4.5, min(9, 633 / top_n))   # 633pt of panel once annotations are drawn
 
-# Scaled before plotting: each gene is centred and divided by its own standard deviation across
-# the displayed samples, so the colour reads as contrast rather than expression level.
+# Scaled before plotting: each gene is centered and divided by its own standard deviation across
+# the displayed samples, so the color reads as contrast rather than expression level.
 # ComplexHeatmap does no scaling of its own, so this is the only place it happens.
 zmat <- function(mat) {
   # library sizes must come from the whole matrix; deriving them from the displayed genes shifts
@@ -1272,7 +1272,7 @@ row_ann <- rowAnnotation(
   annotation_legend_param = list(Direction = list(title_gp = gpar(fontsize = 12, fontface = "bold"),
                                                   labels_gp = gpar(fontsize = 11))))
 
-# the annotation name is drawn into the neighbouring heatmap and clipped, so only the
+# the annotation name is drawn into the neighboring heatmap and clipped, so only the
 # right-hand panel carries it
 mk_ann <- function(show_name) HeatmapAnnotation(
   Smoking = smoking[hm_keep],
@@ -1495,7 +1495,7 @@ Timing for this stage is in D.3.d, where the baseline is bracketed rather than r
 stopifnot(dc_same)
 ```
 
-### c. What is deliberately not parallelised
+### c. What is deliberately not parallelized
 
 Not everything survives the exactness bar, and the list of rejections is as much a part of this
 package as the list of companions. `voom` measured 0.99x, because its `lowess` trend takes its

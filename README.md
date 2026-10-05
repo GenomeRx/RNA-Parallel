@@ -8,13 +8,13 @@ Parallel companions for five functions in sva, edgeR and limma. Each one calls t
 function unmodified and returns output `identical()` to it, bit for bit. Same arguments, same
 defaults (exceptions under [Use](#use)), same result, faster at cohort scale.
 
-Rendered analysis: [macOS](https://genomerx.github.io/RNA-Parallel/) ·
-[Linux](https://genomerx.github.io/RNA-Parallel/linux.html) ·
-[Windows](https://genomerx.github.io/RNA-Parallel/windows.html)
+Rendered analysis: [macOS](https://namstacks.github.io/RNA-Parallel/) ·
+[Linux](https://namstacks.github.io/RNA-Parallel/linux.html) ·
+[Windows](https://namstacks.github.io/RNA-Parallel/windows.html)
 
 ## Speedup
 
-TCGA, 18,270 genes by 1,500 tumours. Every arm `identical()` to the original on all three
+TCGA, 18,270 genes by 1,500 tumors. Every arm `identical()` to the original on all three
 platforms. macOS: M3, 4P+4E. Linux: 2x Xeon, 16 cores. Windows: Ultra 9 185H, 6P+10E.
 
 | companion | runs | macOS | Linux | Windows |
@@ -45,7 +45,7 @@ sva ComBat-seq pipeline, each chosen because all three hold:
    `BPPARAM`, `parallel` or worker argument, and neither does `sva::ComBat_seq`. DESeq2's
    `DESeq()`, `results()` and `lfcShrink()` and sva's `ComBat()` already take `BPPARAM`.
 3. **It splits without changing the answer.** Steps that pool every gene into one estimate
-   (eBayes priors, dispersion trends, voom's lowess curve, quantile normalisation) do not.
+   (eBayes priors, dispersion trends, voom's lowess curve, quantile normalization) do not.
 
 Serial time, simulated 20,000 genes by 300 samples, Apple M3 (`tools/profile_pipelines.R`):
 
@@ -64,7 +64,7 @@ Serial time, simulated 20,000 genes by 300 samples, Apple M3 (`tools/profile_pip
 | `eBayes`, `topTable`, `filterByExpr` and other quick steps | under 0.1 s | no | nothing to gain |
 
 TMM, `lmFit` and `removeBatchEffect` are cheap here and grow with the cohort: on the Speedup
-matrix (18,270 genes by 1,500 tumours) they take 10.3 s, 4.4 s and 4.5 s serial on the M3
+matrix (18,270 genes by 1,500 tumors) they take 10.3 s, 4.4 s and 4.5 s serial on the M3
 ([REFERENCE.md](REFERENCE.md#cross-platform)). `vst` and `glmQLFTest` were not timed at that
 scale, so nothing yet shows a fork would pay for them. Each companion takes its original's
 arguments and returns its original's object, so `voom`, `eBayes`, `topTable`, `glmQLFit` and
@@ -85,7 +85,7 @@ if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocMana
 BiocManager::install("edgeR")
 
 if (!requireNamespace("remotes", quietly = TRUE)) install.packages("remotes")
-remotes::install_github("GenomeRx/RNA-Parallel",
+remotes::install_github("NamStacks/RNA-Parallel",
                         dependencies = c("Depends", "Imports"),
                         upgrade = "never")
 ```
@@ -146,7 +146,7 @@ for, such as a `SummarizedExperiment`; pass its count matrix instead. See
 
 **Check it yourself:** [REFERENCE.md](REFERENCE.md#full-self-check) has the full comparison
 against all five originals, no download required. At cohort scale, the same checks run as
-[rendered reports](https://genomerx.github.io/RNA-Parallel/) on all three platforms, sourced from
+[rendered reports](https://namstacks.github.io/RNA-Parallel/) on all three platforms, sourced from
 [inst/examples/](inst/examples/). [tests/](tests/testthat) covers every argument path, chunk
 layout, backend, and dispatch count: 400+ assertions.
 
@@ -188,7 +188,7 @@ MIT for this companion, copyright GenomeRx 2026, in [LICENSE](LICENSE). The orig
 called at run time from your own installation and none of them is redistributed here: sva is
 Artistic-2.0, limma and edgeR are GPL (>= 2). Two exceptions, both marked in source in
 `R/helper_seq_parallel.R`, and both used only while the installed original still matches them:
-a row-vectorised transcription of `sva::match_quantiles` (derived from Artistic-2.0 code by
+a row-vectorized transcription of `sva::match_quantiles` (derived from Artistic-2.0 code by
 Zhang, Parmigiani, Johnson), and `.tagwise_defaults_pinned`, three one-line default formulas
 (`offset`, `span`, `AveLogCPM`) taken from edgeR 4.4.2's `estimateGLMTagwiseDisp.default`,
 which the tagwise row split computes once for the whole matrix. On any upstream change the
@@ -218,4 +218,4 @@ doi:[10.1093/nar/gkaf018](https://doi.org/10.1093/nar/gkaf018).
 Package: <https://bioconductor.org/packages/release/bioc/html/edgeR.html>.
 
 **This companion.** Nguyen N (2026). *rnaparallel: Exact Parallel Companions for sva ComBat-Seq, edgeR and limma.*
-<https://github.com/GenomeRx/RNA-Parallel>.
+<https://github.com/NamStacks/RNA-Parallel>.

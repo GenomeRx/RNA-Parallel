@@ -2,7 +2,7 @@
 % Please edit documentation in R/limma_lmFit_parallel.R
 \name{lmFit_parallel}
 \alias{lmFit_parallel}
-\title{limma's lmFit with its row loops parallelised}
+\title{limma's lmFit with its row loops parallelized}
 \usage{
 lmFit_parallel(
   object,
@@ -114,7 +114,7 @@ full matrix ONCE, against the full dimensions, and row-subset with limma's own
 different component sets: the fast path returns \code{lm.fit}'s whole object including \code{qr}
 and \code{assign}, the slow path a bare seven-element list without them. One NA cell in a 400
 gene matrix put the whole matrix on the slow path and every block on the fast one, and
-114 of 400 sigma differed. Splitting is refused, in favour of one plain original call,
+114 of 400 sigma differed. Splitting is refused, in favor of one plain original call,
 unless every block provably lands on the same side as the full matrix.
 
 \code{stats::lm.fit} demotes a one-column response with \code{if (is.matrix(y) && ny == 1L) y <- drop(y)}, and limma feeds it \code{t(M)}, so a one-gene block switches sigma from
@@ -141,13 +141,13 @@ The two branches of \code{lm.series} are not the same job. With probe weights, o
 from \code{\link[limma:voom]{limma::voom()}}, limma runs an R loop over genes, and that forks well: measured
 3.70x unblocked and 4.35x blocked on 60,000 genes by 48 samples at the default 6 workers on
 an M3 (\code{tools/bench_lmfit.R} in the GitHub repository,
-\url{https://github.com/GenomeRx/RNA-Parallel}),
+\url{https://github.com/NamStacks/RNA-Parallel}),
 against 0.95x at 20,000 cells. This branch takes two gates:
 \code{getOption("combat.min.cells", 20000)} cells, the gate ComBat-seq uses, and
 \code{getOption("combat.min.wt.genes", 2000)} genes, because the loop's cost is per gene and it
 is genes per worker that pay for a fork. A call below either one is one plain original call.
 
-Without probe weights limma fits every gene in one vectorised \code{lm.fit}, which costs
+Without probe weights limma fits every gene in one vectorized \code{lm.fit}, which costs
 milliseconds and is mostly not worth handing to another process. That branch measured
 0.24x at 1.2 million cells and 0.56x at 4.8 million, turning over to 1.47x at 12 million
 and 1.71x at 20 million. It gets its own, much higher
@@ -185,7 +185,7 @@ arrays: both put 2,000 genes and up ahead of the original, and they disagreed at
 genes, one ahead and one behind. The large-input figures are under "Dispatches too small to
 be worth a fork" above.
 
-Without probe weights limma fits every gene in one vectorised \code{lm.fit}, which costs
+Without probe weights limma fits every gene in one vectorized \code{lm.fit}, which costs
 milliseconds, so the companion declines to split until the matrix is very large and is
 parity until then. That is not a missing measurement, it is the gate doing its job.
 

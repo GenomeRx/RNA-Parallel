@@ -1703,7 +1703,7 @@ edgeR</h3>
 
 
 <p><code>rnaparallel</code> runs the original function itself and
-parallelises its hot paths. <code>ComBat_seq_parallel</code> corrects
+parallelizes its hot paths. <code>ComBat_seq_parallel</code> corrects
 the counts; <code>calcNormFactors_parallel</code>,
 <code>lmFit_parallel</code>, and
 <code>duplicateCorrelation_parallel</code> run the differential
@@ -1759,7 +1759,7 @@ alongside this package.</p>
 <div id="a.-setup" class="section level1">
 <h1>A. Setup</h1>
 <div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a><span class="cf">if</span> (<span class="sc">!</span><span class="fu">requireNamespace</span>(<span class="st">&quot;remotes&quot;</span>, <span class="at">quietly =</span> <span class="cn">TRUE</span>)) <span class="fu">install.packages</span>(<span class="st">&quot;remotes&quot;</span>)</span>
-<span id="cb1-2"><a href="#cb1-2" tabindex="-1"></a>remotes<span class="sc">::</span><span class="fu">install_github</span>(<span class="st">&quot;GenomeRx/RNA-Parallel&quot;</span>)</span>
+<span id="cb1-2"><a href="#cb1-2" tabindex="-1"></a>remotes<span class="sc">::</span><span class="fu">install_github</span>(<span class="st">&quot;NamStacks/RNA-Parallel&quot;</span>)</span>
 <span id="cb1-3"><a href="#cb1-3" tabindex="-1"></a></span>
 <span id="cb1-4"><a href="#cb1-4" tabindex="-1"></a><span class="cf">if</span> (<span class="sc">!</span><span class="fu">requireNamespace</span>(<span class="st">&quot;BiocManager&quot;</span>, <span class="at">quietly =</span> <span class="cn">TRUE</span>)) <span class="fu">install.packages</span>(<span class="st">&quot;BiocManager&quot;</span>)</span>
 <span id="cb1-5"><a href="#cb1-5" tabindex="-1"></a>BiocManager<span class="sc">::</span><span class="fu">install</span>(<span class="fu">c</span>(<span class="st">&quot;sva&quot;</span>, <span class="st">&quot;edgeR&quot;</span>, <span class="st">&quot;limma&quot;</span>, <span class="st">&quot;statmod&quot;</span>, <span class="st">&quot;SummarizedExperiment&quot;</span>, <span class="st">&quot;TCGAbiolinks&quot;</span>,</span>
@@ -1782,7 +1782,7 @@ alongside this package.</p>
 <span id="cb2-8"><a href="#cb2-8" tabindex="-1"></a><span class="co"># Refuse a stale install before anything expensive runs. `git pull` updates this file and the</span></span>
 <span id="cb2-9"><a href="#cb2-9" tabindex="-1"></a><span class="co"># package SOURCE; it does not reinstall the package, and nothing downstream would notice. The</span></span>
 <span id="cb2-10"><a href="#cb2-10" tabindex="-1"></a><span class="co"># report stamps its own sessionInfo and keys every timing cache on packageVersion(&quot;rnaparallel&quot;),</span></span>
-<span id="cb2-11"><a href="#cb2-11" tabindex="-1"></a><span class="co"># so rendering against a previous install produces a report labelled with the wrong version that</span></span>
+<span id="cb2-11"><a href="#cb2-11" tabindex="-1"></a><span class="co"># so rendering against a previous install produces a report labeled with the wrong version that</span></span>
 <span id="cb2-12"><a href="#cb2-12" tabindex="-1"></a><span class="co"># measured the wrong code, silently, after an hour. Skipped when the working tree is not to hand,</span></span>
 <span id="cb2-13"><a href="#cb2-13" tabindex="-1"></a><span class="co"># which is the case for a reader rendering from an installed copy of the package.</span></span>
 <span id="cb2-14"><a href="#cb2-14" tabindex="-1"></a>.desc <span class="ot">&lt;-</span> <span class="fu">file.path</span>(<span class="st">&quot;..&quot;</span>, <span class="st">&quot;..&quot;</span>, <span class="st">&quot;DESCRIPTION&quot;</span>)</span>
@@ -1813,8 +1813,8 @@ alongside this package.</p>
 <span id="cb2-39"><a href="#cb2-39" tabindex="-1"></a>          <span class="at">legend.text   =</span> <span class="fu">element_text</span>(<span class="at">size =</span> <span class="dv">12</span>),</span>
 <span id="cb2-40"><a href="#cb2-40" tabindex="-1"></a>          <span class="at">plot.margin   =</span> <span class="fu">margin</span>(<span class="dv">12</span>, <span class="dv">16</span>, <span class="dv">10</span>, <span class="dv">12</span>)))</span>
 <span id="cb2-41"><a href="#cb2-41" tabindex="-1"></a></span>
-<span id="cb2-42"><a href="#cb2-42" tabindex="-1"></a><span class="co"># one colour per companion, shared by every bar figure below. Three figures each carried their</span></span>
-<span id="cb2-43"><a href="#cb2-43" tabindex="-1"></a><span class="co"># own copy and removeBatchEffect was in none of them, so it drew as a grey NA series</span></span>
+<span id="cb2-42"><a href="#cb2-42" tabindex="-1"></a><span class="co"># one color per companion, shared by every bar figure below. Three figures each carried their</span></span>
+<span id="cb2-43"><a href="#cb2-43" tabindex="-1"></a><span class="co"># own copy and removeBatchEffect was in none of them, so it drew as a gray NA series</span></span>
 <span id="cb2-44"><a href="#cb2-44" tabindex="-1"></a>pal_stage <span class="ot">&lt;-</span> <span class="fu">c</span>(<span class="st">&quot;ComBat_seq&quot;</span> <span class="ot">=</span> <span class="st">&quot;#8172B3&quot;</span>,</span>
 <span id="cb2-45"><a href="#cb2-45" tabindex="-1"></a>               <span class="st">&quot;calcNormFactors (TMM)&quot;</span> <span class="ot">=</span> <span class="st">&quot;#4C72B0&quot;</span>,</span>
 <span id="cb2-46"><a href="#cb2-46" tabindex="-1"></a>               <span class="st">&quot;lmFit&quot;</span> <span class="ot">=</span> <span class="st">&quot;#DD8452&quot;</span>,</span>
@@ -1862,7 +1862,7 @@ alongside this package.</p>
 <span id="cb2-88"><a href="#cb2-88" tabindex="-1"></a><span class="co"># The sweep in C.1.a is what chose the backend on the line below, and it did not choose the one</span></span>
 <span id="cb2-89"><a href="#cb2-89" tabindex="-1"></a><span class="co"># the package&#39;s own documentation recommends here. `foreach` degrades as workers are added,</span></span>
 <span id="cb2-90"><a href="#cb2-90" tabindex="-1"></a><span class="co"># rather than merely failing to improve: measured across a 2-to-16 sweep it fell from 1.18x to</span></span>
-<span id="cb2-91"><a href="#cb2-91" tabindex="-1"></a><span class="co"># 0.28x, which at the wide end is three and a half times SLOWER than not parallelising at all.</span></span>
+<span id="cb2-91"><a href="#cb2-91" tabindex="-1"></a><span class="co"># 0.28x, which at the wide end is three and a half times SLOWER than not parallelizing at all.</span></span>
 <span id="cb2-92"><a href="#cb2-92" tabindex="-1"></a></span>
 <span id="cb2-93"><a href="#cb2-93" tabindex="-1"></a><span class="co"># ComBat-seq dispatches up to 2 * n_batch + 4 times per correction, and doParallel&#39;s cluster form sends every task of each dispatch over a socket with its closure and data, while `future` holds one `multisession` set of workers across all of them and shows the ordinary shape instead.</span></span>
 <span id="cb2-98"><a href="#cb2-98" tabindex="-1"></a>win_backends <span class="ot">&lt;-</span> <span class="fu">c</span>(<span class="st">&quot;mclapply&quot;</span>, <span class="st">&quot;BiocParallel&quot;</span>, <span class="st">&quot;future&quot;</span>, <span class="st">&quot;foreach&quot;</span>)</span>
@@ -2032,7 +2032,7 @@ cannot show what ten batches look like in a projection.</p>
 <span id="cb9-43"><a href="#cb9-43" tabindex="-1"></a>b_idio <span class="ot">&lt;-</span> <span class="fu">matrix</span>(<span class="fu">rnorm</span>(G <span class="sc">*</span> n_batch, <span class="dv">0</span>, <span class="fl">0.20</span>), G, n_batch)</span>
 <span id="cb9-44"><a href="#cb9-44" tabindex="-1"></a>b_disp <span class="ot">&lt;-</span> <span class="fu">runif</span>(n_batch, <span class="dv">1</span>, disp_fold)</span>
 <span id="cb9-45"><a href="#cb9-45" tabindex="-1"></a></span>
-<span id="cb9-46"><a href="#cb9-46" tabindex="-1"></a><span class="co"># Continuous patient heterogeneity, three latent programmes. Without it every sample in a cell</span></span>
+<span id="cb9-46"><a href="#cb9-46" tabindex="-1"></a><span class="co"># Continuous patient heterogeneity, three latent programs. Without it every sample in a cell</span></span>
 <span id="cb9-47"><a href="#cb9-47" tabindex="-1"></a><span class="co"># shares one mean vector, the only spread left is sampling noise, and that noise averages away</span></span>
 <span id="cb9-48"><a href="#cb9-48" tabindex="-1"></a><span class="co"># across thousands of genes: batches collapse to points and the condition becomes a straight</span></span>
 <span id="cb9-49"><a href="#cb9-49" tabindex="-1"></a><span class="co"># line once batch is removed.</span></span>
@@ -2108,7 +2108,7 @@ genes are truly differential at 1.8-fold, half up and half down.</p>
 <div class="sourceCode" id="cb10"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb10-1"><a href="#cb10-1" tabindex="-1"></a><span class="co"># scoring helpers, defined before the equivalence checks that use them</span></span>
 <span id="cb10-2"><a href="#cb10-2" tabindex="-1"></a>pc_sim <span class="ot">&lt;-</span> <span class="cf">function</span>(mat) {</span>
 <span id="cb10-3"><a href="#cb10-3" tabindex="-1"></a>  p <span class="ot">&lt;-</span> <span class="fu">prcomp</span>(<span class="fu">t</span>(<span class="fu">cpm</span>(mat, <span class="at">log =</span> <span class="cn">TRUE</span>, <span class="at">prior.count =</span> <span class="dv">1</span>)), <span class="at">scale. =</span> <span class="cn">FALSE</span>)</span>
-<span id="cb10-4"><a href="#cb10-4" tabindex="-1"></a>  <span class="co"># centre and loadings are kept so another matrix can be projected onto this basis, which is</span></span>
+<span id="cb10-4"><a href="#cb10-4" tabindex="-1"></a>  <span class="co"># center and loadings are kept so another matrix can be projected onto this basis, which is</span></span>
 <span id="cb10-5"><a href="#cb10-5" tabindex="-1"></a>  <span class="co"># what makes a component index mean the same thing across two arms</span></span>
 <span id="cb10-6"><a href="#cb10-6" tabindex="-1"></a>  <span class="fu">list</span>(<span class="at">x =</span> p<span class="sc">$</span>x, <span class="at">ve =</span> p<span class="sc">$</span>sdev<span class="sc">^</span><span class="dv">2</span> <span class="sc">/</span> <span class="fu">sum</span>(p<span class="sc">$</span>sdev<span class="sc">^</span><span class="dv">2</span>), <span class="at">center =</span> p<span class="sc">$</span>center, <span class="at">rotation =</span> p<span class="sc">$</span>rotation)</span>
 <span id="cb10-7"><a href="#cb10-7" tabindex="-1"></a>}</span>
@@ -2295,7 +2295,7 @@ compared, not assumed equal because the inputs were.</p>
 <span id="cb22-14"><a href="#cb22-14" tabindex="-1"></a>                      <span class="at">name =</span> <span class="st">&quot;batch&quot;</span>) <span class="sc">+</span></span>
 <span id="cb22-15"><a href="#cb22-15" tabindex="-1"></a>  <span class="fu">guides</span>(<span class="at">colour =</span> <span class="fu">guide_legend</span>(<span class="at">override.aes =</span> <span class="fu">list</span>(<span class="at">size =</span> <span class="dv">3</span>, <span class="at">alpha =</span> <span class="dv">1</span>), <span class="at">ncol =</span> <span class="dv">1</span>)) <span class="sc">+</span></span>
 <span id="cb22-16"><a href="#cb22-16" tabindex="-1"></a>  <span class="fu">facet_wrap</span>(<span class="sc">~</span> arm, <span class="at">nrow =</span> <span class="dv">1</span>, <span class="at">scales =</span> <span class="st">&quot;free&quot;</span>, <span class="at">labeller =</span> <span class="fu">labeller</span>(<span class="at">arm =</span> sim_lab)) <span class="sc">+</span></span>
-<span id="cb22-17"><a href="#cb22-17" tabindex="-1"></a>  <span class="fu">labs</span>(<span class="at">title =</span> <span class="st">&quot;Simulated counts, coloured by batch&quot;</span>,</span>
+<span id="cb22-17"><a href="#cb22-17" tabindex="-1"></a>  <span class="fu">labs</span>(<span class="at">title =</span> <span class="st">&quot;Simulated counts, colored by batch&quot;</span>,</span>
 <span id="cb22-18"><a href="#cb22-18" tabindex="-1"></a>       <span class="at">subtitle =</span> <span class="fu">sprintf</span>(<span class="st">&quot;%s genes, %s patients, %d batches. Ten clouds become one.&quot;</span>,</span>
 <span id="cb22-19"><a href="#cb22-19" tabindex="-1"></a>                           <span class="fu">format</span>(G, <span class="at">big.mark =</span> <span class="st">&quot;,&quot;</span>), <span class="fu">format</span>(<span class="fu">ncol</span>(sim), <span class="at">big.mark =</span> <span class="st">&quot;,&quot;</span>),</span>
 <span id="cb22-20"><a href="#cb22-20" tabindex="-1"></a>                           <span class="fu">nlevels</span>(batch)),</span>
@@ -2389,7 +2389,7 @@ and that is the claim this report exists to support.</p>
 <div class="sourceCode" id="cb25"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb25-1"><a href="#cb25-1" tabindex="-1"></a>sim_file <span class="ot">&lt;-</span> <span class="fu">file.path</span>(<span class="fu">tempdir</span>(), <span class="st">&quot;sim-bench.rds&quot;</span>)</span>
 <span id="cb25-2"><a href="#cb25-2" tabindex="-1"></a><span class="fu">saveRDS</span>(<span class="fu">list</span>(<span class="at">counts =</span> sim, <span class="at">batch =</span> batch, <span class="at">group =</span> group, <span class="at">ref =</span> sim_ref), sim_file)</span>
 <span id="cb25-3"><a href="#cb25-3" tabindex="-1"></a></span>
-<span id="cb25-4"><a href="#cb25-4" tabindex="-1"></a><span class="co"># The two that cannot parallelise here are run once, at the top worker count. Sweeping them</span></span>
+<span id="cb25-4"><a href="#cb25-4" tabindex="-1"></a><span class="co"># The two that cannot parallelize here are run once, at the top worker count. Sweeping them</span></span>
 <span id="cb25-5"><a href="#cb25-5" tabindex="-1"></a><span class="co"># would time the same serial call four times over.</span></span>
 <span id="cb25-6"><a href="#cb25-6" tabindex="-1"></a>serial_here <span class="ot">&lt;-</span> <span class="fu">c</span>(<span class="st">&quot;mclapply&quot;</span>, <span class="st">&quot;BiocParallel&quot;</span>)</span>
 <span id="cb25-7"><a href="#cb25-7" tabindex="-1"></a>sim_grid <span class="ot">&lt;-</span> <span class="fu">rbind</span>(</span>
@@ -3051,7 +3051,7 @@ per-project files.</p>
 <span id="cb36-12"><a href="#cb36-12" tabindex="-1"></a>                <span class="at">directory =</span> <span class="fu">file.path</span>(data_dir, <span class="st">&quot;GDCdata&quot;</span>))</span>
 <span id="cb36-13"><a href="#cb36-13" tabindex="-1"></a>    se  <span class="ot">&lt;-</span> <span class="fu">GDCprepare</span>(q, <span class="at">directory =</span> <span class="fu">file.path</span>(data_dir, <span class="st">&quot;GDCdata&quot;</span>), <span class="at">summarizedExperiment =</span> <span class="cn">TRUE</span>)</span>
 <span id="cb36-14"><a href="#cb36-14" tabindex="-1"></a>    bc  <span class="ot">&lt;-</span> <span class="fu">colnames</span>(se)</span>
-<span id="cb36-15"><a href="#cb36-15" tabindex="-1"></a>    idx <span class="ot">&lt;-</span> <span class="fu">which</span>(<span class="fu">substr</span>(bc, <span class="dv">14</span>, <span class="dv">15</span>) <span class="sc">==</span> <span class="st">&quot;01&quot;</span>)          <span class="co"># primary tumour</span></span>
+<span id="cb36-15"><a href="#cb36-15" tabindex="-1"></a>    idx <span class="ot">&lt;-</span> <span class="fu">which</span>(<span class="fu">substr</span>(bc, <span class="dv">14</span>, <span class="dv">15</span>) <span class="sc">==</span> <span class="st">&quot;01&quot;</span>)          <span class="co"># primary tumor</span></span>
 <span id="cb36-16"><a href="#cb36-16" tabindex="-1"></a>    idx <span class="ot">&lt;-</span> idx[<span class="fu">order</span>(bc[idx])]                        <span class="co"># deterministic aliquot choice</span></span>
 <span id="cb36-17"><a href="#cb36-17" tabindex="-1"></a>    idx <span class="ot">&lt;-</span> idx[<span class="sc">!</span><span class="fu">duplicated</span>(<span class="fu">substr</span>(bc[idx], <span class="dv">1</span>, <span class="dv">12</span>))]   <span class="co"># one per patient</span></span>
 <span id="cb36-18"><a href="#cb36-18" tabindex="-1"></a>    pc  <span class="ot">&lt;-</span> <span class="fu">rowData</span>(se)<span class="sc">$</span>gene_type <span class="sc">==</span> <span class="st">&quot;protein_coding&quot;</span></span>
@@ -3952,7 +3952,7 @@ is kept for the figures below.</p>
 <span id="cb54-15"><a href="#cb54-15" tabindex="-1"></a>  <span class="fu">scale_colour_brewer</span>(<span class="at">palette =</span> <span class="st">&quot;Paired&quot;</span>, <span class="at">name =</span> <span class="st">&quot;cancer type&quot;</span>) <span class="sc">+</span></span>
 <span id="cb54-16"><a href="#cb54-16" tabindex="-1"></a>  <span class="fu">guides</span>(<span class="at">colour =</span> <span class="fu">guide_legend</span>(<span class="at">override.aes =</span> <span class="fu">list</span>(<span class="at">size =</span> <span class="fl">3.4</span>, <span class="at">alpha =</span> <span class="dv">1</span>), <span class="at">ncol =</span> <span class="dv">1</span>)) <span class="sc">+</span></span>
 <span id="cb54-17"><a href="#cb54-17" tabindex="-1"></a>  <span class="fu">facet_wrap</span>(<span class="sc">~</span> arm, <span class="at">nrow =</span> <span class="dv">1</span>, <span class="at">scales =</span> <span class="st">&quot;free&quot;</span>, <span class="at">labeller =</span> <span class="fu">labeller</span>(<span class="at">arm =</span> arm_lab)) <span class="sc">+</span></span>
-<span id="cb54-18"><a href="#cb54-18" tabindex="-1"></a>  <span class="fu">labs</span>(<span class="at">title =</span> <span class="st">&quot;Principal components, coloured by cancer type&quot;</span>,</span>
+<span id="cb54-18"><a href="#cb54-18" tabindex="-1"></a>  <span class="fu">labs</span>(<span class="at">title =</span> <span class="st">&quot;Principal components, colored by cancer type&quot;</span>,</span>
 <span id="cb54-19"><a href="#cb54-19" tabindex="-1"></a>       <span class="at">subtitle =</span> <span class="fu">sprintf</span>(<span class="st">&quot;%s samples, %d cancer types, %d plates. Right two panels: same numbers, two ways.&quot;</span>,</span>
 <span id="cb54-20"><a href="#cb54-20" tabindex="-1"></a>                           <span class="fu">format</span>(<span class="fu">ncol</span>(counts), <span class="at">big.mark =</span> <span class="st">&quot;,&quot;</span>), <span class="fu">nlevels</span>(cancer), <span class="fu">nlevels</span>(plate)),</span>
 <span id="cb54-21"><a href="#cb54-21" tabindex="-1"></a>       <span class="at">x =</span> <span class="st">&quot;PC1&quot;</span>, <span class="at">y =</span> <span class="st">&quot;PC2&quot;</span>)</span></code></pre></div>
@@ -4118,7 +4118,7 @@ is kept for the figures below.</p>
 </tbody>
 </table>
 </div>
-<div class="sourceCode" id="cb56"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb56-1"><a href="#cb56-1" tabindex="-1"></a><span class="co"># the ten most displaced plates in colour, every other plate grey behind them</span></span>
+<div class="sourceCode" id="cb56"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb56-1"><a href="#cb56-1" tabindex="-1"></a><span class="co"># the ten most displaced plates in color, every other plate gray behind them</span></span>
 <span id="cb56-2"><a href="#cb56-2" tabindex="-1"></a>hl <span class="ot">&lt;-</span> <span class="fu">factor</span>(<span class="fu">ifelse</span>(plate <span class="sc">%in%</span> worst, <span class="fu">as.character</span>(plate), <span class="st">&quot;other plates&quot;</span>),</span>
 <span id="cb56-3"><a href="#cb56-3" tabindex="-1"></a>             <span class="at">levels =</span> <span class="fu">c</span>(worst, <span class="st">&quot;other plates&quot;</span>))</span>
 <span id="cb56-4"><a href="#cb56-4" tabindex="-1"></a></span>
@@ -4242,7 +4242,7 @@ the size of that confounding is visible rather than asserted.</p>
 </table>
 </div>
 <p>Genes called by the unadjusted model alone are the cost of ignoring
-cancer type. Smoking is not randomised across these cohorts, so an
+cancer type. Smoking is not randomized across these cohorts, so an
 unadjusted contrast partly measures which cancers the smokers have.</p>
 <div class="sourceCode" id="cb59"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb59-1"><a href="#cb59-1" tabindex="-1"></a><span class="fu">stopifnot</span>(<span class="fu">identical</span>(tt_ref<span class="sc">$</span>logFC, tt_par<span class="sc">$</span>logFC),</span>
 <span id="cb59-2"><a href="#cb59-2" tabindex="-1"></a>          <span class="fu">identical</span>(tt_ref<span class="sc">$</span>t, tt_par<span class="sc">$</span>t),</span>
@@ -4344,8 +4344,8 @@ unadjusted contrast partly measures which cancers the smokers have.</p>
 <span id="cb62-15"><a href="#cb62-15" tabindex="-1"></a>top_lab <span class="ot">&lt;-</span> <span class="fu">lab_of</span>(top_g)</span>
 <span id="cb62-16"><a href="#cb62-16" tabindex="-1"></a>hm_fontsize <span class="ot">&lt;-</span> <span class="fu">max</span>(<span class="fl">4.5</span>, <span class="fu">min</span>(<span class="dv">9</span>, <span class="dv">633</span> <span class="sc">/</span> top_n))   <span class="co"># 633pt of panel once annotations are drawn</span></span>
 <span id="cb62-17"><a href="#cb62-17" tabindex="-1"></a></span>
-<span id="cb62-18"><a href="#cb62-18" tabindex="-1"></a><span class="co"># Scaled before plotting: each gene is centred and divided by its own standard deviation across</span></span>
-<span id="cb62-19"><a href="#cb62-19" tabindex="-1"></a><span class="co"># the displayed samples, so the colour reads as contrast rather than expression level.</span></span>
+<span id="cb62-18"><a href="#cb62-18" tabindex="-1"></a><span class="co"># Scaled before plotting: each gene is centered and divided by its own standard deviation across</span></span>
+<span id="cb62-19"><a href="#cb62-19" tabindex="-1"></a><span class="co"># the displayed samples, so the color reads as contrast rather than expression level.</span></span>
 <span id="cb62-20"><a href="#cb62-20" tabindex="-1"></a><span class="co"># ComplexHeatmap does no scaling of its own, so this is the only place it happens.</span></span>
 <span id="cb62-21"><a href="#cb62-21" tabindex="-1"></a>zmat <span class="ot">&lt;-</span> <span class="cf">function</span>(mat) {</span>
 <span id="cb62-22"><a href="#cb62-22" tabindex="-1"></a>  <span class="co"># library sizes must come from the whole matrix; deriving them from the displayed genes shifts</span></span>
@@ -4378,7 +4378,7 @@ unadjusted contrast partly measures which cancers the smokers have.</p>
 <span id="cb62-49"><a href="#cb62-49" tabindex="-1"></a>  <span class="at">annotation_legend_param =</span> <span class="fu">list</span>(<span class="at">Direction =</span> <span class="fu">list</span>(<span class="at">title_gp =</span> <span class="fu">gpar</span>(<span class="at">fontsize =</span> <span class="dv">12</span>, <span class="at">fontface =</span> <span class="st">&quot;bold&quot;</span>),</span>
 <span id="cb62-50"><a href="#cb62-50" tabindex="-1"></a>                                                  <span class="at">labels_gp =</span> <span class="fu">gpar</span>(<span class="at">fontsize =</span> <span class="dv">11</span>))))</span>
 <span id="cb62-51"><a href="#cb62-51" tabindex="-1"></a></span>
-<span id="cb62-52"><a href="#cb62-52" tabindex="-1"></a><span class="co"># the annotation name is drawn into the neighbouring heatmap and clipped, so only the</span></span>
+<span id="cb62-52"><a href="#cb62-52" tabindex="-1"></a><span class="co"># the annotation name is drawn into the neighboring heatmap and clipped, so only the</span></span>
 <span id="cb62-53"><a href="#cb62-53" tabindex="-1"></a><span class="co"># right-hand panel carries it</span></span>
 <span id="cb62-54"><a href="#cb62-54" tabindex="-1"></a>mk_ann <span class="ot">&lt;-</span> <span class="cf">function</span>(show_name) <span class="fu">HeatmapAnnotation</span>(</span>
 <span id="cb62-55"><a href="#cb62-55" tabindex="-1"></a>  <span class="at">Smoking =</span> smoking[hm_keep],</span>
@@ -4791,7 +4791,7 @@ rather than read once.</p>
 <div class="sourceCode" id="cb71"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb71-1"><a href="#cb71-1" tabindex="-1"></a><span class="fu">stopifnot</span>(dc_same)</span></code></pre></div>
 </div>
 <div id="c.-what-is-deliberately-not-parallelised" class="section level3">
-<h3>c. What is deliberately not parallelised</h3>
+<h3>c. What is deliberately not parallelized</h3>
 <p>Not everything survives the exactness bar, and the list of rejections
 is as much a part of this package as the list of companions.
 <code>voom</code> measured 0.99x, because its <code>lowess</code> trend
@@ -4994,7 +4994,7 @@ every worker is a fresh R process that has to be handed its data over a
 socket before it can start. That cost is paid per chunk and does not
 shrink as workers are added, which is why this curve flattens earlier
 than the fork curves in the macOS and Linux reports, and can turn over
-entirely. A row below 1.00x means serialising the input cost more than
+entirely. A row below 1.00x means serializing the input cost more than
 the work it saved. It does not mean the companion misbehaved: the
 identity checks above passed on these same arms.</p>
 <p>Method as in C.2: <code>calcNormFactors</code> and <code>lmFit</code>

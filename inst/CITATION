@@ -93,10 +93,10 @@ bibentry(
   author   = person("Nam", "Nguyen"),
   year     = "2026",
   note     = paste("R package version", meta$Version),
-  url      = "https://github.com/GenomeRx/RNA-Parallel",
+  url      = "https://github.com/NamStacks/RNA-Parallel",
   textVersion = paste(
     "Nguyen N (2026). rnaparallel: Exact Parallel Companions for sva ComBat-Seq, edgeR and limma.",
     paste0("R package version ", meta$Version, "."),
-    "https://github.com/GenomeRx/RNA-Parallel"
+    "https://github.com/NamStacks/RNA-Parallel"
   )
 )
